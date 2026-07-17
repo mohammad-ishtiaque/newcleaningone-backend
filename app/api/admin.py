@@ -25,7 +25,7 @@ def require_admin(current_user: UserInDB = Depends(get_current_user)) -> UserInD
 
 @router.get("/me", response_model=AdminProfileResponse)
 async def get_my_admin_profile(current_user: UserInDB = Depends(require_admin)):
-    return AdminProfileResponse(**current_user.model_dump(by_alias=True))
+    return AdminProfileResponse(**current_user.model_dump())
 
 @router.patch("/me", response_model=AdminProfileResponse)
 async def update_my_admin_profile(
@@ -38,7 +38,7 @@ async def update_my_admin_profile(
         setattr(current_user, key, value)
         
     await user_repo.update(current_user)
-    return AdminProfileResponse(**current_user.model_dump(by_alias=True))
+    return AdminProfileResponse(**current_user.model_dump())
 
 # ================================
 # CRUD for Admins (SuperAdmin only)
@@ -78,7 +78,7 @@ async def get_admin(admin_id: str, user_repo: UserRepository = Depends(UserRepos
     user = await user_repo.get_by_id(admin_id)
     if not user or user.role != RoleEnum.admin:
         raise HTTPException(status_code=404, detail="Admin not found")
-    return AdminProfileResponse(**user.model_dump(by_alias=True))
+    return AdminProfileResponse(**user.model_dump())
 
 @router.patch(
     "/users/{admin_id}", 
@@ -99,7 +99,7 @@ async def update_admin(
         setattr(user, key, value)
         
     await user_repo.update(user)
-    return AdminProfileResponse(**user.model_dump(by_alias=True))
+    return AdminProfileResponse(**user.model_dump())
 
 @router.delete(
     "/users/{admin_id}", 

@@ -105,7 +105,7 @@ async def get_worker_profile(current_user: UserInDB = Depends(require_worker)):
     return await _build_worker_response(current_user)
 
 async def _build_worker_response(user: UserInDB) -> WorkerProfileResponse:
-    user_data = user.model_dump(by_alias=True)
+    user_data = user.model_dump()
     user_data["id_uploaded"] = bool(user.id_card_front and user.id_card_back)
     user_data["id_card_front_link"] = user.id_card_front
     user_data["id_card_back_link"] = user.id_card_back

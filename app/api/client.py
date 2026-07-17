@@ -26,7 +26,7 @@ async def signup_client(
 
 @router.get("/", response_model=ClientProfileResponse)
 async def get_client_profile(current_user: UserInDB = Depends(require_client)):
-    return ClientProfileResponse(**current_user.model_dump(by_alias=True))
+    return ClientProfileResponse(**current_user.model_dump())
 
 @router.patch("/", response_model=ClientProfileResponse)
 async def update_client_profile(
@@ -39,4 +39,4 @@ async def update_client_profile(
         setattr(current_user, key, value)
         
     await user_repo.update(current_user)
-    return ClientProfileResponse(**current_user.model_dump(by_alias=True))
+    return ClientProfileResponse(**current_user.model_dump())

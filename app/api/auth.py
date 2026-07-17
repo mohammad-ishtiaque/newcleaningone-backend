@@ -75,7 +75,7 @@ async def logout(
 
 @router.get("/me")
 async def get_me(current_user: UserInDB = Depends(get_current_user)) -> Any:
-    user_data = current_user.model_dump(by_alias=True)
+    user_data = current_user.model_dump()
     if current_user.role == RoleEnum.worker:
         user_data["id_uploaded"] = bool(current_user.id_card_front and current_user.id_card_back)
         user_data["id_card_front_link"] = current_user.id_card_front

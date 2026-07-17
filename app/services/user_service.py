@@ -29,7 +29,7 @@ class UserService:
         )
         
         created_user = await self.user_repo.create(new_user)
-        return UserResponse(**created_user.model_dump(by_alias=True))
+        return UserResponse(**created_user.model_dump())
 
     async def signup_worker(self, user_in: WorkerSignup) -> UserResponse:
         existing_user = await self.user_repo.get_by_email(user_in.email)
@@ -53,7 +53,7 @@ class UserService:
         )
         
         created_user = await self.user_repo.create(new_user)
-        return UserResponse(**created_user.model_dump(by_alias=True))
+        return UserResponse(**created_user.model_dump())
 
     async def signup_client(self, user_in: ClientSignup) -> UserResponse:
         existing_user = await self.user_repo.get_by_email(user_in.email)
@@ -76,7 +76,7 @@ class UserService:
         )
         
         created_user = await self.user_repo.create(new_user)
-        return UserResponse(**created_user.model_dump(by_alias=True))
+        return UserResponse(**created_user.model_dump())
 
     async def create_admin(self, user_in: AdminCreate) -> UserResponse:
         return await self._create_user(user_in, RoleEnum.admin)
