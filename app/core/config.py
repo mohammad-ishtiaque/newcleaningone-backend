@@ -23,16 +23,19 @@ class Settings(BaseSettings):
     AWS_ACCESS_KEY_ID: Optional[str] = None
     AWS_SECRET_ACCESS_KEY: Optional[str] = None
     AWS_REGION: Optional[str] = None
-    AWS_S3_BUCKET: Optional[str] = None
+    AWS_S3_BUCKET_NAME: Optional[str] = None
 
     # OneSignal Config
     ONESIGNAL_APP_ID: Optional[str] = None
     ONESIGNAL_REST_API_KEY: Optional[str] = None
 
+    # FAQ
+    FAQ_SHEET_LINK: Optional[str] = None
+
     # Server Config
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()

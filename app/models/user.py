@@ -44,6 +44,10 @@ class UserInDB(BaseModel):
     dob: Optional[str] = None # Or date, but str is easier for JSON serialization sometimes
     nationality: Optional[str] = None
     worker_type: Optional[WorkerTypeEnum] = None
+    location: Optional[str] = None
+    
+    # Draft storage for onboarding
+    onboarding_draft: dict = Field(default_factory=dict)
     
     # Worker Onboarding Flags
     onboarding_complete1: bool = False
@@ -57,6 +61,10 @@ class UserInDB(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_login: Optional[datetime] = None
+    
+    # Push Notifications
+    push_notifications_enabled: bool = True
+    onesignal_player_id: Optional[str] = None
 
     class Config:
         populate_by_name = True

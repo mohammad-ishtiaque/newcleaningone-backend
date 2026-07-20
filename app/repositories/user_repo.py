@@ -5,8 +5,11 @@ from app.models.user import UserInDB
 
 class UserRepository:
     def __init__(self):
-        self.db = get_database()
-        self.collection = self.db["users"]
+        pass
+
+    @property
+    def collection(self):
+        return get_database()["users"]
 
     async def get_by_email(self, email: str) -> Optional[UserInDB]:
         user_doc = await self.collection.find_one({"email": email})
@@ -39,3 +42,14 @@ class UserRepository:
             {"$set": user_dict}
         )
         return user
+
+    async def get_next_employee_sequence(self) -> int:
+        from pymongo import ReturnDocument
+        db = get_database()
+        result = await db["counters"].find_one_and_update(
+            {"_id": "employee_id"},
+            {"$inc": {"seq": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER
+        )
+        return result["seq"]

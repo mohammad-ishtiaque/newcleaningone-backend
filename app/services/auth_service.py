@@ -30,8 +30,17 @@ class AuthService:
                 detail="Inactive user"
             )
             
-        # Update last login
+        if not user.is_verified:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Email not verified. Please verify your email to login."
+            )
+            
+        # Update last login and device token
         user.last_login = datetime.now(timezone.utc)
+        if login_data.onesignal_player_id:
+            user.onesignal_player_id = login_data.onesignal_player_id
+            
         await self.user_repo.update(user)
         
         # If remember me is set, we could theoretically extend the token lifetime, 
@@ -74,20 +83,31 @@ class AuthService:
         await EmailService.send_email(user.email, subject, f"Your OTP code is {otp}. It expires in 15 minutes.")
         return {"message": "OTP sent to email"}
 
-    async def verify_email(self, request: VerifyEmailRequest):
+    async def verify_email(self, request: VerifyEmailRequest) -> Token:
         user = await self.user_repo.get_by_email(request.email)
         if not user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
             
-        if not user.otp_code or user.otp_code != request.otp or user.otp_expires_at < datetime.now(timezone.utc):
+        expires_at = user.otp_expires_at
+        if expires_at and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+            
+        if not user.otp_code or user.otp_code != request.otp_code or not expires_at or expires_at < datetime.now(timezone.utc):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired OTP")
             
         user.is_verified = True
         user.otp_code = None
         user.otp_expires_at = None
+        user.last_login = datetime.now(timezone.utc)
+        if request.onesignal_player_id:
+            user.onesignal_player_id = request.onesignal_player_id
+            
         await self.user_repo.update(user)
         
-        return {"message": "Email verified successfully"}
+        access_token = create_access_token(subject=user.id)
+        refresh_token = create_refresh_token(subject=user.id)
+        
+        return Token(access_token=access_token, refresh_token=refresh_token, token_type="bearer")
 
     async def resend_otp(self, request: ResendOTPRequest):
         return await self.generate_and_send_otp(request.email, "Resend: Your Verification OTP")
@@ -100,7 +120,11 @@ class AuthService:
         if not user:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
             
-        if not user.otp_code or user.otp_code != request.otp or user.otp_expires_at < datetime.now(timezone.utc):
+        expires_at = user.otp_expires_at
+        if expires_at and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+            
+        if not user.otp_code or user.otp_code != request.otp_code or not expires_at or expires_at < datetime.now(timezone.utc):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired OTP")
             
         user.hashed_password = get_password_hash(request.new_password)

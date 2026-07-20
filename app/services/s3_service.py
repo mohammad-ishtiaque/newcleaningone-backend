@@ -11,14 +11,19 @@ class S3Service:
             aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
             region_name=settings.AWS_REGION
         )
-        self.bucket_name = settings.AWS_S3_BUCKET
+        self.bucket_name = settings.AWS_S3_BUCKET_NAME
 
     async def upload_file(self, file_bytes: bytes, file_name: str, content_type: str = "image/jpeg") -> Optional[str]:
+        # Clean the file name and make it unique
+        unique_name = f"{uuid.uuid4()}_{file_name.replace(' ', '_')}"
+        
         if not self.bucket_name or not settings.AWS_ACCESS_KEY_ID:
-            print(f"Mock S3 Upload: {file_name}")
-            return f"https://mock-s3-url.com/{file_name}"
-            
-        unique_name = f"{uuid.uuid4()}_{file_name}"
+            os.makedirs("uploads", exist_ok=True)
+            file_path = os.path.join("uploads", unique_name)
+            with open(file_path, "wb") as f:
+                f.write(file_bytes)
+            print(f"Saved locally as S3 is not configured: {file_path}")
+            return f"http://127.0.0.1:8080/uploads/{unique_name}"
         
         try:
             async with self.session.client("s3") as s3:
@@ -26,8 +31,7 @@ class S3Service:
                     Bucket=self.bucket_name,
                     Key=unique_name,
                     Body=file_bytes,
-                    ContentType=content_type,
-                    ACL="public-read"
+                    ContentType=content_type
                 )
                 
             region = settings.AWS_REGION or "us-east-1"

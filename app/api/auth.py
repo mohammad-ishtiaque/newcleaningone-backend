@@ -9,6 +9,7 @@ from app.schemas.token import Token, RefreshTokenRequest
 from app.services.auth_service import AuthService
 from app.repositories.user_repo import UserRepository
 from app.dependencies.auth import get_current_user
+from app.dependencies.rate_limit import rate_limit_verify_email
 from app.models.user import UserInDB, RoleEnum
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -23,7 +24,7 @@ async def login(
 ):
     return await auth_service.login(login_data)
 
-@router.post("/verify-email")
+@router.post("/verify-email", response_model=Token, dependencies=[Depends(rate_limit_verify_email)])
 async def verify_email(
     request: VerifyEmailRequest,
     auth_service: AuthService = Depends(get_auth_service)
