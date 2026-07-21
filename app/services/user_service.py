@@ -26,6 +26,8 @@ class UserService:
             phone=user_in.phone,
             hashed_password=hashed_password,
             role=role,
+            is_active=True,
+            is_verified=True,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc)
         )

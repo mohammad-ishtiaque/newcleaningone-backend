@@ -3,21 +3,13 @@ from typing import Optional
 from datetime import datetime, timezone
 from bson import ObjectId
 
-class SupportMessageDB(BaseModel):
+class FAQDB(BaseModel):
     id: Optional[str] = Field(alias="_id", default=None)
-    worker_id: str
-    worker_name: Optional[str] = None
-    worker_email: Optional[str] = None
-    subject: str
-    description: str
-    admin_reply: Optional[str] = None
-    status: str = "pending" # pending, in_progress, resolved
-    is_resolved: bool = False
-    is_read_by_admin: bool = False
-    is_read_by_worker: bool = True
+    serial_no: int
+    question: str
+    answer: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    replied_at: Optional[datetime] = None
 
     class Config:
         populate_by_name = True

@@ -8,6 +8,7 @@ from app.schemas.token import Token, RefreshTokenRequest
 from app.security.password import verify_password, get_password_hash
 from app.security.jwt import create_access_token, create_refresh_token, verify_refresh_token
 from app.services.email_service import EmailService
+from app.core.config import settings
 
 class AuthService:
     def __init__(self, user_repo: UserRepository):
@@ -43,11 +44,14 @@ class AuthService:
             
         await self.user_repo.update(user)
         
-        # If remember me is set, we could theoretically extend the token lifetime, 
-        # but we'll stick to the default configured expiration for simplicity or adjust it here.
+        # Adjust refresh token lifetime based on remember_me flag
+        if login_data.remember_me:
+            refresh_expires = timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+        else:
+            refresh_expires = timedelta(days=1)
         
         access_token = create_access_token(subject=user.id)
-        refresh_token = create_refresh_token(subject=user.id)
+        refresh_token = create_refresh_token(subject=user.id, expires_delta=refresh_expires)
         
         return Token(access_token=access_token, refresh_token=refresh_token, token_type="bearer")
         

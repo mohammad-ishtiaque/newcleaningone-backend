@@ -54,7 +54,9 @@ async def main():
     try:
         await create_super_admin(email, password, full_name)
     finally:
-        client.close()
+        from app.core import database
+        if database.client:
+            database.client.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

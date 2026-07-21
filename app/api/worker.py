@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, status, HTTPException, UploadFile, File,
 from typing import List, Optional
 from datetime import date, datetime
 from app.schemas.user import WorkerSignup, UserResponse, WorkerOnboardingStep1, WorkerProfileResponse, WorkerDraftResponse, SignupResponse, WorkerProfileEdit, PushSettingsUpdate, PushSettingsResponse, WorkerPersonalInformation
-from app.schemas.help import SupportMessageRequest, FAQListResponse, FAQDetailResponse, LegalDocumentResponse
+from app.schemas.help import SupportMessageRequest, FAQListResponse, FAQDetailResponse, LegalDocumentResponse, SupportMessageResponse, WorkerSupportListResponse
 from app.models.support import SupportMessageDB
 from app.services.user_service import UserService
 from app.repositories.user_repo import UserRepository
@@ -11,6 +11,8 @@ from app.dependencies.auth import get_current_user
 from app.models.user import UserInDB, RoleEnum, WorkerTypeEnum
 from app.services.s3_service import S3Service
 from app.api.profile import process_image
+from app.schemas.notification import NotificationListResponse
+from app.services.notification_service import NotificationService
 from app.services.faq_service import FAQService
 
 router = APIRouter(prefix="/worker", tags=["Worker Profile"])
@@ -303,7 +305,7 @@ async def get_faq_detail(
         raise HTTPException(status_code=404, detail="FAQ not found")
     return faq
 
-@router.post("/help/message")
+@router.post("/help/message", response_model=SupportMessageResponse, status_code=status.HTTP_201_CREATED)
 async def send_support_message(
     message: SupportMessageRequest,
     current_user: UserInDB = Depends(require_worker)
@@ -311,17 +313,65 @@ async def send_support_message(
     from app.core.database import get_database
     db = get_database()
     
-    # Save the message to MongoDB for the Admin Dashboard to read later
     support_msg = SupportMessageDB(
         worker_id=current_user.id,
+        worker_name=current_user.full_name,
+        worker_email=current_user.email,
         subject=message.subject,
-        description=message.description
+        description=message.description,
+        status="pending",
+        is_resolved=False,
+        is_read_by_admin=False,
+        is_read_by_worker=True
     )
-    await db["support_messages"].insert_one(
-        support_msg.model_dump(by_alias=True, exclude={"id"})
-    )
+    doc = support_msg.model_dump(by_alias=True, exclude={"id"})
+    res = await db["support_messages"].insert_one(doc)
+    doc["_id"] = str(res.inserted_id)
+    return SupportMessageResponse(**doc)
+
+@router.get("/help/messages", response_model=WorkerSupportListResponse)
+async def get_my_support_messages(
+    current_user: UserInDB = Depends(require_worker)
+):
+    from app.core.database import get_database
+    db = get_database()
     
-    return {"message": "Your support request has been submitted successfully."}
+    cursor = db["support_messages"].find({"worker_id": current_user.id}).sort("created_at", -1)
+    messages = []
+    async for doc in cursor:
+        doc["_id"] = str(doc["_id"])
+        messages.append(SupportMessageResponse(**doc))
+        
+    return WorkerSupportListResponse(
+        total_count=len(messages),
+        messages=messages
+    )
+
+@router.get("/help/messages/{message_id}", response_model=SupportMessageResponse)
+async def get_my_support_message_detail(
+    message_id: str,
+    current_user: UserInDB = Depends(require_worker)
+):
+    from app.core.database import get_database
+    from bson import ObjectId
+    db = get_database()
+    
+    if not ObjectId.is_valid(message_id):
+        raise HTTPException(status_code=400, detail="Invalid message ID")
+        
+    doc = await db["support_messages"].find_one({"_id": ObjectId(message_id), "worker_id": current_user.id})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Support message not found")
+        
+    if not doc.get("is_read_by_worker", False):
+        await db["support_messages"].update_one(
+            {"_id": ObjectId(message_id)},
+            {"$set": {"is_read_by_worker": True}}
+        )
+        doc["is_read_by_worker"] = True
+        
+    doc["_id"] = str(doc["_id"])
+    return SupportMessageResponse(**doc)
 
 @router.get("/privacy-policy", response_model=LegalDocumentResponse)
 async def get_privacy_policy():
@@ -356,6 +406,37 @@ async def get_terms_and_conditions():
         content="Our Terms & Conditions are currently being drafted and will be updated soon.",
         updated_at=datetime.now().isoformat()
     )
+
+@router.get("/notifications", response_model=NotificationListResponse)
+async def get_worker_notifications(
+    page: int = 1,
+    limit: int = 10,
+    current_user: UserInDB = Depends(require_worker)
+):
+    service = NotificationService()
+    return await service.get_user_notifications(user_id=current_user.id, recipient_type="worker", page=page, limit=limit)
+
+@router.patch("/notifications/{notification_id}/read")
+async def mark_worker_notification_read(
+    notification_id: str,
+    current_user: UserInDB = Depends(require_worker)
+):
+    service = NotificationService()
+    success = await service.mark_notification_as_read(notification_id=notification_id, user_id=current_user.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"message": "Notification marked as read"}
+
+@router.delete("/notifications/{notification_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_worker_notification(
+    notification_id: str,
+    current_user: UserInDB = Depends(require_worker)
+):
+    service = NotificationService()
+    success = await service.delete_user_notification(notification_id=notification_id, user_id=current_user.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return None
 
 async def _build_worker_response(user: UserInDB) -> WorkerProfileResponse:
     user_data = user.model_dump()
