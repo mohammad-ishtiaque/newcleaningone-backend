@@ -427,7 +427,7 @@ async def mark_worker_notification_read(
         raise HTTPException(status_code=404, detail="Notification not found")
     return {"message": "Notification marked as read"}
 
-@router.delete("/notifications/{notification_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/notifications/{notification_id}")
 async def delete_worker_notification(
     notification_id: str,
     current_user: UserInDB = Depends(require_worker)
@@ -436,7 +436,7 @@ async def delete_worker_notification(
     success = await service.delete_user_notification(notification_id=notification_id, user_id=current_user.id)
     if not success:
         raise HTTPException(status_code=404, detail="Notification not found")
-    return None
+    return {"message": "Notification deleted successfully"}
 
 async def _build_worker_response(user: UserInDB) -> WorkerProfileResponse:
     user_data = user.model_dump()
