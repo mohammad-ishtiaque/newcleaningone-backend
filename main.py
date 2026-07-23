@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.api import auth, worker, client, admin, profile
+from app.api import auth, worker, client, admin, profile, worker_shifts, admin_shift_monitoring, admin_dashboard
 import uvicorn
 import os
 
@@ -40,6 +40,11 @@ app.include_router(admin.client_mgmt_router)
 app.include_router(admin.location_mgmt_router)
 app.include_router(admin.room_mgmt_router)
 app.include_router(admin.cleaning_plan_mgmt_router)
+app.include_router(admin.worker_mgmt_router)
+app.include_router(admin.shift_mgmt_router)
+app.include_router(worker_shifts.worker_shift_router)
+app.include_router(admin_shift_monitoring.shift_monitoring_router)
+app.include_router(admin_dashboard.admin_dashboard_router)
 app.include_router(profile.router)
 
 # Ensure uploads directory exists

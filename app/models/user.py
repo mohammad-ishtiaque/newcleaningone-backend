@@ -13,6 +13,8 @@ class WorkerTypeEnum(str, Enum):
     full_time = "full_time"
     part_time = "part_time"
     contractor = "contractor"
+    freelancer = "freelancer"
+    employee = "employee"
 
 class UserInDB(BaseModel):
     id: Optional[str] = Field(default=None, alias="_id")
@@ -24,6 +26,12 @@ class UserInDB(BaseModel):
     is_active: bool = True
     is_verified: bool = False
     
+    # Worker Approval & Origin Flags
+    is_admin_created: bool = False
+    is_approved: bool = True
+    approval_status: str = "approved"  # approved, pending, rejected
+    rejection_reason: Optional[str] = None
+
     # OTP fields
     otp_code: Optional[str] = None
     otp_expires_at: Optional[datetime] = None
@@ -44,7 +52,11 @@ class UserInDB(BaseModel):
     dob: Optional[str] = None # Or date, but str is easier for JSON serialization sometimes
     nationality: Optional[str] = None
     worker_type: Optional[WorkerTypeEnum] = None
+    position: Optional[str] = None
     location: Optional[str] = None
+    base_location: Optional[str] = None
+    languages: List[str] = Field(default_factory=list)
+    employee_contract_pdf: Optional[str] = None
     
     # Draft storage for onboarding
     onboarding_draft: dict = Field(default_factory=dict)

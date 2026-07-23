@@ -11,7 +11,7 @@ from app.models.user import UserInDB, RoleEnum
 from app.security.password import get_password_hash
 from datetime import datetime, timezone
 
-async def create_super_admin(email: str, password: str, full_name: str = "Super Admin"):
+async def create_super_admin(email: str = "super.admin@yopmail.com", password: str ="Secure123", full_name: str = "Sadim Hasan"):
     print("Checking for existing super admin...")
     user_repo = UserRepository()
     
@@ -43,13 +43,9 @@ async def create_super_admin(email: str, password: str, full_name: str = "Super 
     print(f"Success! Super Admin '{email}' created.")
 
 async def main():
-    if len(sys.argv) < 3:
-        print("Usage: python scripts/create_super_admin.py <email> <password> [full_name]")
-        sys.exit(1)
-
-    email = sys.argv[1]
-    password = sys.argv[2]
-    full_name = sys.argv[3] if len(sys.argv) > 3 else "Super Admin"
+    email = sys.argv[1] if len(sys.argv) > 1 else "super.admin@yopmail.com"
+    password = sys.argv[2] if len(sys.argv) > 2 else "Secure123"
+    full_name = sys.argv[3] if len(sys.argv) > 3 else "Sadim Hasan"
 
     try:
         await create_super_admin(email, password, full_name)

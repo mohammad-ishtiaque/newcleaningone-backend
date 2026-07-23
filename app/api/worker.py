@@ -45,6 +45,14 @@ async def onboarding_step1(
 ):
     if not step1_data.isagree_condition:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You must agree to the terms and conditions to proceed.")
+
+    # Validation: Individual Worker Signups are locked to freelancer
+    if not getattr(current_user, "is_admin_created", False):
+        if step1_data.worker_type == WorkerTypeEnum.employee:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Individual worker signups are only allowed to register as freelancers."
+            )
         
     current_user.onboarding_draft["dob"] = step1_data.dob.isoformat()
     current_user.onboarding_draft["isagree_condition"] = step1_data.isagree_condition
@@ -61,8 +69,8 @@ from typing import Union
 
 @router.post("/onboarding/step2", response_model=WorkerProfileResponse)
 async def onboarding_step2(
-    id_card_front: UploadFile = File(...),
-    id_card_back: UploadFile = File(...),
+    id_card_front: Optional[UploadFile] = File(None),
+    id_card_back: Optional[UploadFile] = File(None),
     profile_photo: Optional[UploadFile] = File(None),
     certificates: List[Union[UploadFile, str]] = File(default=[]),
     current_user: UserInDB = Depends(require_worker),
@@ -75,16 +83,22 @@ async def onboarding_step2(
     if len(certificates) > 5:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Maximum 5 certificates allowed")
 
-    # Upload ID Front
-    front_url = await s3_service.upload_file(await id_card_front.read(), id_card_front.filename, id_card_front.content_type)
-    current_user.onboarding_draft["id_card_front"] = front_url
-    
-    # Upload ID Back
-    back_url = await s3_service.upload_file(await id_card_back.read(), id_card_back.filename, id_card_back.content_type)
-    current_user.onboarding_draft["id_card_back"] = back_url
-    
+    # Upload or verify ID Front
+    if id_card_front and id_card_front.filename:
+        front_url = await s3_service.upload_file(await id_card_front.read(), id_card_front.filename, id_card_front.content_type)
+        current_user.onboarding_draft["id_card_front"] = front_url
+    elif not current_user.onboarding_draft.get("id_card_front") and not current_user.id_card_front:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ID card front is required")
+
+    # Upload or verify ID Back
+    if id_card_back and id_card_back.filename:
+        back_url = await s3_service.upload_file(await id_card_back.read(), id_card_back.filename, id_card_back.content_type)
+        current_user.onboarding_draft["id_card_back"] = back_url
+    elif not current_user.onboarding_draft.get("id_card_back") and not current_user.id_card_back:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ID card back is required")
+
     # Upload Certificates
-    cert_urls = []
+    cert_urls = current_user.onboarding_draft.get("certificates", [])
     for cert in certificates:
         if isinstance(cert, UploadFile) and cert.filename:
             url = await s3_service.upload_file(await cert.read(), cert.filename, cert.content_type)
@@ -93,7 +107,7 @@ async def onboarding_step2(
     current_user.onboarding_draft["certificates"] = cert_urls
     
     # Upload Profile Photo with resize
-    if profile_photo:
+    if profile_photo and profile_photo.filename:
         processed_photo = process_image(await profile_photo.read())
         photo_url = await s3_service.upload_file(processed_photo, profile_photo.filename)
         current_user.onboarding_draft["profile_photo"] = photo_url

@@ -9,6 +9,7 @@ from app.security.password import verify_password, get_password_hash
 from app.security.jwt import create_access_token, create_refresh_token, verify_refresh_token
 from app.services.email_service import EmailService
 from app.core.config import settings
+from app.models.user import RoleEnum
 
 class AuthService:
     def __init__(self, user_repo: UserRepository):
@@ -37,6 +38,22 @@ class AuthService:
                 detail="Email not verified. Please verify your email to login."
             )
             
+        # Worker approval check
+        if user.role == RoleEnum.worker:
+            status_str = getattr(user, "approval_status", "approved")
+            if status_str == "rejected":
+                reason = getattr(user, "rejection_reason", None)
+                detail_msg = f"Your account application was rejected by an administrator: {reason}" if reason else "Your account application was rejected by an administrator."
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=detail_msg
+                )
+            if not user.is_approved or status_str == "pending":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Your account is pending admin approval. Please wait for an administrator to approve your application."
+                )
+            
         # Update last login and device token
         user.last_login = datetime.now(timezone.utc)
         if login_data.onesignal_player_id:
@@ -53,7 +70,14 @@ class AuthService:
         access_token = create_access_token(subject=user.id)
         refresh_token = create_refresh_token(subject=user.id, expires_delta=refresh_expires)
         
-        return Token(access_token=access_token, refresh_token=refresh_token, token_type="bearer")
+        user_role = user.role.value if hasattr(user.role, "value") else str(user.role)
+        return Token(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            name=user.full_name,
+            role=user_role
+        )
         
     async def refresh_token(self, request: RefreshTokenRequest) -> Token:
         user_id = verify_refresh_token(request.refresh_token)
@@ -67,7 +91,14 @@ class AuthService:
         access_token = create_access_token(subject=user.id)
         refresh_token = create_refresh_token(subject=user.id)
         
-        return Token(access_token=access_token, refresh_token=refresh_token, token_type="bearer")
+        user_role = user.role.value if hasattr(user.role, "value") else str(user.role)
+        return Token(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            name=user.full_name,
+            role=user_role
+        )
 
     async def logout(self):
         return {"message": "Successfully logged out"}
@@ -107,11 +138,30 @@ class AuthService:
             user.onesignal_player_id = request.onesignal_player_id
             
         await self.user_repo.update(user)
+
+        # Check if individual worker pending admin approval
+        if user.role == RoleEnum.worker and not getattr(user, "is_admin_created", False):
+            if not getattr(user, "is_approved", False) or getattr(user, "approval_status", "pending") == "pending":
+                user_role = user.role.value if hasattr(user.role, "value") else str(user.role)
+                return Token(
+                    message="OTP verified successfully. Your account is pending admin approval.",
+                    name=user.full_name,
+                    role=user_role,
+                    is_approved=False,
+                    approval_status="pending"
+                )
         
         access_token = create_access_token(subject=user.id)
         refresh_token = create_refresh_token(subject=user.id)
         
-        return Token(access_token=access_token, refresh_token=refresh_token, token_type="bearer")
+        user_role = user.role.value if hasattr(user.role, "value") else str(user.role)
+        return Token(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            name=user.full_name,
+            role=user_role
+        )
 
     async def resend_otp(self, request: ResendOTPRequest):
         return await self.generate_and_send_otp(request.email, "Resend: Your Verification OTP")

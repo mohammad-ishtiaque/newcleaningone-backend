@@ -1,10 +1,16 @@
 import uuid
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from fastapi import APIRouter, Depends, status, HTTPException, UploadFile, File, Form
 from typing import List, Optional, Dict, Any
+from pydantic import EmailStr
 from bson import ObjectId
 from app.core.database import get_database
-from app.schemas.user import AdminCreate, AdminUpdate, AdminProfileResponse, UserResponse
+from app.schemas.user import (
+    AdminCreate, AdminUpdate, AdminProfileResponse, UserResponse,
+    AdminWorkerCreate, AdminWorkerUpdate, AdminWorkerResponse, AdminWorkerPaginatedResponse,
+    WorkerApprovalUpdate, WorkerApprovalResponse, WorkerApprovalPaginatedResponse, WorkerCountResponse,
+    WorkerListItem, WorkerListPaginatedResponse
+)
 from app.schemas.help import (
     CompanyProfileResponse, CompanyProfileUpdate, LegalDocumentResponse, LegalDocumentUpdate,
     SupportMessageResponse, SupportReplyRequest, AdminSupportListResponse,
@@ -28,6 +34,12 @@ from app.schemas.client_list import (
     CleaningPlanRoomDetail, CleaningPlanRoomSummary, GlobalCleaningPlanListItemResponse,
     GlobalCleaningPlanResponse, GlobalCleaningPlanPaginatedResponse
 )
+from app.schemas.shift import (
+    ShiftDraftCreate, ShiftDraftResponse, ShiftDraftUpdate, ShiftDraftPaginatedResponse,
+    WorkerDropdownItem, WorkerDropdownPaginatedResponse,
+    ShiftAssignRequest, ShiftWorkerDetail, ShiftResponse, ShiftPaginatedResponse, ShiftUpdate,
+    DayShiftGroup, ShiftOverviewResponse
+)
 from app.models.client_list import ClientListDB
 from app.services.notification_service import NotificationService
 from app.services.faq_service import FAQService
@@ -44,6 +56,8 @@ client_mgmt_router = APIRouter(prefix="/admin", tags=["Admin Client Management"]
 location_mgmt_router = APIRouter(prefix="/admin", tags=["Admin Location Management"])
 room_mgmt_router = APIRouter(prefix="/admin", tags=["Admin Room Management"])
 cleaning_plan_mgmt_router = APIRouter(prefix="/admin", tags=["Admin Cleaning Plan Management"])
+worker_mgmt_router = APIRouter(prefix="/admin", tags=["Admin Worker Management"])
+shift_mgmt_router = APIRouter(prefix="/admin", tags=["Admin Shift Management"])
 
 def get_user_service(user_repo: UserRepository = Depends(UserRepository)) -> UserService:
     return UserService(user_repo)
@@ -3022,3 +3036,1170 @@ async def delete_global_cleaning_plan(
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Cleaning plan not found")
     return {"message": "Cleaning plan deleted successfully"}
+
+
+# ========================================
+# Admin Worker Management APIs
+# ========================================
+
+def get_s3_service() -> S3Service:
+    return S3Service()
+
+@worker_mgmt_router.get(
+    "/workers",
+    response_model=AdminWorkerPaginatedResponse,
+    summary="List Admin Pre-Created Workers",
+    description="Returns a paginated list of worker pre-entries created by Admin with optional search, worker_type, position, and status filtering."
+)
+async def list_admin_workers(
+    page: int = 1,
+    limit: int = 10,
+    search: Optional[str] = None,
+    worker_type: Optional[str] = None,
+    position: Optional[str] = None,
+    status: Optional[str] = None,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    query = {}
+    if worker_type: query["worker_type"] = worker_type
+    if position: query["position"] = position
+    if status: query["status"] = status
+
+    if search:
+        search_regex = {"$regex": search, "$options": "i"}
+        query["$or"] = [
+            {"name": search_regex},
+            {"email": search_regex},
+            {"phone": search_regex},
+            {"base_location": search_regex}
+        ]
+
+    total_count = await db["admin_workers"].count_documents(query)
+    skip = (page - 1) * limit
+    cursor = db["admin_workers"].find(query).skip(skip).limit(limit).sort("created_at", -1)
+    raw_workers = await cursor.to_list(length=limit)
+
+    workers_res = []
+    for w in raw_workers:
+        w["id"] = str(w.get("_id") or w.get("id"))
+        w["role"] = w.get("role", "worker")
+        workers_res.append(AdminWorkerResponse(**w))
+
+    return AdminWorkerPaginatedResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        workers=workers_res
+    )
+
+@worker_mgmt_router.get(
+    "/workers/count",
+    response_model=WorkerCountResponse,
+    summary="Get Worker Count Statistics",
+    description="Returns total worker count, employee count, and freelancer count across system."
+)
+async def get_worker_counts(
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+
+    role_filter = {"$or": [{"role": RoleEnum.worker}, {"role": "worker"}]}
+
+    user_employees = await db["users"].count_documents({
+        "$and": [
+            role_filter,
+            {
+                "$or": [
+                    {"worker_type": {"$regex": "^employee$", "$options": "i"}},
+                    {"onboarding_draft.worker_type": {"$regex": "^employee$", "$options": "i"}}
+                ]
+            }
+        ]
+    })
+
+    user_freelancers = await db["users"].count_documents({
+        "$and": [
+            role_filter,
+            {
+                "$or": [
+                    {"worker_type": {"$regex": "^freelancer$", "$options": "i"}},
+                    {"onboarding_draft.worker_type": {"$regex": "^freelancer$", "$options": "i"}},
+                    {
+                        "worker_type": {"$in": [None, ""]},
+                        "onboarding_draft.worker_type": {"$in": [None, ""]}
+                    }
+                ]
+            }
+        ]
+    })
+
+    admin_employees = await db["admin_workers"].count_documents({
+        "is_signup": {"$ne": True},
+        "worker_type": {"$regex": "^employee$", "$options": "i"}
+    })
+    admin_freelancers = await db["admin_workers"].count_documents({
+        "is_signup": {"$ne": True},
+        "worker_type": {"$regex": "^freelancer$", "$options": "i"}
+    })
+
+    employee_count = user_employees + admin_employees
+    freelancer_count = user_freelancers + admin_freelancers
+    total_workers = employee_count + freelancer_count
+
+    return WorkerCountResponse(
+        total_workers=total_workers,
+        employee_count=employee_count,
+        freelancer_count=freelancer_count
+    )
+
+@worker_mgmt_router.post(
+    "/workers",
+    response_model=AdminWorkerResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create Worker Pre-Entry",
+    description="Creates a new worker record by Admin. Accepts form data with document uploads for National ID Front, National ID Back, and Employee Contract PDF (uploaded to AWS S3)."
+)
+async def create_admin_worker(
+    name: str = Form(..., json_schema_extra={"example": "Rahim Ahmed"}),
+    worker_type: str = Form(..., json_schema_extra={"example": "employee"}),
+    position: str = Form(..., json_schema_extra={"example": "senior cleaner"}),
+    email: EmailStr = Form(..., json_schema_extra={"example": "rahim.worker@yopmail.com"}),
+    phone: str = Form(..., json_schema_extra={"example": "+8801700000000"}),
+    status_val: Optional[str] = Form("active", alias="status", json_schema_extra={"example": "active"}),
+    base_location: Optional[str] = Form(None, json_schema_extra={"example": "Aqua Tower"}),
+    languages: Optional[str] = Form(None, json_schema_extra={"example": "bangla, english"}),
+    national_id_front: Optional[UploadFile] = File(None),
+    national_id_back: Optional[UploadFile] = File(None),
+    employee_contract_pdf: Optional[UploadFile] = File(None),
+    current_user: UserInDB = Depends(require_admin),
+    s3_service: S3Service = Depends(get_s3_service)
+):
+    db = get_database()
+    existing = await db["admin_workers"].find_one({"email": email})
+    if existing:
+        raise HTTPException(status_code=400, detail="Worker with this email already pre-created by Admin")
+
+    front_url = None
+    if national_id_front and national_id_front.filename:
+        front_bytes = await national_id_front.read()
+        front_url = await s3_service.upload_file(front_bytes, national_id_front.filename, national_id_front.content_type)
+
+    back_url = None
+    if national_id_back and national_id_back.filename:
+        back_bytes = await national_id_back.read()
+        back_url = await s3_service.upload_file(back_bytes, national_id_back.filename, national_id_back.content_type)
+
+    pdf_url = None
+    if employee_contract_pdf and employee_contract_pdf.filename:
+        pdf_bytes = await employee_contract_pdf.read()
+        pdf_url = await s3_service.upload_file(pdf_bytes, employee_contract_pdf.filename, employee_contract_pdf.content_type)
+
+    parsed_languages = []
+    if languages:
+        if languages.startswith("[") and languages.endswith("]"):
+            import json
+            try:
+                parsed_languages = json.loads(languages)
+            except Exception:
+                parsed_languages = [l.strip() for l in languages.split(",") if l.strip()]
+        else:
+            parsed_languages = [l.strip() for l in languages.split(",") if l.strip()]
+
+    now = datetime.now(timezone.utc)
+    worker_id = str(uuid.uuid4())
+
+    worker_doc = {
+        "_id": worker_id,
+        "id": worker_id,
+        "name": name,
+        "role": "worker",
+        "worker_type": worker_type,
+        "position": position,
+        "email": email,
+        "phone": phone,
+        "status": status_val or "active",
+        "base_location": base_location,
+        "languages": parsed_languages,
+        "national_id_front": front_url,
+        "national_id_back": back_url,
+        "employee_contract_pdf": pdf_url,
+        "is_signup": False,
+        "created_at": now,
+        "updated_at": now
+    }
+
+    await db["admin_workers"].insert_one(worker_doc)
+    return AdminWorkerResponse(**worker_doc)
+
+@worker_mgmt_router.get(
+    "/workers/{worker_id}",
+    response_model=AdminWorkerResponse,
+    summary="Get Admin Pre-Created Worker Detail",
+    description="Returns worker record by worker ID."
+)
+async def get_admin_worker_detail(
+    worker_id: str,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    worker_doc = await db["admin_workers"].find_one({"_id": worker_id})
+    if not worker_doc:
+        raise HTTPException(status_code=404, detail="Worker record not found")
+    worker_doc["id"] = str(worker_doc.get("_id") or worker_doc.get("id"))
+    worker_doc["role"] = worker_doc.get("role", "worker")
+    return AdminWorkerResponse(**worker_doc)
+
+@worker_mgmt_router.patch(
+    "/workers/{worker_id}",
+    response_model=AdminWorkerResponse,
+    summary="Update Admin Pre-Created Worker",
+    description="Updates worker pre-creation record. Supports text updates and/or document file uploads for national ID cards and contract PDF."
+)
+async def update_admin_worker(
+    worker_id: str,
+    name: Optional[str] = Form(None),
+    worker_type: Optional[str] = Form(None),
+    position: Optional[str] = Form(None),
+    email: Optional[EmailStr] = Form(None),
+    phone: Optional[str] = Form(None),
+    status_val: Optional[str] = Form(None, alias="status"),
+    base_location: Optional[str] = Form(None),
+    languages: Optional[str] = Form(None),
+    national_id_front: Optional[UploadFile] = File(None),
+    national_id_back: Optional[UploadFile] = File(None),
+    employee_contract_pdf: Optional[UploadFile] = File(None),
+    current_user: UserInDB = Depends(require_admin),
+    s3_service: S3Service = Depends(get_s3_service)
+):
+    db = get_database()
+    worker_doc = await db["admin_workers"].find_one({"_id": worker_id})
+    if not worker_doc:
+        raise HTTPException(status_code=404, detail="Worker record not found")
+
+    update_fields = {}
+    if name is not None: update_fields["name"] = name
+    if worker_type is not None: update_fields["worker_type"] = worker_type
+    if position is not None: update_fields["position"] = position
+    if email is not None: update_fields["email"] = email
+    if phone is not None: update_fields["phone"] = phone
+    if status_val is not None: update_fields["status"] = status_val
+    if base_location is not None: update_fields["base_location"] = base_location
+
+    if languages is not None:
+        if languages.startswith("[") and languages.endswith("]"):
+            import json
+            try:
+                update_fields["languages"] = json.loads(languages)
+            except Exception:
+                update_fields["languages"] = [l.strip() for l in languages.split(",") if l.strip()]
+        else:
+            update_fields["languages"] = [l.strip() for l in languages.split(",") if l.strip()]
+
+    if national_id_front and national_id_front.filename:
+        front_bytes = await national_id_front.read()
+        update_fields["national_id_front"] = await s3_service.upload_file(front_bytes, national_id_front.filename, national_id_front.content_type)
+
+    if national_id_back and national_id_back.filename:
+        back_bytes = await national_id_back.read()
+        update_fields["national_id_back"] = await s3_service.upload_file(back_bytes, national_id_back.filename, national_id_back.content_type)
+
+    if employee_contract_pdf and employee_contract_pdf.filename:
+        pdf_bytes = await employee_contract_pdf.read()
+        update_fields["employee_contract_pdf"] = await s3_service.upload_file(pdf_bytes, employee_contract_pdf.filename, employee_contract_pdf.content_type)
+
+    if not update_fields:
+        worker_doc["id"] = str(worker_doc.get("_id") or worker_doc.get("id"))
+        worker_doc["role"] = worker_doc.get("role", "worker")
+        return AdminWorkerResponse(**worker_doc)
+
+    update_fields["updated_at"] = datetime.now(timezone.utc)
+    await db["admin_workers"].update_one({"_id": worker_id}, {"$set": update_fields})
+
+    updated = await db["admin_workers"].find_one({"_id": worker_id})
+    updated["id"] = str(updated.get("_id") or updated.get("id"))
+    updated["role"] = updated.get("role", "worker")
+    return AdminWorkerResponse(**updated)
+
+@worker_mgmt_router.delete(
+    "/workers/{worker_id}",
+    summary="Delete Admin Pre-Created Worker",
+    description="Deletes admin pre-creation worker record."
+)
+async def delete_admin_worker(
+    worker_id: str,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    res = await db["admin_workers"].delete_one({"_id": worker_id})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Worker record not found")
+    return {"message": "Worker record deleted successfully"}
+
+# ========================================
+# Admin Worker Approval Management APIs
+# ========================================
+
+@worker_mgmt_router.get(
+    "/worker-approvals",
+    response_model=WorkerApprovalPaginatedResponse,
+    summary="List Individual Worker Signups for Approval",
+    description="Returns a paginated list of individual worker signups requiring or pending Admin approval."
+)
+async def list_worker_approvals(
+    page: int = 1,
+    limit: int = 10,
+    search: Optional[str] = None,
+    approval_status: Optional[str] = None,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    query = {"role": RoleEnum.worker, "is_admin_created": False, "is_verified": True}
+    if approval_status:
+        query["approval_status"] = approval_status
+
+    if search:
+        search_regex = {"$regex": search, "$options": "i"}
+        query["$or"] = [
+            {"full_name": search_regex},
+            {"email": search_regex},
+            {"phone": search_regex}
+        ]
+
+    total_count = await db["users"].count_documents(query)
+    skip = (page - 1) * limit
+    cursor = db["users"].find(query).skip(skip).limit(limit).sort("created_at", -1)
+    raw_users = await cursor.to_list(length=limit)
+
+    approvals_res = []
+    for u in raw_users:
+        u["id"] = str(u.get("_id") or u.get("id"))
+        u["is_approved"] = u.get("is_approved", False)
+        u["approval_status"] = u.get("approval_status", "pending")
+        u["worker_type"] = u.get("worker_type", "freelancer")
+        approvals_res.append(WorkerApprovalResponse(**u))
+
+    return WorkerApprovalPaginatedResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        pending_approvals=approvals_res
+    )
+
+@worker_mgmt_router.get(
+    "/worker-approvals/{worker_user_id}",
+    response_model=WorkerApprovalResponse,
+    summary="Get Individual Worker Signup Detail for Approval",
+    description="Returns details of an individual worker signup request."
+)
+async def get_worker_approval_detail(
+    worker_user_id: str,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    if not ObjectId.is_valid(worker_user_id):
+        raise HTTPException(status_code=400, detail="Invalid worker user ID")
+
+    user_doc = await db["users"].find_one({"_id": ObjectId(worker_user_id), "role": RoleEnum.worker})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="Worker user application not found")
+
+    user_doc["id"] = str(user_doc.get("_id") or user_doc.get("id"))
+    user_doc["is_approved"] = user_doc.get("is_approved", False)
+    user_doc["approval_status"] = user_doc.get("approval_status", "pending")
+    user_doc["worker_type"] = user_doc.get("worker_type", "freelancer")
+    return WorkerApprovalResponse(**user_doc)
+
+@worker_mgmt_router.patch(
+    "/worker-approvals/{worker_user_id}",
+    response_model=WorkerApprovalResponse,
+    summary="Approve or Reject Individual Worker Signup",
+    description="Updates worker approval status to approved or rejected."
+)
+async def update_worker_approval_status(
+    worker_user_id: str,
+    approval_in: WorkerApprovalUpdate,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    if not ObjectId.is_valid(worker_user_id):
+        raise HTTPException(status_code=400, detail="Invalid worker user ID")
+
+    user_doc = await db["users"].find_one({"_id": ObjectId(worker_user_id), "role": RoleEnum.worker})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="Worker user application not found")
+
+    is_approved = (approval_in.approval_status.lower() == "approved")
+    status_str = "approved" if is_approved else "rejected"
+
+    update_fields = {
+        "is_approved": is_approved,
+        "approval_status": status_str,
+        "rejection_reason": approval_in.rejection_reason if not is_approved else None,
+        "updated_at": datetime.now(timezone.utc)
+    }
+
+    await db["users"].update_one({"_id": ObjectId(worker_user_id)}, {"$set": update_fields})
+
+    updated = await db["users"].find_one({"_id": ObjectId(worker_user_id)})
+    updated["id"] = str(updated.get("_id") or updated.get("id"))
+    updated["is_approved"] = updated.get("is_approved", False)
+    updated["approval_status"] = updated.get("approval_status", "pending")
+    updated["worker_type"] = updated.get("worker_type", "freelancer")
+    return WorkerApprovalResponse(**updated)
+
+@worker_mgmt_router.delete(
+    "/worker-approvals/{worker_user_id}",
+    summary="Delete Individual Worker Signup Application",
+    description="Deletes pending or rejected individual worker signup application from system."
+)
+async def delete_worker_approval(
+    worker_user_id: str,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    if not ObjectId.is_valid(worker_user_id):
+        raise HTTPException(status_code=400, detail="Invalid worker user ID")
+
+    res = await db["users"].delete_one({"_id": ObjectId(worker_user_id), "role": RoleEnum.worker})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Worker user application not found")
+    return {"message": "Worker signup application deleted successfully"}
+
+
+@worker_mgmt_router.get(
+    "/worker-list",
+    response_model=WorkerListPaginatedResponse,
+    summary="List All Registered Workers (Paginated)",
+    description="Returns a paginated list of all registered worker users with total count, worker ID, name, profile picture, and worker_type ('employee' | 'freelancer')."
+)
+async def list_all_registered_workers(
+    page: int = 1,
+    limit: int = 10,
+    worker_type: Optional[str] = None,
+    search: Optional[str] = None,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    query = {
+        "$or": [{"role": RoleEnum.worker}, {"role": "worker"}],
+        "is_approved": True
+    }
+
+    if worker_type and worker_type.lower() != "all":
+        query["$and"] = [
+            {"$or": [
+                {"worker_type": {"$regex": f"^{worker_type}$", "$options": "i"}},
+                {"onboarding_draft.worker_type": {"$regex": f"^{worker_type}$", "$options": "i"}}
+            ]}
+        ]
+
+    if search:
+        search_regex = {"$regex": search, "$options": "i"}
+        search_cond = {"$or": [{"full_name": search_regex}, {"email": search_regex}, {"phone": search_regex}]}
+        if "$and" in query:
+            query["$and"].append(search_cond)
+        else:
+            query["$and"] = [search_cond]
+
+    total_count = await db["users"].count_documents(query)
+    skip = (page - 1) * limit
+    cursor = db["users"].find(query).skip(skip).limit(limit).sort("full_name", 1)
+    raw_users = await cursor.to_list(length=limit)
+
+    worker_items = []
+    for u in raw_users:
+        w_id = str(u.get("_id") or u.get("id"))
+        w_name = u.get("full_name") or u.get("name", "")
+        w_pic = u.get("profile_photo") or u.get("profile_picture")
+        w_t = u.get("worker_type") or u.get("onboarding_draft", {}).get("worker_type", "freelancer")
+        if hasattr(w_t, "value"):
+            w_t = w_t.value
+
+        worker_items.append(WorkerListItem(
+            worker_id=w_id,
+            name=w_name,
+            profile_picture=w_pic,
+            worker_type=str(w_t),
+            email=u.get("email"),
+            phone=u.get("phone"),
+            status="active" if u.get("is_approved") else "pending",
+            is_signup=True
+        ))
+
+    return WorkerListPaginatedResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        workers=worker_items
+    )
+
+
+# ========================================
+# Admin Shift Management APIs
+# ========================================
+
+async def _find_location_name(db, location_id: str, client_id: Optional[str] = None) -> str:
+    # 1. Search in db["locations"] collection
+    loc_doc = await db["locations"].find_one({"$or": [{"_id": location_id}, {"id": location_id}]})
+    if loc_doc and loc_doc.get("name"):
+        return loc_doc.get("name")
+
+    # 2. Search in db["client_list"] embedded locations array
+    client_doc = await db["client_list"].find_one({"locations.id": location_id})
+    if client_doc and "locations" in client_doc:
+        for loc in client_doc["locations"]:
+            if str(loc.get("id")) == str(location_id) or str(loc.get("_id")) == str(location_id):
+                return loc.get("name", "Unknown Location")
+
+    # 3. Search in specific client's locations array if client_id provided
+    if client_id:
+        c_query = {"_id": ObjectId(client_id)} if ObjectId.is_valid(client_id) else {"_id": client_id}
+        c_doc = await db["client_list"].find_one(c_query)
+        if c_doc and "locations" in c_doc:
+            for loc in c_doc["locations"]:
+                if str(loc.get("id")) == str(location_id) or str(loc.get("_id")) == str(location_id):
+                    return loc.get("name", "Unknown Location")
+
+    return "Unknown Location"
+
+
+@shift_mgmt_router.post(
+    "/shifts/drafts",
+    response_model=ShiftDraftResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create Shift Draft",
+    description="Creates a new shift draft with client, location, date, start_time, end_time, and optional shift notes. Returns draft details with unique draft ID."
+)
+async def create_shift_draft(
+    draft_in: ShiftDraftCreate,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+
+    # Validate client
+    client_name = "Unknown Client"
+    if ObjectId.is_valid(draft_in.client_id):
+        client_doc = await db["client_list"].find_one({"_id": ObjectId(draft_in.client_id)})
+        if not client_doc:
+            raise HTTPException(status_code=404, detail="Client ID not found")
+        client_name = client_doc.get("company_name", "")
+    else:
+        client_doc = await db["client_list"].find_one({"_id": draft_in.client_id})
+        if not client_doc:
+            raise HTTPException(status_code=404, detail="Client ID not found")
+        client_name = client_doc.get("company_name", "")
+
+    # Validate location
+    loc_name = await _find_location_name(db, draft_in.location_id, draft_in.client_id)
+
+    now = datetime.now(timezone.utc)
+    draft_id = f"draft_{uuid.uuid4().hex[:12]}"
+
+    draft_doc = {
+        "_id": draft_id,
+        "id": draft_id,
+        "client_id": draft_in.client_id,
+        "client_name": client_name,
+        "location_id": draft_in.location_id,
+        "location_name": loc_name,
+        "date": draft_in.date,
+        "start_time": draft_in.start_time,
+        "end_time": draft_in.end_time,
+        "shift_notes": draft_in.shift_notes,
+        "status": "draft",
+        "created_at": now,
+        "updated_at": now
+    }
+
+    await db["shift_drafts"].insert_one(draft_doc)
+    return ShiftDraftResponse(**draft_doc)
+
+
+@shift_mgmt_router.get(
+    "/shifts/drafts",
+    response_model=ShiftDraftPaginatedResponse,
+    summary="List All Shift Drafts",
+    description="Returns a paginated list of shift drafts with optional filtering by client_id, location_id, and search query."
+)
+async def list_all_shift_drafts(
+    page: int = 1,
+    limit: int = 10,
+    search: Optional[str] = None,
+    client_id: Optional[str] = None,
+    location_id: Optional[str] = None,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    query = {}
+
+    if client_id:
+        query["client_id"] = client_id
+    if location_id:
+        query["location_id"] = location_id
+
+    if search:
+        search_regex = {"$regex": search, "$options": "i"}
+        query["$or"] = [
+            {"client_name": search_regex},
+            {"location_name": search_regex},
+            {"shift_notes": search_regex}
+        ]
+
+    total_count = await db["shift_drafts"].count_documents(query)
+    skip = (page - 1) * limit
+    cursor = db["shift_drafts"].find(query).skip(skip).limit(limit).sort("created_at", -1)
+    raw_drafts = await cursor.to_list(length=limit)
+
+    drafts_res = []
+    for d in raw_drafts:
+        d["id"] = str(d.get("_id") or d.get("id"))
+        drafts_res.append(ShiftDraftResponse(**d))
+
+    return ShiftDraftPaginatedResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        drafts=drafts_res
+    )
+
+
+@shift_mgmt_router.get(
+    "/shifts/drafts/{draft_id}",
+    response_model=ShiftDraftResponse,
+    summary="Get Shift Draft Detail",
+    description="Returns detailed information for a specific shift draft."
+)
+async def get_shift_draft_detail(
+    draft_id: str,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    draft_doc = await db["shift_drafts"].find_one({"_id": draft_id})
+    if not draft_doc:
+        draft_doc = await db["shift_drafts"].find_one({"id": draft_id})
+    if not draft_doc:
+        raise HTTPException(status_code=404, detail="Shift draft not found")
+
+    draft_doc["id"] = str(draft_doc.get("_id") or draft_doc.get("id"))
+    return ShiftDraftResponse(**draft_doc)
+
+
+@shift_mgmt_router.patch(
+    "/shifts/drafts/{draft_id}",
+    response_model=ShiftDraftResponse,
+    summary="Update Shift Draft",
+    description="Updates shift draft parameters (client_id, location_id, date, start_time, end_time, shift_notes)."
+)
+async def update_shift_draft(
+    draft_id: str,
+    draft_in: ShiftDraftUpdate,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    draft_doc = await db["shift_drafts"].find_one({"_id": draft_id})
+    if not draft_doc:
+        draft_doc = await db["shift_drafts"].find_one({"id": draft_id})
+    if not draft_doc:
+        raise HTTPException(status_code=404, detail="Shift draft not found")
+
+    update_fields = {}
+    if draft_in.client_id is not None:
+        client_name = "Unknown Client"
+        c_doc = await db["client_list"].find_one({"_id": ObjectId(draft_in.client_id)}) if ObjectId.is_valid(draft_in.client_id) else await db["client_list"].find_one({"_id": draft_in.client_id})
+        if c_doc:
+            client_name = c_doc.get("company_name", "")
+        update_fields["client_id"] = draft_in.client_id
+        update_fields["client_name"] = client_name
+
+    if draft_in.location_id is not None:
+        target_client = draft_in.client_id or draft_doc.get("client_id")
+        loc_name = await _find_location_name(db, draft_in.location_id, target_client)
+        update_fields["location_id"] = draft_in.location_id
+        update_fields["location_name"] = loc_name
+
+    if draft_in.date is not None: update_fields["date"] = draft_in.date
+    if draft_in.start_time is not None: update_fields["start_time"] = draft_in.start_time
+    if draft_in.end_time is not None: update_fields["end_time"] = draft_in.end_time
+    if draft_in.shift_notes is not None: update_fields["shift_notes"] = draft_in.shift_notes
+
+    if not update_fields:
+        draft_doc["id"] = str(draft_doc.get("_id") or draft_doc.get("id"))
+        return ShiftDraftResponse(**draft_doc)
+
+    update_fields["updated_at"] = datetime.now(timezone.utc)
+    await db["shift_drafts"].update_one({"$or": [{"_id": draft_id}, {"id": draft_id}]}, {"$set": update_fields})
+
+    updated = await db["shift_drafts"].find_one({"$or": [{"_id": draft_id}, {"id": draft_id}]})
+    updated["id"] = str(updated.get("_id") or updated.get("id"))
+    return ShiftDraftResponse(**updated)
+
+
+@shift_mgmt_router.delete(
+    "/shifts/drafts/{draft_id}",
+    summary="Delete Shift Draft",
+    description="Deletes a specific shift draft."
+)
+async def delete_shift_draft(
+    draft_id: str,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    res = await db["shift_drafts"].delete_one({"$or": [{"_id": draft_id}, {"id": draft_id}]})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Shift draft not found")
+    return {"message": "Shift draft deleted successfully"}
+
+
+@shift_mgmt_router.get(
+    "/shifts/worker-dropdown",
+    response_model=WorkerDropdownPaginatedResponse,
+    summary="Get Worker Dropdown for Shift Draft with Availability Status",
+    description="Returns a paginated list of workers indicating whether each worker is 'available' or 'on_shift' during the draft's date and time interval."
+)
+async def get_worker_dropdown_for_shift(
+    draft_id: str,
+    worker_type: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    limit: int = 10,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    draft_doc = await db["shift_drafts"].find_one({"_id": draft_id})
+    if not draft_doc:
+        draft_doc = await db["shift_drafts"].find_one({"id": draft_id})
+    if not draft_doc:
+        raise HTTPException(status_code=404, detail="Shift draft not found")
+
+    draft_date = draft_doc.get("date")
+    draft_start = draft_doc.get("start_time")
+    draft_end = draft_doc.get("end_time")
+
+    query = {
+        "$or": [{"role": RoleEnum.worker}, {"role": "worker"}],
+        "is_approved": True
+    }
+
+    if worker_type:
+        query["$and"] = [
+            {"$or": [
+                {"worker_type": {"$regex": f"^{worker_type}$", "$options": "i"}},
+                {"onboarding_draft.worker_type": {"$regex": f"^{worker_type}$", "$options": "i"}}
+            ]}
+        ]
+
+    if search:
+        search_regex = {"$regex": search, "$options": "i"}
+        search_condition = {"$or": [
+            {"full_name": search_regex},
+            {"email": search_regex},
+            {"phone": search_regex}
+        ]}
+        if "$and" in query:
+            query["$and"].append(search_condition)
+        else:
+            query["$and"] = [search_condition]
+
+    total_count = await db["users"].count_documents(query)
+    skip = (page - 1) * limit
+    cursor = db["users"].find(query).skip(skip).limit(limit).sort("full_name", 1)
+    raw_workers = await cursor.to_list(length=limit)
+
+    active_shifts = await db["shifts"].find({
+        "date": draft_date,
+        "status": {"$ne": "cancelled"}
+    }).to_list(length=500)
+
+    on_shift_worker_ids = set()
+    for s in active_shifts:
+        s_start = s.get("start_time", "")
+        s_end = s.get("end_time", "")
+        if s_start < draft_end and s_end > draft_start:
+            for w in s.get("workers", []):
+                w_id = w.get("worker_id") or w.get("id")
+                if w_id:
+                    on_shift_worker_ids.add(str(w_id))
+
+    worker_items = []
+    for w in raw_workers:
+        w_id = str(w.get("_id") or w.get("id"))
+        w_name = w.get("full_name", "")
+        w_pic = w.get("profile_photo")
+        w_type = w.get("worker_type") or w.get("onboarding_draft", {}).get("worker_type", "freelancer")
+        if hasattr(w_type, "value"):
+            w_type = w_type.value
+
+        avail_status = "on_shift" if w_id in on_shift_worker_ids else "available"
+
+        worker_items.append(WorkerDropdownItem(
+            worker_id=w_id,
+            name=w_name,
+            profile_picture=w_pic,
+            status=avail_status,
+            worker_type=str(w_type)
+        ))
+
+    return WorkerDropdownPaginatedResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        workers=worker_items
+    )
+
+
+@shift_mgmt_router.post(
+    "/shifts/assign",
+    response_model=ShiftResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Assign Workers to Shift Draft & Publish Shift",
+    description="Assigns multiple workers to a shift draft, validates schedule availability, creates published shift, updates worker documents with rich shift data, and finalizes draft."
+)
+async def assign_workers_and_publish_shift(
+    assign_in: ShiftAssignRequest,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+
+    draft_doc = await db["shift_drafts"].find_one({"_id": assign_in.draft_id})
+    if not draft_doc:
+        draft_doc = await db["shift_drafts"].find_one({"id": assign_in.draft_id})
+    if not draft_doc:
+        raise HTTPException(status_code=404, detail="Shift draft not found")
+
+    draft_date = draft_doc.get("date")
+    draft_start = draft_doc.get("start_time")
+    draft_end = draft_doc.get("end_time")
+
+    if not assign_in.worker_ids:
+        raise HTTPException(status_code=400, detail="At least one worker must be selected for assignment")
+
+    active_shifts = await db["shifts"].find({
+        "date": draft_date,
+        "status": {"$ne": "cancelled"}
+    }).to_list(length=500)
+
+    on_shift_worker_ids = set()
+    for s in active_shifts:
+        s_start = s.get("start_time", "")
+        s_end = s.get("end_time", "")
+        if s_start < draft_end and s_end > draft_start:
+            for w in s.get("workers", []):
+                w_id = w.get("worker_id") or w.get("id")
+                if w_id:
+                    on_shift_worker_ids.add(str(w_id))
+
+    assigned_worker_details = []
+    now = datetime.now(timezone.utc)
+
+    for w_id in assign_in.worker_ids:
+        obj_id = ObjectId(w_id) if ObjectId.is_valid(w_id) else w_id
+        w_doc = await db["users"].find_one({"_id": obj_id})
+        if not w_doc:
+            w_doc = await db["users"].find_one({"id": w_id})
+        if not w_doc:
+            raise HTTPException(status_code=404, detail=f"Worker ID '{w_id}' not found")
+
+        if str(w_id) in on_shift_worker_ids:
+            w_name = w_doc.get("full_name", "Worker")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Worker '{w_name}' (ID: {w_id}) is already assigned to another shift during this time interval."
+            )
+
+        w_type = w_doc.get("worker_type") or w_doc.get("onboarding_draft", {}).get("worker_type", "freelancer")
+        if hasattr(w_type, "value"):
+            w_type = w_type.value
+
+        assigned_worker_details.append({
+            "worker_id": str(w_doc.get("_id") or w_doc.get("id")),
+            "name": w_doc.get("full_name", ""),
+            "profile_picture": w_doc.get("profile_photo"),
+            "worker_type": str(w_type)
+        })
+
+    shift_id = str(uuid.uuid4())
+    shift_doc = {
+        "_id": shift_id,
+        "id": shift_id,
+        "draft_id": assign_in.draft_id,
+        "client_id": draft_doc["client_id"],
+        "client_name": draft_doc.get("client_name", ""),
+        "location_id": draft_doc["location_id"],
+        "location_name": draft_doc.get("location_name", ""),
+        "date": draft_date,
+        "start_time": draft_start,
+        "end_time": draft_end,
+        "shift_notes": draft_doc.get("shift_notes"),
+        "status": "published",
+        "workers": assigned_worker_details,
+        "created_at": now,
+        "updated_at": now
+    }
+
+    await db["shifts"].insert_one(shift_doc)
+
+    shift_summary_entry = {
+        "shift_id": shift_id,
+        "client_name": draft_doc.get("client_name", ""),
+        "location_name": draft_doc.get("location_name", ""),
+        "date": draft_date,
+        "start_time": draft_start,
+        "end_time": draft_end,
+        "assigned_at": now
+    }
+
+    notif_service = NotificationService()
+    for w_detail in assigned_worker_details:
+        w_id = w_detail["worker_id"]
+        obj_id = ObjectId(w_id) if ObjectId.is_valid(w_id) else w_id
+        await db["users"].update_one(
+            {"$or": [{"_id": obj_id}, {"id": w_id}]},
+            {
+                "$push": {"recent_shifts": {"$each": [shift_summary_entry], "$slice": -20}},
+                "$set": {"last_assigned_shift_at": now},
+                "$inc": {"total_shifts_count": 1}
+            }
+        )
+        try:
+            await notif_service.create_notification(
+                title="New Shift Assigned",
+                message=f"You have been assigned a shift at {draft_doc.get('location_name', 'your location')} on {draft_date} ({draft_start} - {draft_end}).",
+                notification_type="shift_assignment",
+                recipient_type="worker",
+                user_id=w_id
+            )
+        except Exception as e:
+            print(f"Failed to send shift assignment push notification to worker {w_id}: {e}")
+
+    await db["shift_drafts"].delete_one({"$or": [{"_id": assign_in.draft_id}, {"id": assign_in.draft_id}]})
+
+    return ShiftResponse(**shift_doc)
+
+
+@shift_mgmt_router.get(
+    "/shifts/overview",
+    response_model=ShiftOverviewResponse,
+    summary="Get Shift Overview (Day-wise Breakdown)",
+    description="Returns day-wise grouped shift data for the specified number of days (1, 2, 7, or 30 days starting from today going forward) with optional filtering by status_val, client_id, location_id, worker_id, and search query."
+)
+async def get_shifts_overview(
+    days: int = 7,
+    search: Optional[str] = None,
+    status_val: Optional[str] = None,
+    client_id: Optional[str] = None,
+    location_id: Optional[str] = None,
+    worker_id: Optional[str] = None,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+
+    if days not in [1, 2, 7, 30]:
+        days = 7
+
+    today = datetime.now(timezone.utc).date()
+    target_dates = [(today + timedelta(days=i)).isoformat() for i in range(days)]
+
+    base_query: Dict[str, Any] = {}
+    if status_val:
+        base_query["status"] = status_val
+    if client_id:
+        base_query["client_id"] = client_id
+    if location_id:
+        base_query["location_id"] = location_id
+    if worker_id:
+        base_query["workers.worker_id"] = worker_id
+
+    if search:
+        search_regex = {"$regex": search, "$options": "i"}
+        base_query["$or"] = [
+            {"client_name": search_regex},
+            {"location_name": search_regex},
+            {"shift_notes": search_regex},
+            {"workers.name": search_regex}
+        ]
+
+    overview_list = []
+    grand_total_shifts = 0
+
+    for d_str in target_dates:
+        day_query = dict(base_query)
+        day_query["date"] = d_str
+
+        cursor = db["shifts"].find(day_query).sort("start_time", 1)
+        raw_shifts = await cursor.to_list(length=1000)
+
+        shifts_res = []
+        for s in raw_shifts:
+            s["id"] = str(s.get("_id") or s.get("id"))
+            shifts_res.append(ShiftResponse(**s))
+
+        day_count = len(shifts_res)
+        grand_total_shifts += day_count
+
+        overview_list.append(DayShiftGroup(
+            date=d_str,
+            total_shifts=day_count,
+            shifts=shifts_res
+        ))
+
+    return ShiftOverviewResponse(
+        days=days,
+        start_date=target_dates[0],
+        end_date=target_dates[-1],
+        total_shifts=grand_total_shifts,
+        overview=overview_list
+    )
+
+
+@shift_mgmt_router.get(
+    "/shifts",
+    response_model=ShiftPaginatedResponse,
+    summary="List All Shifts",
+    description="Returns a paginated list of shifts with optional filtering by status, client_id, location_id, worker_id, and search query."
+)
+async def list_all_shifts(
+    page: int = 1,
+    limit: int = 10,
+    search: Optional[str] = None,
+    status_val: Optional[str] = None,
+    client_id: Optional[str] = None,
+    location_id: Optional[str] = None,
+    worker_id: Optional[str] = None,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    query = {}
+
+    if status_val:
+        query["status"] = status_val
+    if client_id:
+        query["client_id"] = client_id
+    if location_id:
+        query["location_id"] = location_id
+    if worker_id:
+        query["workers.worker_id"] = worker_id
+
+    if search:
+        search_regex = {"$regex": search, "$options": "i"}
+        query["$or"] = [
+            {"client_name": search_regex},
+            {"location_name": search_regex},
+            {"shift_notes": search_regex},
+            {"workers.name": search_regex}
+        ]
+
+    total_count = await db["shifts"].count_documents(query)
+    skip = (page - 1) * limit
+    cursor = db["shifts"].find(query).skip(skip).limit(limit).sort("created_at", -1)
+    raw_shifts = await cursor.to_list(length=limit)
+
+    shifts_res = []
+    for s in raw_shifts:
+        s["id"] = str(s.get("_id") or s.get("id"))
+        shifts_res.append(ShiftResponse(**s))
+
+    return ShiftPaginatedResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        shifts=shifts_res
+    )
+
+
+@shift_mgmt_router.get(
+    "/shifts/{shift_id}",
+    response_model=ShiftResponse,
+    summary="Get Shift Detail",
+    description="Returns detailed information for a specific shift."
+)
+async def get_shift_detail(
+    shift_id: str,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    shift_doc = await db["shifts"].find_one({"_id": shift_id})
+    if not shift_doc:
+        shift_doc = await db["shifts"].find_one({"id": shift_id})
+    if not shift_doc:
+        raise HTTPException(status_code=404, detail="Shift not found")
+
+    shift_doc["id"] = str(shift_doc.get("_id") or shift_doc.get("id"))
+    return ShiftResponse(**shift_doc)
+
+
+@shift_mgmt_router.patch(
+    "/shifts/{shift_id}",
+    response_model=ShiftResponse,
+    summary="Update Shift",
+    description="Updates shift parameters (date, times, worker assignments, notes, status)."
+)
+async def update_shift(
+    shift_id: str,
+    shift_in: ShiftUpdate,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    shift_doc = await db["shifts"].find_one({"_id": shift_id})
+    if not shift_doc:
+        shift_doc = await db["shifts"].find_one({"id": shift_id})
+    if not shift_doc:
+        raise HTTPException(status_code=404, detail="Shift not found")
+
+    update_fields = {}
+    if shift_in.date is not None: update_fields["date"] = shift_in.date
+    if shift_in.start_time is not None: update_fields["start_time"] = shift_in.start_time
+    if shift_in.end_time is not None: update_fields["end_time"] = shift_in.end_time
+    if shift_in.shift_notes is not None: update_fields["shift_notes"] = shift_in.shift_notes
+    if shift_in.status is not None: update_fields["status"] = shift_in.status
+
+    if shift_in.worker_ids is not None:
+        assigned_worker_details = []
+        for w_id in shift_in.worker_ids:
+            obj_id = ObjectId(w_id) if ObjectId.is_valid(w_id) else w_id
+            w_doc = await db["users"].find_one({"_id": obj_id})
+            if not w_doc:
+                w_doc = await db["users"].find_one({"id": w_id})
+            if not w_doc:
+                raise HTTPException(status_code=404, detail=f"Worker ID '{w_id}' not found")
+
+            w_type = w_doc.get("worker_type") or w_doc.get("onboarding_draft", {}).get("worker_type", "freelancer")
+            if hasattr(w_type, "value"):
+                w_type = w_type.value
+
+            assigned_worker_details.append({
+                "worker_id": str(w_doc.get("_id") or w_doc.get("id")),
+                "name": w_doc.get("full_name", ""),
+                "profile_picture": w_doc.get("profile_photo"),
+                "worker_type": str(w_type)
+            })
+        update_fields["workers"] = assigned_worker_details
+
+    if not update_fields:
+        shift_doc["id"] = str(shift_doc.get("_id") or shift_doc.get("id"))
+        return ShiftResponse(**shift_doc)
+
+    update_fields["updated_at"] = datetime.now(timezone.utc)
+    await db["shifts"].update_one({"$or": [{"_id": shift_id}, {"id": shift_id}]}, {"$set": update_fields})
+
+    updated = await db["shifts"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+    updated["id"] = str(updated.get("_id") or updated.get("id"))
+    return ShiftResponse(**updated)
+
+
+@shift_mgmt_router.delete(
+    "/shifts/{shift_id}",
+    summary="Delete Shift",
+    description="Deletes a shift or draft record."
+)
+async def delete_shift(
+    shift_id: str,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    res = await db["shifts"].delete_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+    if res.deleted_count == 0:
+        res_draft = await db["shift_drafts"].delete_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+        if res_draft.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Shift record not found")
+    return {"message": "Shift deleted successfully"}
