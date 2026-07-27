@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from app.api import auth, worker, client, admin, profile, worker_shifts, admin_shift_monitoring, admin_dashboard
+from app.api import auth, worker, client, admin, profile, worker_shifts, admin_shift_monitoring, admin_dashboard, client_live_status, client_schedule, extra_services, chat, client_profile_settings
 import uvicorn
 import os
 
@@ -35,6 +35,11 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(worker.router)
 app.include_router(client.router)
+app.include_router(client_live_status.router)
+app.include_router(client_schedule.router)
+app.include_router(extra_services.router)
+app.include_router(chat.router)
+app.include_router(client_profile_settings.router)
 app.include_router(admin.router)
 app.include_router(admin.client_mgmt_router)
 app.include_router(admin.location_mgmt_router)

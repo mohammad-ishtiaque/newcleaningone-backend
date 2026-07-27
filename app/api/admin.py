@@ -38,7 +38,9 @@ from app.schemas.shift import (
     ShiftDraftCreate, ShiftDraftResponse, ShiftDraftUpdate, ShiftDraftPaginatedResponse,
     WorkerDropdownItem, WorkerDropdownPaginatedResponse,
     ShiftAssignRequest, ShiftWorkerDetail, ShiftResponse, ShiftPaginatedResponse, ShiftUpdate,
-    DayShiftGroup, ShiftOverviewResponse
+    DayShiftGroup, ShiftOverviewResponse, ShiftRoomInput, ShiftRoomDetail,
+    PhotoReviewPaginatedResponse, PhotoReviewItem, PhotoReviewRejectRequest,
+    LiveStatusResponse, LiveStatusRoomItem, LiveStatusTaskItem
 )
 from app.models.client_list import ClientListDB
 from app.services.notification_service import NotificationService
@@ -3564,12 +3566,113 @@ async def _find_location_name(db, location_id: str, client_id: Optional[str] = N
     return "Unknown Location"
 
 
+async def _build_shift_rooms_data(
+    db,
+    cleaning_plan_id: Optional[str] = None,
+    room_ids: Optional[List[str]] = None,
+    rooms_input: Optional[List[ShiftRoomInput]] = None
+):
+    processed_rooms = []
+    total_photo_req = 0
+    total_tasks = 0
+
+    if cleaning_plan_id:
+        plan_doc = await db["global_cleaning_plans"].find_one({"$or": [{"_id": cleaning_plan_id}, {"id": cleaning_plan_id}]})
+        if plan_doc and "rooms" in plan_doc:
+            for r in plan_doc["rooms"]:
+                r_detail = dict(r)
+                processed_rooms.append(r_detail)
+                total_photo_req += len(r_detail.get("required_photos", []))
+                total_tasks += len(r_detail.get("tasks", []))
+
+    if rooms_input:
+        for r_in in rooms_input:
+            room_doc = await db["rooms"].find_one({"$or": [{"_id": r_in.room_id}, {"id": r_in.room_id}]})
+            if not room_doc:
+                continue
+
+            custom_name = r_in.custom_room_name or room_doc.get("room_name", "")
+            duration = r_in.duration if r_in.duration is not None else room_doc.get("duration", 30)
+            clean_type = r_in.clean_type or room_doc.get("clean_type", "standard")
+
+            tasks_list = _process_room_tasks_for_plan(room_doc, r_in)
+            photos_list = _process_room_photos_for_plan(room_doc, r_in)
+
+            room_detail = {
+                "room_id": r_in.room_id,
+                "custom_room_name": custom_name,
+                "room_name": room_doc.get("room_name", custom_name),
+                "room_type": room_doc.get("room_type", "standard"),
+                "location_id": room_doc.get("location_id", ""),
+                "location_name": room_doc.get("location_name", ""),
+                "floor": room_doc.get("floor", 1),
+                "clean_type": clean_type,
+                "duration": duration,
+                "required_photos": photos_list,
+                "photo_number": len(photos_list),
+                "task_number": len(tasks_list),
+                "tasks": tasks_list
+            }
+            existing_idx = next((i for i, existing in enumerate(processed_rooms) if existing.get("room_id") == r_in.room_id), None)
+            if existing_idx is not None:
+                total_photo_req -= len(processed_rooms[existing_idx].get("required_photos", []))
+                total_tasks -= len(processed_rooms[existing_idx].get("tasks", []))
+                processed_rooms[existing_idx] = room_detail
+            else:
+                processed_rooms.append(room_detail)
+
+            total_photo_req += len(photos_list)
+            total_tasks += len(tasks_list)
+
+    elif room_ids and not rooms_input:
+        for r_id in room_ids:
+            if any(r.get("room_id") == r_id for r in processed_rooms):
+                continue
+            room_doc = await db["rooms"].find_one({"$or": [{"_id": r_id}, {"id": r_id}]})
+            if not room_doc:
+                continue
+
+            raw_base_photos = room_doc.get("required_photos", [])
+            if isinstance(raw_base_photos, int):
+                raw_base_photos = [{"id": str(uuid.uuid4()), "name": f"Required Photo {i+1}"} for i in range(raw_base_photos)]
+            photos_list = [dict(p) for p in raw_base_photos]
+            for p in photos_list:
+                if "id" not in p or not p["id"]:
+                    p["id"] = str(uuid.uuid4())
+
+            tasks_list = [dict(t) for t in room_doc.get("tasks", [])]
+            for t in tasks_list:
+                if "id" not in t or not t["id"]:
+                    t["id"] = str(uuid.uuid4())
+
+            room_detail = {
+                "room_id": r_id,
+                "custom_room_name": room_doc.get("room_name", ""),
+                "room_name": room_doc.get("room_name", ""),
+                "room_type": room_doc.get("room_type", "standard"),
+                "location_id": room_doc.get("location_id", ""),
+                "location_name": room_doc.get("location_name", ""),
+                "floor": room_doc.get("floor", 1),
+                "clean_type": room_doc.get("clean_type", "standard"),
+                "duration": room_doc.get("duration", 30),
+                "required_photos": photos_list,
+                "photo_number": len(photos_list),
+                "task_number": len(tasks_list),
+                "tasks": tasks_list
+            }
+            processed_rooms.append(room_detail)
+            total_photo_req += len(photos_list)
+            total_tasks += len(tasks_list)
+
+    return processed_rooms, total_tasks, total_photo_req
+
+
 @shift_mgmt_router.post(
     "/shifts/drafts",
     response_model=ShiftDraftResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create Shift Draft",
-    description="Creates a new shift draft with client, location, date, start_time, end_time, and optional shift notes. Returns draft details with unique draft ID."
+    description="Creates a new shift draft with client, location, date, start_time, end_time, rooms, tasks, photo requirements, and optional shift notes. Returns draft details with unique draft ID."
 )
 async def create_shift_draft(
     draft_in: ShiftDraftCreate,
@@ -3593,6 +3696,14 @@ async def create_shift_draft(
     # Validate location
     loc_name = await _find_location_name(db, draft_in.location_id, draft_in.client_id)
 
+    # Process rooms, tasks, and photo requirements
+    rooms_data, total_tasks_count, total_photo_required = await _build_shift_rooms_data(
+        db=db,
+        cleaning_plan_id=draft_in.cleaning_plan_id,
+        room_ids=draft_in.room_ids,
+        rooms_input=draft_in.rooms
+    )
+
     now = datetime.now(timezone.utc)
     draft_id = f"draft_{uuid.uuid4().hex[:12]}"
 
@@ -3607,6 +3718,10 @@ async def create_shift_draft(
         "start_time": draft_in.start_time,
         "end_time": draft_in.end_time,
         "shift_notes": draft_in.shift_notes,
+        "cleaning_plan_id": draft_in.cleaning_plan_id,
+        "rooms": rooms_data,
+        "total_tasks_count": total_tasks_count,
+        "total_photo_required": total_photo_required,
         "status": "draft",
         "created_at": now,
         "updated_at": now
@@ -3689,7 +3804,7 @@ async def get_shift_draft_detail(
     "/shifts/drafts/{draft_id}",
     response_model=ShiftDraftResponse,
     summary="Update Shift Draft",
-    description="Updates shift draft parameters (client_id, location_id, date, start_time, end_time, shift_notes)."
+    description="Updates shift draft parameters (client_id, location_id, date, start_time, end_time, shift_notes, rooms, tasks, photo requirements)."
 )
 async def update_shift_draft(
     draft_id: str,
@@ -3722,6 +3837,19 @@ async def update_shift_draft(
     if draft_in.start_time is not None: update_fields["start_time"] = draft_in.start_time
     if draft_in.end_time is not None: update_fields["end_time"] = draft_in.end_time
     if draft_in.shift_notes is not None: update_fields["shift_notes"] = draft_in.shift_notes
+
+    if draft_in.cleaning_plan_id is not None or draft_in.room_ids is not None or draft_in.rooms is not None:
+        c_plan_id = draft_in.cleaning_plan_id if draft_in.cleaning_plan_id is not None else draft_doc.get("cleaning_plan_id")
+        rooms_data, total_tasks_count, total_photo_required = await _build_shift_rooms_data(
+            db=db,
+            cleaning_plan_id=c_plan_id,
+            room_ids=draft_in.room_ids,
+            rooms_input=draft_in.rooms
+        )
+        update_fields["cleaning_plan_id"] = c_plan_id
+        update_fields["rooms"] = rooms_data
+        update_fields["total_tasks_count"] = total_tasks_count
+        update_fields["total_photo_required"] = total_photo_required
 
     if not update_fields:
         draft_doc["id"] = str(draft_doc.get("_id") or draft_doc.get("id"))
@@ -3871,7 +3999,17 @@ async def assign_workers_and_publish_shift(
     draft_start = draft_doc.get("start_time")
     draft_end = draft_doc.get("end_time")
 
-    if not assign_in.worker_ids:
+    target_assignments = []
+    if assign_in.worker_assignments:
+        for wa in assign_in.worker_assignments:
+            role_val = wa.shift_role or "cleaning_specialist"
+            target_assignments.append((str(wa.worker_id), str(role_val)))
+    elif assign_in.worker_ids:
+        for idx, w_id in enumerate(assign_in.worker_ids):
+            role_val = "leader" if idx == 0 and len(assign_in.worker_ids) > 1 else "cleaning_specialist"
+            target_assignments.append((str(w_id), role_val))
+
+    if not target_assignments:
         raise HTTPException(status_code=400, detail="At least one worker must be selected for assignment")
 
     active_shifts = await db["shifts"].find({
@@ -3892,7 +4030,7 @@ async def assign_workers_and_publish_shift(
     assigned_worker_details = []
     now = datetime.now(timezone.utc)
 
-    for w_id in assign_in.worker_ids:
+    for w_id, s_role in target_assignments:
         obj_id = ObjectId(w_id) if ObjectId.is_valid(w_id) else w_id
         w_doc = await db["users"].find_one({"_id": obj_id})
         if not w_doc:
@@ -3915,7 +4053,8 @@ async def assign_workers_and_publish_shift(
             "worker_id": str(w_doc.get("_id") or w_doc.get("id")),
             "name": w_doc.get("full_name", ""),
             "profile_picture": w_doc.get("profile_photo"),
-            "worker_type": str(w_type)
+            "worker_type": str(w_type),
+            "shift_role": s_role
         })
 
     shift_id = str(uuid.uuid4())
@@ -3931,6 +4070,10 @@ async def assign_workers_and_publish_shift(
         "start_time": draft_start,
         "end_time": draft_end,
         "shift_notes": draft_doc.get("shift_notes"),
+        "cleaning_plan_id": draft_doc.get("cleaning_plan_id"),
+        "rooms": draft_doc.get("rooms", []),
+        "total_tasks_count": draft_doc.get("total_tasks_count", 0),
+        "total_photo_required": draft_doc.get("total_photo_required", 0),
         "status": "published",
         "workers": assigned_worker_details,
         "created_at": now,
@@ -3938,6 +4081,70 @@ async def assign_workers_and_publish_shift(
     }
 
     await db["shifts"].insert_one(shift_doc)
+
+    # Auto-initialize 'Service team' group conversation for this shift
+    conv_id = f"conv_grp_{shift_id}"
+    participants_list = []
+
+    client_id = draft_doc.get("client_id")
+    if client_id:
+        c_doc = await db["client_list"].find_one({"_id": client_id})
+        c_name = c_doc.get("company_name", "Client") if c_doc else draft_doc.get("client_name", "Client")
+        participants_list.append({
+            "user_id": str(client_id),
+            "name": c_name,
+            "role": "client",
+            "profile_picture": None
+        })
+
+    for w in assigned_worker_details:
+        participants_list.append({
+            "user_id": str(w["worker_id"]),
+            "name": w.get("name", "Worker"),
+            "role": "worker",
+            "profile_picture": w.get("profile_picture")
+        })
+
+    admin_id = str(current_user.id or current_user.mongo_id)
+    participants_list.append({
+        "user_id": admin_id,
+        "name": getattr(current_user, "full_name", "Clean Ones Admin"),
+        "role": "admin",
+        "profile_picture": getattr(current_user, "profile_photo", None)
+    })
+
+    client_company_name = draft_doc.get("client_name", "Company")
+    client_id = draft_doc.get("client_id")
+    if client_id:
+        c_doc = await db["client_list"].find_one({"_id": client_id})
+        if c_doc and c_doc.get("company_name"):
+            client_company_name = c_doc.get("company_name")
+
+    cleaning_name = draft_doc.get("cleaning_plan_name") or draft_doc.get("title") or "Service team"
+    cp_id = draft_doc.get("cleaning_plan_id")
+    if cp_id:
+        cp_doc = await db["global_cleaning_plans"].find_one({"$or": [{"_id": cp_id}, {"id": cp_id}]})
+        if cp_doc:
+            cleaning_name = cp_doc.get("title") or cp_doc.get("plan_name") or cp_doc.get("name") or cleaning_name
+
+    grp_conv_doc = {
+        "_id": conv_id,
+        "id": conv_id,
+        "type": "group",
+        "title": cleaning_name,
+        "subtitle": client_company_name,
+        "shift_id": shift_id,
+        "participants": participants_list,
+        "last_message": None,
+        "unread_counts": {},
+        "created_at": now,
+        "updated_at": now
+    }
+    await db["conversations"].update_one(
+        {"_id": conv_id},
+        {"$set": grp_conv_doc},
+        upsert=True
+    )
 
     shift_summary_entry = {
         "shift_id": shift_id,
@@ -4175,6 +4382,19 @@ async def update_shift(
             })
         update_fields["workers"] = assigned_worker_details
 
+    if shift_in.cleaning_plan_id is not None or shift_in.room_ids is not None or shift_in.rooms is not None:
+        c_plan_id = shift_in.cleaning_plan_id if shift_in.cleaning_plan_id is not None else shift_doc.get("cleaning_plan_id")
+        rooms_data, total_tasks_count, total_photo_required = await _build_shift_rooms_data(
+            db=db,
+            cleaning_plan_id=c_plan_id,
+            room_ids=shift_in.room_ids,
+            rooms_input=shift_in.rooms
+        )
+        update_fields["cleaning_plan_id"] = c_plan_id
+        update_fields["rooms"] = rooms_data
+        update_fields["total_tasks_count"] = total_tasks_count
+        update_fields["total_photo_required"] = total_photo_required
+
     if not update_fields:
         shift_doc["id"] = str(shift_doc.get("_id") or shift_doc.get("id"))
         return ShiftResponse(**shift_doc)
@@ -4203,3 +4423,268 @@ async def delete_shift(
         if res_draft.deleted_count == 0:
             raise HTTPException(status_code=404, detail="Shift record not found")
     return {"message": "Shift deleted successfully"}
+
+
+# --- Admin Photo Review Queue & Live Status Endpoints ---
+
+def _calculate_shift_progress(shift_doc: dict) -> dict:
+    rooms = shift_doc.get("rooms", [])
+    total_rooms = len(rooms)
+    completed_rooms = 0
+    in_progress_rooms = 0
+    pending_rooms = 0
+
+    total_tasks = 0
+    completed_tasks = 0
+
+    for r in rooms:
+        r_status = r.get("status", "pending")
+        if r_status == "completed":
+            completed_rooms += 1
+        elif r_status in ["in_progress", "photo_submitted"]:
+            in_progress_rooms += 1
+        else:
+            pending_rooms += 1
+
+        r_tasks = r.get("tasks", [])
+        total_tasks += len(r_tasks)
+        completed_tasks += sum(1 for t in r_tasks if t.get("is_completed"))
+
+    if total_rooms > 0:
+        overall_progress = round((completed_rooms / total_rooms) * 100.0, 1)
+    elif total_tasks > 0:
+        overall_progress = round((completed_tasks / total_tasks) * 100.0, 1)
+    else:
+        overall_progress = 0.0
+
+    return {
+        "overall_progress_percentage": overall_progress,
+        "total_rooms_count": total_rooms,
+        "completed_rooms_count": completed_rooms,
+        "in_progress_rooms_count": in_progress_rooms,
+        "pending_rooms_count": pending_rooms,
+        "total_tasks_count": total_tasks,
+        "completed_tasks_count": completed_tasks
+    }
+
+
+@shift_mgmt_router.get(
+    "/photo-reviews",
+    response_model=PhotoReviewPaginatedResponse,
+    summary="List Photo Reviews for Admin Review Queue",
+    description="Returns a paginated list of submitted room photos for admin approval/rejection with optional status filter (pending_review, approved, rejected) and search query."
+)
+async def list_photo_reviews(
+    page: int = 1,
+    limit: int = 10,
+    status_val: Optional[str] = None,
+    search: Optional[str] = None,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    query = {}
+
+    if status_val:
+        query["status"] = status_val
+
+    if search:
+        search_regex = {"$regex": search, "$options": "i"}
+        query["$or"] = [
+            {"cleaner.name": search_regex},
+            {"client.name": search_regex},
+            {"location.name": search_regex},
+            {"room.name": search_regex},
+            {"photo_name": search_regex}
+        ]
+
+    total_count = await db["photo_reviews"].count_documents(query)
+    pending_count = await db["photo_reviews"].count_documents({"status": "pending_review"})
+
+    skip = (page - 1) * limit
+    cursor = db["photo_reviews"].find(query).skip(skip).limit(limit).sort("date_submitted", -1)
+    raw_reviews = await cursor.to_list(length=limit)
+
+    reviews_res = []
+    for r in raw_reviews:
+        r["review_id"] = str(r.get("_id") or r.get("review_id"))
+        loc_dict = r.get("location") or {}
+        if not loc_dict.get("name"):
+            r["location"] = {
+                "location_id": str(loc_dict.get("location_id") or "loc_default"),
+                "name": "Main Location"
+            }
+        client_dict = r.get("client") or {}
+        if not client_dict.get("name"):
+            r["client"] = {
+                "client_id": str(client_dict.get("client_id") or "client_default"),
+                "name": "Client"
+            }
+        room_dict = r.get("room") or {}
+        if not room_dict.get("name"):
+            r["room"] = {
+                "room_id": str(room_dict.get("room_id") or "room_default"),
+                "name": "Room"
+            }
+        reviews_res.append(PhotoReviewItem(**r))
+
+    return PhotoReviewPaginatedResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        pending_reviews_count=pending_count,
+        reviews=reviews_res
+    )
+
+
+@shift_mgmt_router.post(
+    "/photo-reviews/{review_id}/approve",
+    response_model=PhotoReviewItem,
+    summary="Approve Photo Review & Mark Room Completed",
+    description="Admin approves a room's photo review. Automatically marks the room as 'completed' in the corresponding shift and recalculates overall progress."
+)
+async def approve_photo_review(
+    review_id: str,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+
+    review_doc = await db["photo_reviews"].find_one({"$or": [{"_id": review_id}, {"review_id": review_id}]})
+    if not review_doc:
+        raise HTTPException(status_code=404, detail="Photo review record not found")
+
+    shift_id = review_doc.get("shift_id")
+    room_id = review_doc.get("room", {}).get("room_id")
+
+    now = datetime.now(timezone.utc)
+    await db["photo_reviews"].update_one(
+        {"$or": [{"_id": review_id}, {"review_id": review_id}]},
+        {"$set": {"status": "approved", "updated_at": now}}
+    )
+
+    shift_doc = await db["shifts"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+    if shift_doc:
+        rooms = shift_doc.get("rooms", [])
+        target_room = next((r for r in rooms if str(r.get("room_id")) == str(room_id)), None)
+        if target_room:
+            target_room["status"] = "completed"
+
+            progress = _calculate_shift_progress(shift_doc)
+            await db["shifts"].update_one(
+                {"$or": [{"_id": shift_id}, {"id": shift_id}]},
+                {"$set": {
+                    "rooms": rooms,
+                    "overall_progress_percentage": progress["overall_progress_percentage"],
+                    "completed_rooms_count": progress["completed_rooms_count"],
+                    "in_progress_rooms_count": progress["in_progress_rooms_count"],
+                    "pending_rooms_count": progress["pending_rooms_count"],
+                    "updated_at": now
+                }}
+            )
+
+    updated_review = await db["photo_reviews"].find_one({"$or": [{"_id": review_id}, {"review_id": review_id}]})
+    updated_review["review_id"] = str(updated_review.get("_id") or updated_review.get("review_id"))
+    return PhotoReviewItem(**updated_review)
+
+
+@shift_mgmt_router.post(
+    "/photo-reviews/{review_id}/reject",
+    response_model=PhotoReviewItem,
+    summary="Reject Photo Review",
+    description="Admin rejects a room's photo review with rejection feedback."
+)
+async def reject_photo_review(
+    review_id: str,
+    reject_in: PhotoReviewRejectRequest,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+
+    review_doc = await db["photo_reviews"].find_one({"$or": [{"_id": review_id}, {"review_id": review_id}]})
+    if not review_doc:
+        raise HTTPException(status_code=404, detail="Photo review record not found")
+
+    now = datetime.now(timezone.utc)
+    await db["photo_reviews"].update_one(
+        {"$or": [{"_id": review_id}, {"review_id": review_id}]},
+        {"$set": {
+            "status": "rejected",
+            "rejection_reason": reject_in.reason,
+            "updated_at": now
+        }}
+    )
+
+    updated_review = await db["photo_reviews"].find_one({"$or": [{"_id": review_id}, {"review_id": review_id}]})
+    updated_review["review_id"] = str(updated_review.get("_id") or updated_review.get("review_id"))
+    return PhotoReviewItem(**updated_review)
+
+
+@shift_mgmt_router.get(
+    "/shifts/{shift_id}/live-status",
+    response_model=LiveStatusResponse,
+    summary="Get Shift Live Status",
+    description="Returns real-time task completion breakdown and progress for a specific cleaning shift."
+)
+async def get_shift_live_status(
+    shift_id: str,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+
+    shift_doc = await db["shifts"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+    if not shift_doc:
+        raise HTTPException(status_code=404, detail="Shift not found")
+
+    cleaner_name = "Assigned Worker"
+    workers = shift_doc.get("workers", [])
+    if workers:
+        cleaner_name = workers[0].get("name", "Assigned Worker")
+
+    rooms = shift_doc.get("rooms", [])
+    live_rooms = []
+
+    for r in rooms:
+        r_tasks = r.get("tasks", [])
+        live_tasks = []
+
+        for idx, t in enumerate(r_tasks):
+            if t.get("is_completed"):
+                t_status = "DONE"
+            elif idx == 0 or (idx > 0 and r_tasks[idx-1].get("is_completed")):
+                t_status = "ACTIVE"
+            else:
+                t_status = "PENDING"
+
+            c_at_str = None
+            if t.get("completed_at"):
+                c_at = t.get("completed_at")
+                c_at_str = c_at.strftime("%I:%M %p") if isinstance(c_at, datetime) else str(c_at)
+
+            live_tasks.append(LiveStatusTaskItem(
+                id=str(t.get("id")),
+                name=t.get("name", ""),
+                status=t_status,
+                completed_at=c_at_str
+            ))
+
+        completed_count = sum(1 for t in r_tasks if t.get("is_completed"))
+        live_rooms.append(LiveStatusRoomItem(
+            room_id=str(r.get("room_id")),
+            room_name=r.get("room_name") or r.get("custom_room_name", "Room"),
+            completed_tasks=completed_count,
+            total_tasks=len(r_tasks),
+            tasks=live_tasks
+        ))
+
+    progress = _calculate_shift_progress(shift_doc)
+
+    return LiveStatusResponse(
+        shift_id=str(shift_doc.get("_id") or shift_doc.get("id")),
+        client_name=shift_doc.get("client_name", "Client"),
+        location_name=shift_doc.get("location_name", "Location"),
+        status=shift_doc.get("status", "running"),
+        overall_progress_percentage=progress["overall_progress_percentage"],
+        assigned_cleaner_name=cleaner_name,
+        arrival_time=shift_doc.get("start_time"),
+        rooms=live_rooms
+    )
+

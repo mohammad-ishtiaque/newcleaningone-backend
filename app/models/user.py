@@ -78,5 +78,14 @@ class UserInDB(BaseModel):
     push_notifications_enabled: bool = True
     onesignal_player_id: Optional[str] = None
 
+    # Client settings & preferences
+    email_notifications: bool = True
+    sms_cleaning_alerts: bool = False
+    portal_language: str = "English (US)"
+    last_password_changed_at: Optional[datetime] = None
+    member_since: Optional[str] = None
+    contract_type: Optional[str] = None
+    account_status: Optional[str] = None
+
     class Config:
         populate_by_name = True
