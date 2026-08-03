@@ -53,10 +53,18 @@ class NextVisitorItem(BaseModel):
     team_avatars: List[str] = Field(default_factory=list)
     description: str = "Regular cleaning • approximately 7.5 hours"
 
+class QuickActionItem(BaseModel):
+    id: str
+    title: str
+    subtitle: str
+    action_type: str
+
 class ClientOverviewResponse(BaseModel):
     greeting_name: str = "Apex Technology Ltd."
-    current_date_str: str = "Saturday, 25 July"
+    current_date_str: str = "Saturday, 25 July • Here's today's service at a glance."
     todays_progress: TodaysOverallProgress
     metrics_grid: MetricsGrid
     live_status: LiveStatusSection
+    quick_actions: List[QuickActionItem] = Field(default_factory=list)
     next_visitors: NextVisitorItem
+

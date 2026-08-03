@@ -582,6 +582,13 @@ class RosterShiftCreateRequest(BaseModel):
     cleaning_plan_id: Optional[str] = Field(default=None)
     room_ids: Optional[List[str]] = Field(default=None)
 
+class ClientLiveShiftPaginatedResponse(BaseModel):
+    total_count: int
+    page: int
+    limit: int
+    shifts: List[ShiftResponse] = Field(default_factory=list)
+
+
 
 
 

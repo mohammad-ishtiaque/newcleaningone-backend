@@ -4,11 +4,10 @@ from fastapi.staticfiles import StaticFiles
 from app.api import (
     auth, worker, client, admin, profile, worker_shifts,
     admin_shift_monitoring, admin_dashboard, client_live_status,
-    client_schedule, extra_services, chat, client_profile_settings
+    client_schedule, client_extra_services, admin_extra_services, worker_extra_services,
+    chat, client_chat, admin_chat, worker_chat, worker_roster, worker_home, client_profile_settings
 )
 import os
-
-from app.api.chat_admin_endpoints import chat_admin_router
 
 def create_app(service_name: str = "all") -> FastAPI:
     service_name = service_name.lower().strip()
@@ -54,7 +53,6 @@ def create_app(service_name: str = "all") -> FastAPI:
     app.include_router(auth.router)
     app.include_router(profile.router)
     app.include_router(chat.router)
-    app.include_router(chat_admin_router)
 
     if service_name in ("admin", "all"):
         app.include_router(admin.router)
@@ -72,6 +70,8 @@ def create_app(service_name: str = "all") -> FastAPI:
         app.include_router(admin.escalations_router)
         app.include_router(admin.qc_reports_router)
         app.include_router(admin.admin_notifications_router)
+        app.include_router(admin_extra_services.router)
+        app.include_router(admin_chat.router)
         app.include_router(admin_shift_monitoring.shift_monitoring_router)
         app.include_router(admin_dashboard.admin_dashboard_router)
 
@@ -79,12 +79,17 @@ def create_app(service_name: str = "all") -> FastAPI:
         app.include_router(client.router)
         app.include_router(client_live_status.router)
         app.include_router(client_schedule.router)
-        app.include_router(extra_services.router)
+        app.include_router(client_extra_services.router)
+        app.include_router(client_chat.router)
         app.include_router(client_profile_settings.router)
 
     if service_name in ("worker", "all"):
         app.include_router(worker.router)
         app.include_router(worker_shifts.worker_shift_router)
+        app.include_router(worker_extra_services.router)
+        app.include_router(worker_chat.router)
+        app.include_router(worker_roster.router)
+        app.include_router(worker_home.router)
 
     os.makedirs("uploads", exist_ok=True)
     app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")

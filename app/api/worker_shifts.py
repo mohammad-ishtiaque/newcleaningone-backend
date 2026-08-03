@@ -17,7 +17,7 @@ from app.schemas.shift_monitoring import (
     WorkerAttendanceToggleResponse, WorkerShiftStateResponse
 )
 
-worker_shift_router = APIRouter(prefix="/worker/shifts", tags=["Workers Shift Management"])
+worker_shift_router = APIRouter(prefix="/worker/shifts", tags=["Worker Active Shift Management"])
 
 def require_worker(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
     if current_user.role not in [RoleEnum.worker, "worker"]:
@@ -709,15 +709,19 @@ async def upload_room_photo(
 
 
 @worker_shift_router.post(
-    "/{shift_id}/rooms/{room_id}/request-clean",
-    summary="Request Room Cleaning Completion",
-    description="Validates that all tasks for the room are finished before requesting completion. Returns error if any task is incomplete."
+    "/{shift_id}/rooms/{room_id}/start",
+    summary="Start Cleaning Room (Screenshot 3 Modal)",
+    description="Transitions room status to 'in_progress' and initializes task checklist for worker."
 )
-async def request_room_clean_completion(
+async def start_cleaning_room(
     shift_id: str,
     room_id: str,
     current_user: UserInDB = Depends(require_worker)
 ):
+    """
+    Start Cleaning Room Endpoint.
+    Transitions room status from pending to in_progress when worker clicks 'Start Cleaning'.
+    """
     db = get_database()
     worker_id = str(current_user.id or current_user.mongo_id)
 
@@ -730,24 +734,163 @@ async def request_room_clean_completion(
     if not target_room:
         raise HTTPException(status_code=404, detail=f"Room ID '{room_id}' not found in shift")
 
-    tasks = target_room.get("tasks", [])
-    total_tasks = len(tasks)
-    completed_tasks = sum(1 for t in tasks if t.get("is_completed"))
+    now = datetime.now(timezone.utc)
+    target_room["status"] = "in_progress"
+    target_room["approval_status"] = "none"
+    target_room["started_at"] = now
 
-    if completed_tasks < total_tasks:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot complete room clean. All tasks ({completed_tasks}/{total_tasks} completed) must be finished before requesting room completion."
-        )
+    progress = _calculate_shift_progress(shift_doc)
+
+    await db["shifts"].update_one(
+        {"$or": [{"_id": shift_id}, {"id": shift_id}]},
+        {"$set": {
+            "rooms": rooms,
+            "overall_progress_percentage": progress["overall_progress_percentage"],
+            "completed_rooms_count": progress["completed_rooms_count"],
+            "in_progress_rooms_count": progress["in_progress_rooms_count"],
+            "pending_rooms_count": progress["pending_rooms_count"],
+            "updated_at": now
+        }}
+    )
 
     return {
         "shift_id": shift_id,
         "room_id": room_id,
         "room_name": target_room.get("room_name"),
-        "status": target_room.get("status", "in_progress"),
-        "completed_tasks": completed_tasks,
-        "total_tasks": total_tasks,
-        "message": "All tasks completed. Room photos submitted for Admin approval."
+        "status": "in_progress",
+        "message": "Room status updated to in_progress. Cleaning started."
+    }
+
+
+@worker_shift_router.post(
+    "/{shift_id}/rooms/{room_id}/complete",
+    summary="Complete Room & Upload Proof (Screenshot 2)",
+    description="Validates that ALL checklist tasks are completed before allowing proof upload. Submits proof into Admin review queue (pending badge)."
+)
+async def complete_room_and_upload_proof(
+    shift_id: str,
+    room_id: str,
+    after_photo: Optional[UploadFile] = File(None),
+    before_photo: Optional[UploadFile] = File(None),
+    notes: Optional[str] = Form(None),
+    current_user: UserInDB = Depends(require_worker)
+):
+    """
+    Complete Room & Upload Proof Endpoint.
+    Validates task completion, uploads before/after photos, updates room status to photo_submitted (pending review), and pushes entry into Admin photo review queue.
+    """
+    db = get_database()
+    worker_id = str(current_user.id or current_user.mongo_id)
+
+    shift_doc = await db["shifts"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+    if not shift_doc:
+        raise HTTPException(status_code=404, detail="Shift not found")
+
+    rooms = shift_doc.get("rooms", [])
+    target_room = next((r for r in rooms if str(r.get("room_id")) == str(room_id)), None)
+    if not target_room:
+        raise HTTPException(status_code=404, detail=f"Room ID '{room_id}' not found in shift")
+
+    # VALIDATE ALL CHECKLIST TASKS MUST BE COMPLETED
+    tasks = target_room.get("tasks", [])
+    total_tasks = len(tasks)
+    completed_tasks = sum(1 for t in tasks if t.get("is_completed"))
+
+    if total_tasks > 0 and completed_tasks < total_tasks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot complete room clean. All checklist tasks ({completed_tasks}/{total_tasks} completed) must be finished before uploading proof and submitting room for Admin review."
+        )
+
+    s3_service = S3Service()
+    after_url = "/uploads/photo_reviews/sample_after.jpg"
+    before_url = None
+
+    if after_photo and hasattr(after_photo, "filename") and after_photo.filename:
+        after_bytes = await after_photo.read()
+        after_url = await s3_service.upload_file(after_bytes, after_photo.filename, after_photo.content_type)
+
+    if before_photo and hasattr(before_photo, "filename") and before_photo.filename:
+        before_bytes = await before_photo.read()
+        before_url = await s3_service.upload_file(before_bytes, before_photo.filename, before_photo.content_type)
+
+    now = datetime.now(timezone.utc)
+    review_id = f"RV-{uuid.uuid4().hex[:6].upper()}"
+
+    clean_notes = notes if isinstance(notes, str) else None
+
+    review_doc = {
+        "_id": review_id,
+        "review_id": review_id,
+        "shift_id": shift_id,
+        "cleaner": {
+            "worker_id": worker_id,
+            "name": current_user.full_name,
+            "profile_picture": getattr(current_user, "profile_photo", None)
+        },
+        "client": {
+            "client_id": shift_doc.get("client_id", ""),
+            "name": shift_doc.get("client_name", "")
+        },
+        "location": {
+            "location_id": shift_doc.get("location_id", ""),
+            "name": shift_doc.get("location_name", "")
+        },
+        "room": {
+            "room_id": room_id,
+            "name": target_room.get("room_name", "")
+        },
+        "photo_url": after_url,
+        "after_photo_url": after_url,
+        "before_photo_url": before_url,
+        "notes": clean_notes,
+        "status": "pending_review",
+        "date_submitted": now
+    }
+
+    await db["photo_reviews"].insert_one(review_doc)
+
+    photo_entry = {
+        "photo_id": str(uuid.uuid4()),
+        "photo_url": after_url,
+        "before_photo_url": before_url,
+        "submitted_at": now,
+        "review_id": review_id,
+        "notes": clean_notes,
+        "status": "pending_review"
+    }
+
+    if "submitted_photos" not in target_room or not isinstance(target_room["submitted_photos"], list):
+        target_room["submitted_photos"] = []
+    target_room["submitted_photos"].append(photo_entry)
+
+    target_room["status"] = "photo_submitted"
+    target_room["approval_status"] = "pending"
+    target_room["notes"] = clean_notes
+
+    progress = _calculate_shift_progress(shift_doc)
+
+    await db["shifts"].update_one(
+        {"$or": [{"_id": shift_id}, {"id": shift_id}]},
+        {"$set": {
+            "rooms": rooms,
+            "overall_progress_percentage": progress["overall_progress_percentage"],
+            "completed_rooms_count": progress["completed_rooms_count"],
+            "in_progress_rooms_count": progress["in_progress_rooms_count"],
+            "pending_rooms_count": progress["pending_rooms_count"],
+            "updated_at": now
+        }}
+    )
+
+    return {
+        "review_id": review_id,
+        "shift_id": shift_id,
+        "room_id": room_id,
+        "room_name": target_room.get("room_name"),
+        "status": "photo_submitted",
+        "approval_status": "pending",
+        "photo_url": after_url,
+        "message": "Room clean proof uploaded successfully and submitted for Admin review."
     }
 
 

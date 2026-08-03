@@ -209,17 +209,71 @@ async def get_photo_review_details(
         date_submitted=c_dt
     )
 
-@photo_reviews_router.patch("/photo-reviews/{review_id}/approve", summary="Approve Photo Review (Triggers PyTorch Online Learning)")
+async def _sync_shift_room_approval(db, r_doc: dict, is_approved: bool):
+    """Helper to update shift room status and recalculate shift progress when Admin approves or rejects proof."""
+    if not r_doc:
+        return
+    shift_id = r_doc.get("shift_id")
+    room_info = r_doc.get("room", {})
+    room_id = room_info.get("room_id") if isinstance(room_info, dict) else r_doc.get("room_id")
+
+    if not shift_id or not room_id:
+        return
+
+    shift_doc = await db["shifts"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+    if not shift_doc:
+        return
+
+    rooms = shift_doc.get("rooms", [])
+    target_room = next((r for r in rooms if str(r.get("room_id")) == str(room_id)), None)
+    if not target_room:
+        return
+
+    now = datetime.now(timezone.utc)
+    if is_approved:
+        target_room["status"] = "completed"
+        target_room["approval_status"] = "verified"
+        target_room["is_verified"] = True
+    else:
+        target_room["status"] = "in_progress"
+        target_room["approval_status"] = "rejected"
+        target_room["is_verified"] = False
+
+    total_rooms = len(rooms)
+    completed_rooms = sum(1 for r in rooms if r.get("status") == "completed")
+    in_progress_rooms = sum(1 for r in rooms if r.get("status") in ["in_progress", "photo_submitted"])
+    pending_rooms = sum(1 for r in rooms if r.get("status") in ["pending", "pending_start"])
+
+    overall_progress = round((completed_rooms / total_rooms * 100.0), 1) if total_rooms > 0 else 0.0
+
+    await db["shifts"].update_one(
+        {"$or": [{"_id": shift_id}, {"id": shift_id}]},
+        {"$set": {
+            "rooms": rooms,
+            "overall_progress_percentage": overall_progress,
+            "completed_rooms_count": completed_rooms,
+            "in_progress_rooms_count": in_progress_rooms,
+            "pending_rooms_count": pending_rooms,
+            "updated_at": now
+        }}
+    )
+
+@photo_reviews_router.patch("/photo-reviews/{review_id}/approve", summary="Approve Photo Review (Triggers PyTorch Online Learning & Completes Room)")
 async def approve_photo_review(
     review_id: str,
     current_user: UserInDB = Depends(require_admin)
 ):
+    """
+    Approve Photo Review Endpoint.
+    Approves worker submitted photo, updates AI online learning model, and marks linked shift room as completed with 'verified' status.
+    """
     db = get_database()
     admin_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "admin_1")
     now = datetime.now(timezone.utc)
 
     r_doc = await db["photo_reviews"].find_one({"$or": [{"_id": review_id}, {"review_id": review_id}]})
-    after_path = r_doc.get("after_photo_path") if r_doc else "uploads/photo_reviews/after_sample.jpg"
+    raw_after = (r_doc.get("after_photo_path") or r_doc.get("after_photo_url") or r_doc.get("photo_url")) if r_doc else None
+    after_path = str(raw_after).lstrip("/") if raw_after else "uploads/photo_reviews/after_sample.jpg"
     before_path = r_doc.get("before_photo_path") if r_doc else None
 
     # TRIGGER ONLINE LEARNING STEP (PyTorch SGD Update: y = 1.0)
@@ -241,24 +295,32 @@ async def approve_photo_review(
         upsert=True
     )
 
+    if r_doc:
+        await _sync_shift_room_approval(db, r_doc, is_approved=True)
+
     return {
         "review_id": review_id,
         "status": "approved",
-        "message": "Photo review approved successfully. Custom PyTorch AI model updated with positive feedback."
+        "message": "Photo review approved successfully. Room marked completed and verified in MongoDB shift."
     }
 
-@photo_reviews_router.patch("/photo-reviews/{review_id}/reject", summary="Reject Photo Review (Triggers PyTorch Online Learning)")
+@photo_reviews_router.patch("/photo-reviews/{review_id}/reject", summary="Reject Photo Review (Triggers PyTorch Online Learning & Reopens Room)")
 async def reject_photo_review(
     review_id: str,
     reject_in: PhotoReviewRejectRequest,
     current_user: UserInDB = Depends(require_admin)
 ):
+    """
+    Reject Photo Review Endpoint.
+    Rejects submitted photo with reason, updates AI online learning model, and marks room as rejected in shift.
+    """
     db = get_database()
     admin_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "admin_1")
     now = datetime.now(timezone.utc)
 
     r_doc = await db["photo_reviews"].find_one({"$or": [{"_id": review_id}, {"review_id": review_id}]})
-    after_path = r_doc.get("after_photo_path") if r_doc else "uploads/photo_reviews/after_sample.jpg"
+    raw_after = (r_doc.get("after_photo_path") or r_doc.get("after_photo_url") or r_doc.get("photo_url")) if r_doc else None
+    after_path = str(raw_after).lstrip("/") if raw_after else "uploads/photo_reviews/after_sample.jpg"
     before_path = r_doc.get("before_photo_path") if r_doc else None
 
     # TRIGGER ONLINE LEARNING STEP (PyTorch SGD Update: y = 0.0)
@@ -281,9 +343,11 @@ async def reject_photo_review(
         upsert=True
     )
 
+    if r_doc:
+        await _sync_shift_room_approval(db, r_doc, is_approved=False)
+
     return {
         "review_id": review_id,
         "status": "rejected",
-        "rejection_reason": reject_in.reason,
-        "message": "Photo review rejected successfully. Custom PyTorch AI model updated with negative feedback."
+        "message": "Photo review rejected. Linked room marked as rejected in shift."
     }

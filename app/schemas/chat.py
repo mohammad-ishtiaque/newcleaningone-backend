@@ -84,3 +84,10 @@ class AttachmentUploadResponse(BaseModel):
     attachment_type: str = "image"
     filename: str
 
+class PaginatedConversationsResponse(BaseModel):
+    total_count: int
+    page: int
+    limit: int
+    conversations: List[ConversationResponse] = Field(default_factory=list)
+
+
