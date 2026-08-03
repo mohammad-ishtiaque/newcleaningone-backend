@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List, Dict, Any, Union, Literal
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from enum import Enum
 
 # --- Enums ---
@@ -257,18 +257,40 @@ class ClientOverviewDetailResponse(BaseModel):
         from_attributes = True
 
 class GlobalLocationResponse(BaseModel):
-    id: str
-    client_id: str
-    company_name: str
-    name: str
-    type: str
-    address: str
+    id: str = ""
+    client_id: str = ""
+    company_name: str = ""
+    name: str = ""
+    type: str = "office"
+    address: str = ""
     floor: int = 1
-    number_of_rooms: int
-    description: str
+    number_of_rooms: int = 0
+    description: str = ""
     image_url: Optional[str] = None
-    created_at: str
-    updated_at: str
+    created_at: str = ""
+    updated_at: str = ""
+    location_id: Optional[str] = None
+    location_name: Optional[str] = None
+    client_company_name: Optional[str] = None
+    total_rooms_count: Optional[int] = 0
+    cleaning_plans_count: Optional[int] = 0
+
+    def __init__(self, **data):
+        if "location_id" in data and not data.get("id"):
+            data["id"] = data["location_id"]
+        if "location_name" in data and not data.get("name"):
+            data["name"] = data["location_name"]
+        if "client_company_name" in data and not data.get("company_name"):
+            data["company_name"] = data["client_company_name"]
+        if isinstance(data.get("created_at"), datetime):
+            data["created_at"] = data["created_at"].isoformat()
+        if isinstance(data.get("updated_at"), datetime):
+            data["updated_at"] = data["updated_at"].isoformat()
+        super().__init__(**data)
+
+    class Config:
+        populate_by_name = True
+        extra = "allow"
 
 class GlobalLocationPaginatedResponse(BaseModel):
     total_count: int
@@ -277,11 +299,26 @@ class GlobalLocationPaginatedResponse(BaseModel):
     locations: List[GlobalLocationResponse]
 
 class LocationDropdownItemResponse(BaseModel):
-    id: str
-    name: str
-    client_id: str
-    company_name: str
+    id: str = ""
+    name: str = ""
+    client_id: str = ""
+    company_name: str = ""
     floor: int = 1
+    location_id: Optional[str] = None
+    location_name: Optional[str] = None
+    address: Optional[str] = None
+    total_rooms_count: Optional[int] = 0
+
+    def __init__(self, **data):
+        if "location_id" in data and not data.get("id"):
+            data["id"] = data["location_id"]
+        if "location_name" in data and not data.get("name"):
+            data["name"] = data["location_name"]
+        super().__init__(**data)
+
+    class Config:
+        populate_by_name = True
+        extra = "allow"
 
 class LocationDropdownPaginatedResponse(BaseModel):
     total_count: int
@@ -290,8 +327,25 @@ class LocationDropdownPaginatedResponse(BaseModel):
     locations: List[LocationDropdownItemResponse]
 
 class RoomDropdownItemResponse(BaseModel):
-    id: str
-    room_name: str
+    id: str = ""
+    room_name: str = ""
+    room_id: Optional[str] = None
+    location_id: Optional[str] = None
+    location_name: Optional[str] = None
+    floor: Optional[int] = 1
+    cleaning_type: Optional[str] = "standard"
+    duration: Optional[int] = 30
+
+    def __init__(self, **data):
+        if "room_id" in data and not data.get("id"):
+            data["id"] = data["room_id"]
+        if "name" in data and not data.get("room_name"):
+            data["room_name"] = data["name"]
+        super().__init__(**data)
+
+    class Config:
+        populate_by_name = True
+        extra = "allow"
 
 class RoomDropdownPaginatedResponse(BaseModel):
     total_count: int
@@ -472,28 +526,57 @@ class CleaningPlanRoomSummary(BaseModel):
     room_type: str
 
 class GlobalCleaningPlanListItemResponse(BaseModel):
-    id: str
-    name: str
-    client_id: str
-    client_name: str
+    id: str = ""
+    name: str = ""
+    client_id: str = ""
+    client_name: str = ""
     location_id: Optional[str] = None
     client_location_name: Optional[str] = None
+    location_name: Optional[str] = None
     rooms: List[CleaningPlanRoomSummary] = Field(default_factory=list)
-    total_duration: int
-    total_photo_required: int
-    total_tasks_count: int
-    created_at: datetime
-    updated_at: datetime
+    rooms_count: int = 0
+    total_duration: int = 0
+    total_photo_required: int = 0
+    total_tasks_count: int = 0
+    created_at: Any = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: Any = Field(default_factory=lambda: datetime.now(timezone.utc))
+    plan_id: Optional[str] = None
+    title: Optional[str] = None
+    total_photo_requirements: Optional[int] = None
+    estimated_duration_hours: Optional[float] = None
+
+    def __init__(self, **data):
+        if "plan_id" in data and not data.get("id"):
+            data["id"] = data["plan_id"]
+        if "title" in data and not data.get("name"):
+            data["name"] = data["title"]
+        if "location_name" in data and not data.get("client_location_name"):
+            data["client_location_name"] = data["location_name"]
+        if "total_photo_requirements" in data and not data.get("total_photo_required"):
+            data["total_photo_required"] = data["total_photo_requirements"]
+        if "estimated_duration_hours" in data and not data.get("total_duration"):
+            data["total_duration"] = int(data.get("estimated_duration_hours", 0) * 60)
+        super().__init__(**data)
 
     class Config:
         populate_by_name = True
-        from_attributes = True
+        extra = "allow"
 
 class GlobalCleaningPlanPaginatedResponse(BaseModel):
     total_count: int
     page: int
     limit: int
-    cleaning_plans: List[GlobalCleaningPlanListItemResponse]
+    cleaning_plans: List[GlobalCleaningPlanListItemResponse] = Field(default_factory=list)
+    plans: Optional[List[GlobalCleaningPlanListItemResponse]] = None
+
+    def __init__(self, **data):
+        if "plans" in data and not data.get("cleaning_plans"):
+            data["cleaning_plans"] = data["plans"]
+        super().__init__(**data)
+
+    class Config:
+        populate_by_name = True
+        extra = "allow"
 
 
 # --- Client Detailed Dashboard Schemas (Image 2 - Image 5) ---

@@ -77,10 +77,10 @@ class FAQService:
             "limit": limit,
             "faqs": [
                 {
-                    "serial_no": item["serial_no"],
-                    "question": item["question"]
+                    "serial_no": item.get("serial_no") or (idx + 1),
+                    "question": item.get("question", "")
                 }
-                for item in paginated
+                for idx, item in enumerate(paginated)
             ]
         }
 

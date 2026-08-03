@@ -1,24 +1,52 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Literal, Dict
-from datetime import datetime
+from typing import Optional, List, Literal, Dict, Any
+from datetime import datetime, timezone
 from app.schemas.client_list import (
     CleaningTaskCreate, CleaningTaskResponse,
     RequiredPhotoCreate, RequiredPhotoResponse
 )
 
 class ShiftTaskItem(BaseModel):
-    id: str
-    name: str
+    id: str = ""
+    name: str = ""
+    task_id: Optional[str] = None
+    task_name: Optional[str] = None
     is_completed: bool = False
     completed_at: Optional[datetime] = None
 
+    def __init__(self, **data):
+        if "task_id" in data and not data.get("id"):
+            data["id"] = data["task_id"]
+        if "task_name" in data and not data.get("name"):
+            data["name"] = data["task_name"]
+        super().__init__(**data)
+
+    class Config:
+        populate_by_name = True
+        extra = "allow"
+
 class SubmittedPhotoItem(BaseModel):
-    photo_id: str
-    photo_name: str
-    photo_url: str
-    submitted_at: datetime
+    photo_id: str = ""
+    photo_name: str = ""
+    photo_url: str = ""
+    submitted_at: Any = Field(default_factory=lambda: datetime.now(timezone.utc))
     review_id: Optional[str] = None
     status: Literal["pending_review", "approved", "rejected"] = "pending_review"
+
+    def __init__(self, **data):
+        if "id" in data and not data.get("photo_id"):
+            data["photo_id"] = data["id"]
+        if "name" in data and not data.get("photo_name"):
+            data["photo_name"] = data["name"]
+        elif not data.get("photo_name"):
+            data["photo_name"] = "Proof Photo"
+        if not data.get("photo_url"):
+            data["photo_url"] = data.get("after_photo_url") or data.get("photo_path") or "/uploads/sample.jpg"
+        super().__init__(**data)
+
+    class Config:
+        populate_by_name = True
+        extra = "allow"
 
 class ShiftRoomInput(BaseModel):
     room_id: str = Field(..., json_schema_extra={"example": "2ac45be9-9443-4378-8286-152ce553a90b"})

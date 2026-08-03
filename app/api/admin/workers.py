@@ -64,8 +64,8 @@ async def get_admin_workers_table(
     formatted_workers = []
     for w in raw_workers:
         wid = str(w.get("_id"))
-        w_acct_status = w.get("account_status", "active")
-        w_is_active = w.get("is_active", True)
+        w_acct_status = w.get("account_status") or "active"
+        w_is_active = bool(w.get("is_active", True))
 
         # Status determination
         if w_acct_status == "banned":
@@ -101,17 +101,17 @@ async def get_admin_workers_table(
 
         formatted_workers.append(AdminWorkerTableItem(
             worker_id=wid,
-            full_name=w.get("full_name", "Worker"),
+            full_name=w.get("full_name") or "Worker",
             profile_photo=w.get("profile_photo"),
-            worker_type=str(w.get("worker_type", "employee")).capitalize(),
-            position=w.get("position", "Cleaner"),
+            worker_type=str(w.get("worker_type") or "employee").capitalize(),
+            position=w.get("position") or "Cleaner",
             location=loc,
             languages=langs,
             hours_worked=formatted_hw,
             hours_worked_numeric=round(hw_total, 1),
             status=w_status_label,
             account_status=w_acct_status,
-            approval_status=w.get("approval_status", "approved"),
+            approval_status=w.get("approval_status") or "approved",
             is_active=w_is_active
         ))
 

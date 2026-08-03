@@ -101,9 +101,19 @@ async def get_legal_document(
             "type": type,
             "title": title,
             "content": content,
-            "updated_at": datetime.now(timezone.utc)
+            "updated_at": datetime.now(timezone.utc).isoformat()
         }
-    return LegalDocumentResponse(**doc)
+    else:
+        if isinstance(doc.get("updated_at"), datetime):
+            doc["updated_at"] = doc["updated_at"].isoformat()
+        else:
+            doc["updated_at"] = str(doc.get("updated_at", datetime.now(timezone.utc).isoformat()))
+    return LegalDocumentResponse(
+        type=doc.get("type", type),
+        title=doc.get("title", ""),
+        content=doc.get("content", ""),
+        updated_at=str(doc.get("updated_at", ""))
+    )
 
 @router.patch("/legal-documents/{type}", response_model=LegalDocumentResponse)
 async def update_legal_document(
@@ -125,7 +135,12 @@ async def update_legal_document(
     )
 
     updated_doc = await db["legal_documents"].find_one({"type": type})
-    return LegalDocumentResponse(**updated_doc)
+    return LegalDocumentResponse(
+        type=updated_doc.get("type", type),
+        title=updated_doc.get("title", ""),
+        content=updated_doc.get("content", ""),
+        updated_at=str(updated_doc.get("updated_at", datetime.now(timezone.utc).isoformat()))
+    )
 
 # ================================
 # Support Messages & Ticket Resolution
@@ -146,6 +161,7 @@ async def list_support_messages(
         query["status"] = status_filter
         
     total_count = await db["support_messages"].count_documents(query)
+    unread_count = await db["support_messages"].count_documents({"is_read_by_admin": False})
     cursor = db["support_messages"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     raw_msgs = await cursor.to_list(length=limit)
 
@@ -154,27 +170,37 @@ async def list_support_messages(
         s_id = str(m.get("_id") or m.get("id"))
         w_id = str(m.get("worker_id", ""))
         w_doc = await db["users"].find_one({"_id": ObjectId(w_id)}) if ObjectId.is_valid(w_id) else await db["users"].find_one({"_id": w_id})
-        worker_name = w_doc.get("full_name", "Worker") if w_doc else "Worker"
-        worker_avatar = w_doc.get("profile_photo") if w_doc else None
+        worker_name = w_doc.get("full_name", "Worker") if w_doc else m.get("worker_name", "Worker")
+        worker_email = w_doc.get("email") if w_doc else m.get("worker_email")
+
+        created_at = m.get("created_at")
+        if not isinstance(created_at, datetime):
+            created_at = datetime.now(timezone.utc)
+        updated_at = m.get("updated_at")
+        if not isinstance(updated_at, datetime):
+            updated_at = created_at
 
         support_list.append(SupportMessageResponse(
             id=s_id,
             worker_id=w_id,
             worker_name=worker_name,
-            worker_avatar=worker_avatar,
+            worker_email=worker_email,
             subject=m.get("subject", ""),
-            message=m.get("message", ""),
-            status=m.get("status", "open"),
+            description=m.get("description") or m.get("message", ""),
+            status=m.get("status", "pending"),
+            is_resolved=m.get("is_resolved", False),
+            is_read_by_admin=m.get("is_read_by_admin", False),
+            is_read_by_worker=m.get("is_read_by_worker", True),
             admin_reply=m.get("admin_reply"),
             replied_at=m.get("replied_at"),
-            created_at=m.get("created_at", datetime.now(timezone.utc))
+            created_at=created_at,
+            updated_at=updated_at
         ))
 
     return AdminSupportListResponse(
         total_count=total_count,
-        page=page,
-        limit=limit,
-        support_messages=support_list
+        unread_count=unread_count,
+        messages=support_list
     )
 
 @router.post("/support-messages/{message_id}/reply", response_model=SupportMessageResponse)
@@ -195,6 +221,8 @@ async def reply_support_message(
         {"$set": {
             "admin_reply": reply_in.admin_reply,
             "status": reply_in.status,
+            "is_resolved": reply_in.is_resolved,
+            "is_read_by_admin": True,
             "replied_at": now,
             "updated_at": now
         }}
@@ -203,20 +231,27 @@ async def reply_support_message(
     updated = await db["support_messages"].find_one(query)
     w_id = str(updated.get("worker_id", ""))
     w_doc = await db["users"].find_one({"_id": ObjectId(w_id)}) if ObjectId.is_valid(w_id) else await db["users"].find_one({"_id": w_id})
-    worker_name = w_doc.get("full_name", "Worker") if w_doc else "Worker"
-    worker_avatar = w_doc.get("profile_photo") if w_doc else None
+    worker_name = w_doc.get("full_name", "Worker") if w_doc else updated.get("worker_name", "Worker")
+
+    created_at = updated.get("created_at")
+    if not isinstance(created_at, datetime):
+        created_at = now
 
     return SupportMessageResponse(
         id=str(updated.get("_id")),
         worker_id=w_id,
         worker_name=worker_name,
-        worker_avatar=worker_avatar,
+        worker_email=updated.get("worker_email"),
         subject=updated.get("subject", ""),
-        message=updated.get("message", ""),
+        description=updated.get("description") or updated.get("message", ""),
         status=updated.get("status", "resolved"),
+        is_resolved=updated.get("is_resolved", True),
+        is_read_by_admin=True,
+        is_read_by_worker=False,
         admin_reply=updated.get("admin_reply"),
         replied_at=updated.get("replied_at"),
-        created_at=updated.get("created_at", now)
+        created_at=created_at,
+        updated_at=now
     )
 
 # ================================
@@ -228,13 +263,23 @@ async def list_admin_faqs(current_user: UserInDB = Depends(require_admin)):
     db = get_database()
     cursor = db["faqs"].find().sort("created_at", -1)
     raw_faqs = await cursor.to_list(length=100)
-    return [FAQResponse(
-        id=str(f.get("_id") or f.get("id")),
-        question=f.get("question", ""),
-        answer=f.get("answer", ""),
-        created_at=f.get("created_at", datetime.now(timezone.utc)),
-        updated_at=f.get("updated_at", datetime.now(timezone.utc))
-    ) for f in raw_faqs]
+    res = []
+    for idx, f in enumerate(raw_faqs):
+        c_at = f.get("created_at")
+        if not isinstance(c_at, datetime):
+            c_at = datetime.now(timezone.utc)
+        u_at = f.get("updated_at")
+        if not isinstance(u_at, datetime):
+            u_at = c_at
+        res.append(FAQResponse(
+            id=str(f.get("_id") or f.get("id")),
+            serial_no=f.get("serial_no") or (idx + 1),
+            question=f.get("question", ""),
+            answer=f.get("answer", ""),
+            created_at=c_at,
+            updated_at=u_at
+        ))
+    return res
 
 @router.post("/faqs", response_model=FAQResponse, status_code=status.HTTP_201_CREATED)
 async def create_faq(
@@ -244,9 +289,14 @@ async def create_faq(
     db = get_database()
     now = datetime.now(timezone.utc)
     faq_id = f"faq_{uuid.uuid4().hex[:8]}"
+    
+    max_doc = await db["faqs"].find_one({}, sort=[("serial_no", -1)])
+    s_no = faq_in.serial_no or ((max_doc.get("serial_no", 0) + 1) if max_doc else 1)
+    
     doc = {
         "_id": faq_id,
         "id": faq_id,
+        "serial_no": s_no,
         "question": faq_in.question,
         "answer": faq_in.answer,
         "created_at": now,
@@ -272,12 +322,19 @@ async def update_faq(
 
     await db["faqs"].update_one(query, {"$set": fields})
     updated = await db["faqs"].find_one(query)
+    c_at = updated.get("created_at")
+    if not isinstance(c_at, datetime):
+        c_at = datetime.now(timezone.utc)
+    u_at = updated.get("updated_at")
+    if not isinstance(u_at, datetime):
+        u_at = c_at
     return FAQResponse(
         id=str(updated.get("_id") or updated.get("id")),
+        serial_no=updated.get("serial_no", 1),
         question=updated.get("question", ""),
         answer=updated.get("answer", ""),
-        created_at=updated.get("created_at", datetime.now(timezone.utc)),
-        updated_at=updated.get("updated_at", datetime.now(timezone.utc))
+        created_at=c_at,
+        updated_at=u_at
     )
 
 @router.delete("/faqs/{faq_id}", status_code=status.HTTP_200_OK)
