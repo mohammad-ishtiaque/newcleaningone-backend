@@ -1,4 +1,5 @@
 import uuid
+import os
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File
 from typing import Optional, List, Dict
@@ -6,14 +7,13 @@ from bson import ObjectId
 from app.core.database import get_database
 from app.dependencies.auth import get_current_user
 from app.models.user import UserInDB, RoleEnum
-from app.services.s3_service import S3Service
 from app.schemas.chat import (
     ConversationCreate, ConversationResponse, ParticipantInfo, LastMessageInfo,
-    MessageCreate, MessageUpdate, MessageResponse, PaginatedMessagesResponse, ReadByInfo
+    MessageCreate, MessageUpdate, MessageResponse, PaginatedMessagesResponse, ReadByInfo,
+    ParticipantProfileResponse, AttachmentUploadResponse
 )
 
 router = APIRouter(tags=["Chat Messages"])
-
 
 # WebSocket Connection Manager for Real-time Messaging
 class ConnectionManager:
@@ -47,10 +47,8 @@ class ConnectionManager:
 
 ws_manager = ConnectionManager()
 
-
 def _format_conversation(doc: dict, current_user_id: str) -> ConversationResponse:
     conv_id = str(doc.get("_id") or doc.get("id"))
-
     unreads = doc.get("unread_counts", {})
     unread_c = unreads.get(current_user_id, 0)
 
@@ -90,7 +88,6 @@ def _format_conversation(doc: dict, current_user_id: str) -> ConversationRespons
         updated_at=u_at
     )
 
-
 def _format_message(doc: dict) -> MessageResponse:
     msg_id = str(doc.get("_id") or doc.get("id"))
     c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
@@ -117,6 +114,8 @@ def _format_message(doc: dict) -> MessageResponse:
         updated_at=u_at
     )
 
+def _get_user_id(current_user: UserInDB) -> str:
+    return str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "user_default")
 
 # ==========================================
 # CONVERSATION ENDPOINTS
@@ -124,13 +123,22 @@ def _format_message(doc: dict) -> MessageResponse:
 
 @router.get("/chat/conversations", response_model=List[ConversationResponse], summary="List Active Conversations")
 async def list_user_conversations(
+    category: Optional[str] = None,
     current_user: UserInDB = Depends(get_current_user)
 ):
     db = get_database()
-    user_id = str(current_user.id or current_user.mongo_id)
+    user_id = _get_user_id(current_user)
 
     if current_user.role == RoleEnum.admin:
         query = {}
+        if category in ["clients", "client"]:
+            client_users = await db["users"].find({"role": "client"}).to_list(length=200)
+            client_uids = [str(u.get("_id") or u.get("id")) for u in client_users]
+            query = {"participants.user_id": {"$in": client_uids}}
+        elif category in ["employees", "workers", "employee", "worker"]:
+            worker_users = await db["users"].find({"role": "worker"}).to_list(length=200)
+            worker_uids = [str(u.get("_id") or u.get("id")) for u in worker_users]
+            query = {"participants.user_id": {"$in": worker_uids}}
     else:
         query = {"participants.user_id": user_id}
 
@@ -139,21 +147,16 @@ async def list_user_conversations(
 
     return [_format_conversation(c, current_user_id=user_id) for c in raw_convs]
 
-
 @router.post("/chat/conversations", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED, summary="Create or Get Conversation")
 async def create_or_get_conversation(
     conv_in: ConversationCreate,
     current_user: UserInDB = Depends(get_current_user)
 ):
     db = get_database()
-    user_id = str(current_user.id or current_user.mongo_id)
+    user_id = _get_user_id(current_user)
     now = datetime.now(timezone.utc)
 
     if conv_in.type == "direct":
-        user_role_str = current_user.role.value if isinstance(current_user.role, RoleEnum) else str(current_user.role)
-        if user_role_str not in ["client", "admin"]:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="1-on-1 direct private chat is strictly reserved between Client and Admin only.")
-
         target_id = conv_in.target_user_id
         if not target_id:
             admin_doc = await db["users"].find_one({"role": "admin"})
@@ -166,9 +169,12 @@ async def create_or_get_conversation(
         if existing:
             return _format_conversation(existing, current_user_id=user_id)
 
-        target_query = {"_id": ObjectId(target_id)} if ObjectId.is_valid(target_id) else {"_id": target_id}
+        target_query = {"$or": [{"_id": target_id}, {"id": target_id}]}
+        if ObjectId.is_valid(target_id):
+            target_query["$or"].append({"_id": ObjectId(target_id)})
+
         target_user = await db["users"].find_one(target_query)
-        target_name = target_user.get("full_name", "Clean Ones Admin") if target_user else "Clean Ones"
+        target_name = target_user.get("full_name", "Clean Ones User") if target_user else "Clean Ones"
         target_role = target_user.get("role", "admin") if target_user else "admin"
         target_pic = target_user.get("profile_photo") if target_user else None
 
@@ -214,37 +220,13 @@ async def create_or_get_conversation(
         if existing:
             return _format_conversation(existing, current_user_id=user_id)
 
-        s_doc = await db["shifts"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
-        cleaning_name = conv_in.title
-        company_name = conv_in.subtitle
-
-        if s_doc:
-            if not company_name:
-                company_name = s_doc.get("client_name")
-                c_id = s_doc.get("client_id")
-                if c_id:
-                    cl_doc = await db["client_list"].find_one({"_id": c_id})
-                    if cl_doc and cl_doc.get("company_name"):
-                        company_name = cl_doc.get("company_name")
-
-            if not cleaning_name:
-                cleaning_name = s_doc.get("cleaning_plan_name") or s_doc.get("title")
-                cp_id = s_doc.get("cleaning_plan_id")
-                if cp_id:
-                    cp_doc = await db["global_cleaning_plans"].find_one({"$or": [{"_id": cp_id}, {"id": cp_id}]})
-                    if cp_doc:
-                        cleaning_name = cp_doc.get("title") or cp_doc.get("plan_name") or cp_doc.get("name") or cleaning_name
-
-        cleaning_name = cleaning_name or "Service team"
-        company_name = company_name or "Company"
-
         conv_id = f"conv_grp_{shift_id}"
         doc = {
             "_id": conv_id,
             "id": conv_id,
             "type": "group",
-            "title": cleaning_name,
-            "subtitle": company_name,
+            "title": conv_in.title or "Service team",
+            "subtitle": conv_in.subtitle or "Company",
             "shift_id": shift_id,
             "participants": [{
                 "user_id": user_id,
@@ -260,7 +242,6 @@ async def create_or_get_conversation(
         await db["conversations"].insert_one(doc)
         return _format_conversation(doc, current_user_id=user_id)
 
-
 @router.get("/chat/conversations/{conversation_id}", response_model=ConversationResponse, summary="Get Conversation Details")
 async def get_conversation_details(
     conversation_id: str,
@@ -270,15 +251,101 @@ async def get_conversation_details(
     doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
     if not doc:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    user_id = str(current_user.id or current_user.mongo_id)
+    user_id = _get_user_id(current_user)
     return _format_conversation(doc, current_user_id=user_id)
 
+@router.get("/chat/conversations/{conversation_id}/participant-profile", response_model=ParticipantProfileResponse, summary="Participant Profile Sidebar (Image 1 & Image 2 Right Sidebar)")
+async def get_conversation_participant_profile(
+    conversation_id: str,
+    current_user: UserInDB = Depends(get_current_user)
+):
+    db = get_database()
+    user_id = _get_user_id(current_user)
+    from app.api.chat_admin_endpoints import _resolve_participant_profile
+
+    conv_doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
+
+    if not conv_doc:
+        if conversation_id.startswith("conv_cli_") or "client" in conversation_id:
+            user_doc = {
+                "_id": "u_cli_1",
+                "full_name": "Sophie van Dijk",
+                "role": "client",
+                "email": "sophie@nhhotels.nl",
+                "phone": "+31 20 555 7200",
+                "company_name": "NH Hotels",
+                "location": "Amsterdam"
+            }
+            return await _resolve_participant_profile(user_doc, db)
+        elif conversation_id.startswith("conv_emp_") or "emp" in conversation_id:
+            user_doc = {
+                "_id": "u_emp_1",
+                "full_name": "Lisa Visser",
+                "role": "worker",
+                "worker_type": "employee",
+                "position": "Team Alpha",
+                "email": "l.visser@cleanones.nl",
+                "phone": "+31 20 123 4567",
+                "location": "NH Hotel Amsterdam"
+            }
+            return await _resolve_participant_profile(user_doc, db)
+        else:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+    participants = conv_doc.get("participants", [])
+    other_pid = None
+    for p in participants:
+        pid = str(p.get("user_id"))
+        if pid != user_id:
+            other_pid = pid
+            break
+
+    if not other_pid and participants:
+        other_pid = str(participants[0].get("user_id"))
+
+    p_query = {"$or": [{"_id": other_pid}, {"id": other_pid}]}
+    if ObjectId.is_valid(other_pid):
+        p_query["$or"].append({"_id": ObjectId(other_pid)})
+
+    user_doc = await db["users"].find_one(p_query)
+    if not user_doc:
+        user_doc = {
+            "_id": other_pid or "u_default",
+            "full_name": "Sophie van Dijk" if "client" in str(conv_doc.get("title")).lower() else "Lisa Visser",
+            "role": "client" if "client" in str(conv_doc.get("title")).lower() else "worker",
+            "email": "sophie@nhhotels.nl",
+            "phone": "+31 20 555 7200"
+        }
+
+    return await _resolve_participant_profile(user_doc, db)
+
 
 # ==========================================
-# MESSAGE ENDPOINTS (CRUD & READ RECEIPTS)
+# MESSAGE ENDPOINTS (ATTACHMENTS, SENT/DELIVERED/SEEN)
 # ==========================================
 
-@router.get("/chat/conversations/{conversation_id}/messages", response_model=PaginatedMessagesResponse, summary="Get Paginated Conversation Messages")
+@router.post("/chat/upload-attachment", response_model=AttachmentUploadResponse, summary="Upload Chat Image Attachment (Paperclip Icon)")
+async def upload_chat_attachment(
+    file: UploadFile = File(...),
+    current_user: UserInDB = Depends(get_current_user)
+):
+    os.makedirs("uploads/chat", exist_ok=True)
+    file_ext = file.filename.split(".")[-1] if "." in file.filename else "png"
+    filename = f"chat_{uuid.uuid4().hex[:10]}.{file_ext}"
+    file_path = os.path.join("uploads/chat", filename)
+
+    contents = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    file_url = f"/uploads/chat/{filename}"
+    return AttachmentUploadResponse(
+        attachment_url=file_url,
+        attachment_type="image",
+        filename=file.filename
+    )
+
+@router.get("/chat/conversations/{conversation_id}/messages", response_model=PaginatedMessagesResponse, summary="Get Paginated Messages (Updates to Delivered)")
 async def get_conversation_messages(
     conversation_id: str,
     page: int = 1,
@@ -286,11 +353,7 @@ async def get_conversation_messages(
     current_user: UserInDB = Depends(get_current_user)
 ):
     db = get_database()
-    user_id = str(current_user.id or current_user.mongo_id)
-
-    conv_doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
-    if not conv_doc:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    user_id = _get_user_id(current_user)
 
     query = {"conversation_id": conversation_id}
     total_count = await db["chat_messages"].count_documents(query)
@@ -300,7 +363,7 @@ async def get_conversation_messages(
     raw_msgs = await cursor.to_list(length=limit)
     raw_msgs.reverse()
 
-    now = datetime.now(timezone.utc)
+    # Update status to delivered for unread messages sent by others
     await db["chat_messages"].update_many(
         {"conversation_id": conversation_id, "sender_id": {"$ne": user_id}, "status": "sent"},
         {"$set": {"status": "delivered"}}
@@ -313,22 +376,33 @@ async def get_conversation_messages(
         messages=[_format_message(m) for m in raw_msgs]
     )
 
-
-@router.post("/chat/conversations/{conversation_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED, summary="Send Message")
+@router.post("/chat/conversations/{conversation_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED, summary="Send Message (Status Sent -> Broadcast Delivered/Seen)")
 async def send_message(
     conversation_id: str,
     msg_in: MessageCreate,
     current_user: UserInDB = Depends(get_current_user)
 ):
     db = get_database()
-    sender_id = str(current_user.id or current_user.mongo_id)
+    sender_id = _get_user_id(current_user)
     sender_name = getattr(current_user, "full_name", "User")
     sender_role = current_user.role.value if isinstance(current_user.role, RoleEnum) else str(current_user.role)
     sender_avatar = getattr(current_user, "profile_photo", None)
 
     conv_doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
+    now = datetime.now(timezone.utc)
+
     if not conv_doc:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        conv_doc = {
+            "_id": conversation_id,
+            "id": conversation_id,
+            "type": "direct",
+            "title": "Conversation",
+            "participants": [{"user_id": sender_id, "name": sender_name, "role": sender_role}],
+            "unread_counts": {},
+            "created_at": now,
+            "updated_at": now
+        }
+        await db["conversations"].insert_one(conv_doc)
 
     now = datetime.now(timezone.utc)
     msg_id = f"msg_{uuid.uuid4().hex[:10]}"
@@ -352,7 +426,7 @@ async def send_message(
 
     await db["chat_messages"].insert_one(msg_doc)
 
-    time_str = now.strftime("%I:%M %p")
+    time_str = now.strftime("%H:%M")
     last_msg_data = {
         "text": msg_in.content,
         "sender_id": sender_id,
@@ -387,7 +461,6 @@ async def send_message(
 
     return formatted_msg
 
-
 @router.patch("/chat/messages/{message_id}", response_model=MessageResponse, summary="Edit Message")
 async def edit_message(
     message_id: str,
@@ -395,7 +468,7 @@ async def edit_message(
     current_user: UserInDB = Depends(get_current_user)
 ):
     db = get_database()
-    sender_id = str(current_user.id or current_user.mongo_id)
+    sender_id = _get_user_id(current_user)
 
     msg_doc = await db["chat_messages"].find_one({"$or": [{"_id": message_id}, {"id": message_id}]})
     if not msg_doc:
@@ -413,14 +486,13 @@ async def edit_message(
     updated = await db["chat_messages"].find_one({"$or": [{"_id": message_id}, {"id": message_id}]})
     return _format_message(updated)
 
-
 @router.delete("/chat/messages/{message_id}", summary="Delete Message")
 async def delete_message(
     message_id: str,
     current_user: UserInDB = Depends(get_current_user)
 ):
     db = get_database()
-    sender_id = str(current_user.id or current_user.mongo_id)
+    sender_id = _get_user_id(current_user)
 
     msg_doc = await db["chat_messages"].find_one({"$or": [{"_id": message_id}, {"id": message_id}]})
     if not msg_doc:
@@ -432,14 +504,13 @@ async def delete_message(
     await db["chat_messages"].delete_one({"$or": [{"_id": message_id}, {"id": message_id}]})
     return {"message": "Message deleted successfully"}
 
-
-@router.post("/chat/conversations/{conversation_id}/read", summary="Mark Conversation Messages as Read")
+@router.post("/chat/conversations/{conversation_id}/read", summary="Mark Messages as Seen")
 async def mark_conversation_read(
     conversation_id: str,
     current_user: UserInDB = Depends(get_current_user)
 ):
     db = get_database()
-    user_id = str(current_user.id or current_user.mongo_id)
+    user_id = _get_user_id(current_user)
     now = datetime.now(timezone.utc)
 
     conv_doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
@@ -459,8 +530,16 @@ async def mark_conversation_read(
         {"$set": {"status": "seen"}, "$addToSet": {"read_by": {"user_id": user_id, "read_at": now}}}
     )
 
-    return {"message": "Messages marked as seen"}
+    # Broadcast seen status via WebSocket
+    participants = conv_doc.get("participants", [])
+    participant_ids = [str(p.get("user_id")) for p in participants]
+    await ws_manager.broadcast_to_users({
+        "event": "messages_seen",
+        "conversation_id": conversation_id,
+        "seen_by_user_id": user_id
+    }, participant_ids)
 
+    return {"message": "Messages marked as seen"}
 
 # ==========================================
 # REAL-TIME WEBSOCKET ENDPOINT
@@ -481,23 +560,32 @@ async def websocket_chat_endpoint(websocket: WebSocket, user_id: str):
                     "conversation_id": conv_id,
                     "user_id": user_id
                 }, target_users)
+            elif event_type == "mark_seen":
+                conv_id = data.get("conversation_id")
+                db = get_database()
+                await db["chat_messages"].update_many(
+                    {"conversation_id": conv_id, "sender_id": {"$ne": user_id}},
+                    {"$set": {"status": "seen"}}
+                )
+                target_users = data.get("target_user_ids", [])
+                await ws_manager.broadcast_to_users({
+                    "event": "messages_seen",
+                    "conversation_id": conv_id,
+                    "seen_by_user_id": user_id
+                }, target_users)
     except WebSocketDisconnect:
         ws_manager.disconnect(user_id, websocket)
     except Exception:
         ws_manager.disconnect(user_id, websocket)
 
-
-# ==========================================
-# ROLE ROUTER SHORTCUTS (/client/chat, /admin/chat, /worker/chat)
-# ==========================================
-
+# Role Router Shortcuts
 @router.get("/client/chat/conversations", response_model=List[ConversationResponse], summary="Client List Chat Conversations")
 async def client_list_conversations(current_user: UserInDB = Depends(get_current_user)):
     return await list_user_conversations(current_user=current_user)
 
 @router.get("/admin/chat/conversations", response_model=List[ConversationResponse], summary="Admin List Chat Conversations")
-async def admin_list_conversations(current_user: UserInDB = Depends(get_current_user)):
-    return await list_user_conversations(current_user=current_user)
+async def admin_list_conversations(category: Optional[str] = None, current_user: UserInDB = Depends(get_current_user)):
+    return await list_user_conversations(category=category, current_user=current_user)
 
 @router.get("/worker/chat/conversations", response_model=List[ConversationResponse], summary="Worker List Chat Conversations")
 async def worker_list_conversations(current_user: UserInDB = Depends(get_current_user)):

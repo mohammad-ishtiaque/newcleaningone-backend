@@ -1,72 +1,34 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from app.api import auth, worker, client, admin, profile, worker_shifts, admin_shift_monitoring, admin_dashboard, client_live_status, client_schedule, extra_services, chat, client_profile_settings
+import sys
 import uvicorn
-import os
-
-app = FastAPI(
-    title="Cleaning One API",
-    description="Production-ready FastAPI Authentication and Authorization System",
-    version="1.0.0"
-)
-
-# CORS middleware
-# Using allow_origins=["*"] with allow_credentials=True is not allowed by CORS standard.
-# We explicitly list allowed origins here.
-origins = [
-    "http://localhost",
-    "http://localhost:8000",
-    "http://localhost:8080",
-    "http://localhost:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:8000",
-    "http://127.0.0.1:8080",
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(auth.router)
-app.include_router(worker.router)
-app.include_router(client.router)
-app.include_router(client_live_status.router)
-app.include_router(client_schedule.router)
-app.include_router(extra_services.router)
-app.include_router(chat.router)
-app.include_router(client_profile_settings.router)
-app.include_router(admin.router)
-app.include_router(admin.client_mgmt_router)
-app.include_router(admin.location_mgmt_router)
-app.include_router(admin.room_mgmt_router)
-app.include_router(admin.cleaning_plan_mgmt_router)
-app.include_router(admin.worker_mgmt_router)
-app.include_router(admin.shift_mgmt_router)
-app.include_router(worker_shifts.worker_shift_router)
-app.include_router(admin_shift_monitoring.shift_monitoring_router)
-app.include_router(admin_dashboard.admin_dashboard_router)
-app.include_router(profile.router)
-
-# Ensure uploads directory exists
-os.makedirs("uploads", exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-
-@app.get("/")
-async def root():
-    return {"message": "Welcome to Cleaning One API"}
-
+from app.app_builder import create_app
 from app.core.config import settings
 
+# Determine service name from command line arguments (e.g., python main.py admin)
+service_name = sys.argv[1].lower().strip() if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "all"
+
+if service_name not in ("admin", "client", "worker", "all"):
+    print(f"Unknown service '{service_name}'. Valid options: admin, client, worker, all")
+    print("Defaulting to 'all'...")
+    service_name = "all"
+
+app = create_app(service_name)
+
+def get_port(service: str) -> int:
+    if service == "admin":
+        return settings.ADMIN_PORT
+    elif service == "client":
+        return settings.CLIENT_PORT
+    elif service == "worker":
+        return settings.WORKER_PORT
+    return settings.APP_PORT
+
 if __name__ == "__main__":
+    port = get_port(service_name)
+    print(f"Starting Cleaning One {service_name.upper()} service on {settings.APP_HOST}:{port}...")
     uvicorn.run(
-        "main:app", 
-        host=settings.APP_HOST, 
-        port=settings.APP_PORT, 
+        "main:app",
+        host=settings.APP_HOST,
+        port=port,
         reload=True,
         access_log=True,
         log_level="info"

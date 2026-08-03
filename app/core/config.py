@@ -34,7 +34,10 @@ class Settings(BaseSettings):
 
     # Server Config
     APP_HOST: str = "0.0.0.0"
-    APP_PORT: int = 8000
+    APP_PORT: int = 8080
+    ADMIN_PORT: int = 8081
+    CLIENT_PORT: int = 8082
+    WORKER_PORT: int = 8083
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

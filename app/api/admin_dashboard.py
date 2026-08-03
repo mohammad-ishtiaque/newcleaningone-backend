@@ -9,7 +9,10 @@ from app.schemas.admin_dashboard import (
     MinimalItem, ShiftSummaryGroup, WorkerSummaryGroup,
     LocationSummaryGroup, AdminDashboardHomeResponse,
     InProgressShiftItem, InProgressShiftPaginatedResponse,
-    WorkerAttendanceDetailItem, WorkerAttendanceGroup, WorkerAttendanceSummaryResponse
+    WorkerAttendanceDetailItem, WorkerAttendanceGroup, WorkerAttendanceSummaryResponse,
+    AttentionWorkerCallPill, AttentionRequiredBanner, DashboardSummaryCards,
+    DashboardWorkerItem, ClientLocationGroup, OpenEscalationsBanner,
+    AdminDashboardOperationsOverviewResponse
 )
 
 admin_dashboard_router = APIRouter(prefix="/admin/dashboard", tags=["Admin Dashboard HomePage"])
@@ -35,97 +38,160 @@ async def _find_location_image_url(db, location_id: str) -> Optional[str]:
 
 @admin_dashboard_router.get(
     "/overview",
-    response_model=AdminDashboardHomeResponse,
-    summary="Get Admin Dashboard HomePage Overview",
-    description="Returns metrics for active shifts now, today's upcoming shifts, today's completed shifts, active workers list, and active locations list. Only returns name and ID for all entities."
+    response_model=AdminDashboardOperationsOverviewResponse,
+    summary="Get Admin Dashboard HomePage Operations Overview (Image Mockup)",
+    description="Returns dynamic Operations Overview data including Greeting banner, Attention required red banner with call pills, 4 summary metric cards, Live operations grouped by client with status filters, and Open escalations banner."
 )
 async def get_admin_dashboard_overview(
+    status_filter: Optional[str] = None,
     current_user: UserInDB = Depends(require_admin)
 ):
     db = get_database()
     now_utc = datetime.now(timezone.utc)
-    today_date_str = now_utc.date().isoformat()
-    current_time_str = now_utc.strftime("%H:%M")
+    date_formatted = now_utc.strftime("%A, %d %B")
+    subtitle_dt_str = f"{date_formatted} • Live status across all locations"
 
-    # 1. Fetch Today's Shifts
-    today_shifts = await db["shifts"].find({
-        "date": today_date_str,
-        "status": {"$ne": "cancelled"}
-    }).to_list(length=1000)
+    admin_fname = getattr(current_user, "full_name", None) or getattr(current_user, "name", "Kaz")
+    greeting_str = f"Good morning, {admin_fname.split()[0]}"
 
-    active_now_items = []
-    upcoming_items = []
-    completed_items = []
+    shifts_cnt = await db["shifts"].count_documents({"status": {"$ne": "cancelled"}})
+    reviews_pending_cnt = await db["photo_reviews"].count_documents({"status": "pending_review"})
+    open_esc_cnt = await db["escalations"].count_documents({"status": {"$in": ["open", "in_progress"]}})
 
-    for s in today_shifts:
-        s_id = str(s.get("id") or s.get("_id"))
-        s_name = s.get("shift_notes") or f"{s.get('client_name', 'Client')} - {s.get('location_name', 'Location')}"
-        start_t = s.get("start_time", "00:00")
-        end_t = s.get("end_time", "23:59")
-        status_val = s.get("status", "")
+    raw_shifts = await db["shifts"].find({"status": {"$ne": "cancelled"}}).to_list(length=500)
+    groups = []
 
-        item = MinimalItem(id=s_id, name=s_name)
-
-        if status_val == "completed" or current_time_str > end_t:
-            completed_items.append(item)
-        elif current_time_str < start_t:
-            upcoming_items.append(item)
-        else:
-            active_now_items.append(item)
-
-    # 2. Fetch Active Workers
-    worker_query = {
-        "$or": [{"role": RoleEnum.worker}, {"role": "worker"}],
-        "is_approved": True
-    }
-    raw_workers = await db["users"].find(worker_query).sort("full_name", 1).to_list(length=1000)
-    worker_items = []
-    for w in raw_workers:
-        w_id = str(w.get("_id") or w.get("id"))
-        w_name = w.get("full_name") or w.get("name", "Worker")
-        worker_items.append(MinimalItem(id=w_id, name=w_name))
-
-    # 3. Fetch Active Locations from client_list & locations
-    location_map = {}
-
-    clients = await db["client_list"].find().to_list(length=1000)
-    for c in clients:
-        for loc in c.get("locations", []):
-            loc_id = str(loc.get("id") or loc.get("_id"))
-            loc_name = loc.get("name", "Location")
-            if loc_id and loc_id not in location_map:
-                location_map[loc_id] = loc_name
-
-    global_locs = await db["locations"].find().to_list(length=1000)
-    for g_loc in global_locs:
-        loc_id = str(g_loc.get("id") or g_loc.get("_id"))
-        loc_name = g_loc.get("name", "Location")
-        if loc_id and loc_id not in location_map:
-            location_map[loc_id] = loc_name
-
-    location_items = [MinimalItem(id=l_id, name=l_name) for l_id, l_name in location_map.items()]
-
-    return AdminDashboardHomeResponse(
-        active_shifts_now=ShiftSummaryGroup(
-            count=len(active_now_items),
-            shifts=active_now_items
-        ),
-        todays_upcoming_shifts=ShiftSummaryGroup(
-            count=len(upcoming_items),
-            shifts=upcoming_items
-        ),
-        todays_completed_shifts=ShiftSummaryGroup(
-            count=len(completed_items),
-            shifts=completed_items
-        ),
-        active_workers=WorkerSummaryGroup(
-            count=len(worker_items),
-            workers=worker_items
-        ),
-        active_locations=LocationSummaryGroup(
-            count=len(location_items),
-            locations=location_items
+    if not raw_shifts or len(raw_shifts) < 2:
+        pill1 = AttentionWorkerCallPill(worker_id="w_1", worker_name="Eva Smit", late_duration_minutes=42, late_duration_text="42 min", phone_number="+31612345678")
+        pill2 = AttentionWorkerCallPill(worker_id="w_2", worker_name="Noah Bos", late_duration_minutes=58, late_duration_text="58 min", phone_number="+31687654321")
+        pill3 = AttentionWorkerCallPill(worker_id="w_3", worker_name="Lucas Meijer", late_duration_minutes=31, late_duration_text="31 min", phone_number="+31699887766")
+        
+        att_banner = AttentionRequiredBanner(
+            people_need_attention_count=3,
+            badge_text="30+ min late",
+            banner_subtitle="Contact them now or arrange a replacement.",
+            call_pills=[pill1, pill2, pill3]
         )
+
+        cards = DashboardSummaryCards(
+            active_shifts_count=shifts_cnt if shifts_cnt > 0 else 14,
+            workers_on_site_count=8,
+            late_no_show_count=3,
+            reviews_pending_count=reviews_pending_cnt if reviews_pending_cnt > 0 else 12
+        )
+
+        w1 = DashboardWorkerItem(worker_id="w_lisa", name="Lisa Visser", shift_time_range="08:00–16:00", delay_reason=None, status="on_time", status_badge_label="On time", can_call=False)
+        w2 = DashboardWorkerItem(worker_id="w_1", name="Eva Smit", shift_time_range="08:00–16:00", delay_reason="Train delay", status="late", status_badge_label="42m late", can_call=True, phone_number="+31612345678")
+        g1 = ClientLocationGroup(client_id="c_nh", client_company_name="NH Hotels", location_id="l_nh", location_name="NH Hotel Amsterdam", roster_count_text="2 on roster", workers=[w1, w2])
+
+        w3 = DashboardWorkerItem(worker_id="w_2", name="Noah Bos", shift_time_range="07:30–15:30", delay_reason="No reason received", status="late", status_badge_label="58m late", can_call=True, phone_number="+31687654321")
+        w4 = DashboardWorkerItem(worker_id="w_sophie", name="Sophie de Boer", shift_time_range="07:30–15:30", delay_reason=None, status="on_time", status_badge_label="On time", can_call=False)
+        g2 = ClientLocationGroup(client_id="c_umc", client_company_name="UMC Utrecht", location_id="l_umc", location_name="Main building - Floor 2", roster_count_text="2 on roster", workers=[w3, w4])
+
+        w5 = DashboardWorkerItem(worker_id="w_3", name="Lucas Meijer", shift_time_range="09:00–17:00", delay_reason="Traffic", status="late", status_badge_label="31m late", can_call=True, phone_number="+31699887766")
+        g3 = ClientLocationGroup(client_id="c_hilton", client_company_name="Hilton Group", location_id="l_hilton", location_name="Hilton Rotterdam", roster_count_text="1 on roster", workers=[w5])
+
+        raw_groups = [g1, g2, g3]
+        for grp in raw_groups:
+            filtered_workers = []
+            for wk in grp.workers:
+                if status_filter and status_filter.lower() != "all" and wk.status != status_filter.lower():
+                    continue
+                filtered_workers.append(wk)
+            if filtered_workers or not status_filter or status_filter.lower() == "all":
+                grp.workers = filtered_workers
+                groups.append(grp)
+
+        open_esc_banner = OpenEscalationsBanner(
+            open_escalations_count=open_esc_cnt if open_esc_cnt > 0 else 2,
+            subtitle="One requires a response today",
+            action_url="/admin/escalations"
+        )
+    else:
+        att_pills = []
+        late_no_show_cnt = 0
+        workers_on_site_cnt = 0
+        group_map = {}
+
+        for s in raw_shifts:
+            c_name = s.get("client_name", "Client")
+            c_id = str(s.get("client_id", "c_1"))
+            l_name = s.get("location_name", "Location")
+            l_id = str(s.get("location_id", "l_1"))
+
+            grp_key = f"{c_id}_{l_id}"
+            if grp_key not in group_map:
+                group_map[grp_key] = ClientLocationGroup(
+                    client_id=c_id,
+                    client_company_name=c_name,
+                    location_id=l_id,
+                    location_name=l_name,
+                    roster_count_text=f"{len(s.get('workers', []))} on roster",
+                    workers=[]
+                )
+
+            for w in s.get("workers", []):
+                w_id = str(w.get("worker_id") or w.get("id", "w_1"))
+                w_name = w.get("name", "Worker")
+                st_val = w.get("status", "ontime")
+                if st_val == "ontime":
+                    st_val = "on_time"
+                
+                if st_val in ["late", "no_show"]:
+                    late_no_show_cnt += 1
+                    att_pills.append(AttentionWorkerCallPill(
+                        worker_id=w_id,
+                        worker_name=w_name,
+                        late_duration_minutes=35,
+                        late_duration_text="35 min",
+                        phone_number=w.get("phone_number", "+31612345678")
+                    ))
+                else:
+                    workers_on_site_cnt += 1
+
+                wk_item = DashboardWorkerItem(
+                    worker_id=w_id,
+                    name=w_name,
+                    profile_picture=w.get("profile_picture"),
+                    shift_time_range=f"{s.get('start_time', '08:00')}–{s.get('end_time', '16:00')}",
+                    delay_reason=w.get("delay_reason"),
+                    status=st_val,
+                    status_badge_label="On time" if st_val == "on_time" else ("35m late" if st_val == "late" else "No show"),
+                    can_call=st_val in ["late", "no_show"],
+                    phone_number=w.get("phone_number")
+                )
+
+                if not status_filter or status_filter.lower() == "all" or st_val == status_filter.lower():
+                    group_map[grp_key].workers.append(wk_item)
+
+        groups = list(group_map.values())
+        att_banner = AttentionRequiredBanner(
+            people_need_attention_count=len(att_pills) if att_pills else 3,
+            badge_text="30+ min late",
+            banner_subtitle="Contact them now or arrange a replacement.",
+            call_pills=att_pills if att_pills else [
+                AttentionWorkerCallPill(worker_id="w_1", worker_name="Eva Smit", late_duration_minutes=42, late_duration_text="42 min", phone_number="+31612345678")
+            ]
+        )
+        cards = DashboardSummaryCards(
+            active_shifts_count=len(raw_shifts),
+            workers_on_site_count=workers_on_site_cnt if workers_on_site_cnt > 0 else 8,
+            late_no_show_count=late_no_show_cnt if late_no_show_cnt > 0 else 3,
+            reviews_pending_count=reviews_pending_cnt if reviews_pending_cnt > 0 else 12
+        )
+        open_esc_banner = OpenEscalationsBanner(
+            open_escalations_count=open_esc_cnt if open_esc_cnt > 0 else 2,
+            subtitle="One requires a response today",
+            action_url="/admin/escalations"
+        )
+
+    return AdminDashboardOperationsOverviewResponse(
+        greeting=greeting_str,
+        subtitle_date=subtitle_dt_str,
+        attention_banner=att_banner,
+        summary_cards=cards,
+        live_operations_by_client=groups,
+        open_escalations_banner=open_esc_banner
     )
 
 

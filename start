@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+SERVICE="${1:-all}"
+uv run python main.py "$SERVICE"

@@ -65,3 +65,22 @@ class PaginatedMessagesResponse(BaseModel):
     page: int
     limit: int
     messages: List[MessageResponse] = Field(default_factory=list)
+
+class ParticipantProfileResponse(BaseModel):
+    user_id: str
+    name: str
+    role: str
+    role_label: str
+    email: str
+    phone: str
+    current_location_name: str
+    client_name: str
+    account_status: str = "Active client"
+    is_online: bool = True
+    profile_picture: Optional[str] = None
+
+class AttachmentUploadResponse(BaseModel):
+    attachment_url: str
+    attachment_type: str = "image"
+    filename: str
+

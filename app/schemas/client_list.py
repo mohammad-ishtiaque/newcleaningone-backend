@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union, Literal
 from datetime import datetime, date
 from enum import Enum
 
@@ -61,14 +61,14 @@ class LocationUpdate(BaseModel):
 class LocationResponse(BaseModel):
     id: str
     name: str
-    type: str
+    type: Optional[str] = "office"
     address: str
     floor: int = 1
-    number_of_rooms: int
-    description: str
+    number_of_rooms: int = 1
+    description: Optional[str] = ""
     image_url: Optional[str] = None
-    created_at: str
-    updated_at: str
+    created_at: Union[str, datetime]
+    updated_at: Union[str, datetime]
 
 # --- Contracts ---
 class ContractCreate(BaseModel):
@@ -494,3 +494,263 @@ class GlobalCleaningPlanPaginatedResponse(BaseModel):
     page: int
     limit: int
     cleaning_plans: List[GlobalCleaningPlanListItemResponse]
+
+
+# --- Client Detailed Dashboard Schemas (Image 2 - Image 5) ---
+class ClientDashboardOverviewResponse(BaseModel):
+    client_id: str
+    company_name: str
+    industry: str
+    status: str
+    subtitle_contract_status: str
+    contract_status: str
+    contract_expiry_date: Optional[str] = None
+    contract_expiry_formatted: Optional[str] = None
+    locations_count: int = 0
+    contacts_count: int = 0
+    active_tasks_count: int = 0
+
+class ClientContactItem(BaseModel):
+    id: str
+    name: str
+    role: str
+    email: EmailStr
+    phone: str
+
+class ClientContactPaginatedResponse(BaseModel):
+    total_count: int
+    page: int
+    limit: int
+    contacts: List[ClientContactItem] = Field(default_factory=list)
+
+class ClientLocationItem(BaseModel):
+    id: str
+    name: str
+    address: str
+    rooms_count: int = 0
+    rooms_label: str = "0 rooms"
+
+class ClientLocationPaginatedResponse(BaseModel):
+    total_count: int
+    page: int
+    limit: int
+    locations: List[ClientLocationItem] = Field(default_factory=list)
+
+class ClientContractDetailsResponse(BaseModel):
+    client_id: str
+    company_name: str
+    status: str
+    expiry_date: Optional[str] = None
+    expiry_date_formatted: Optional[str] = None
+    pdf_url: Optional[str] = None
+
+
+# --- Client Cleaning Plan (Task Builder) & Reports Schemas (Image 1 & Image 2) ---
+class ClientCleaningPlanTaskItem(BaseModel):
+    task_id: str
+    name: str
+    is_completed: bool = False
+
+class ClientCleaningPlanResponse(BaseModel):
+    client_id: str
+    company_name: str
+    plan_name: str
+    tasks: List[ClientCleaningPlanTaskItem] = Field(default_factory=list)
+    assigned_location_ids: List[str] = Field(default_factory=list)
+
+class ClientCleaningPlanUpdate(BaseModel):
+    plan_name: Optional[str] = "Standard Cleaning Checklist"
+    tasks: List[str] = Field(default_factory=list)
+
+class AssignLocationRequest(BaseModel):
+    location_id: str
+
+class ClientReportItem(BaseModel):
+    id: str
+    title: str
+    date_formatted: str
+    date_iso: str
+    status: str
+    download_url: Optional[str] = None
+
+class ClientReportsListResponse(BaseModel):
+    total_count: int
+    reports: List[ClientReportItem] = Field(default_factory=list)
+
+class SendReportEmailRequest(BaseModel):
+    report_id: Optional[str] = None
+    email: Optional[EmailStr] = None
+
+
+# --- Admin Location Management Schemas (Image 1 - Image 5) ---
+class AdminLocationCreate(BaseModel):
+    name: str
+    client_id: str
+    address: str
+    number_of_floors: int = 1
+    number_of_rooms: int = 1
+    required_hours_per_month: float = 0.0
+    assigned_worker_ids: List[str] = Field(default_factory=list)
+
+class AdminLocationGridItem(BaseModel):
+    location_id: str
+    location_name: str
+    client_id: str
+    client_company_name: str
+    address: str
+    floors: int = 1
+    rooms: int = 1
+    required_hours_label: str = "0h"
+    required_hours_numeric: float = 0.0
+    created_at: datetime
+    updated_at: datetime
+
+class AdminLocationGridPaginatedResponse(BaseModel):
+    total_count: int
+    page: int
+    limit: int
+    locations: List[AdminLocationGridItem] = Field(default_factory=list)
+
+class AssignedEmployeeItem(BaseModel):
+    worker_id: str
+    name: str
+    profile_picture: Optional[str] = None
+    status: str = "Assigned"
+
+class LocationDrawerOverviewResponse(BaseModel):
+    location_id: str
+    location_code: str
+    location_name: str
+    client_name: str
+    subtitle: str
+    address: str
+    floors: int
+    rooms: int
+    required_hours_month: str
+    assigned_employees: List[AssignedEmployeeItem] = Field(default_factory=list)
+    assigned_employees_count: int = 0
+    coverage_label: str
+
+class LocationDrawerRoomItem(BaseModel):
+    room_id: str
+    title: str
+    floor: int
+    cleaning_type_label: str
+    status: str = "Active"
+
+class LocationDrawerRoomsResponse(BaseModel):
+    location_id: str
+    location_name: str
+    total_rooms_count: int
+    rooms: List[LocationDrawerRoomItem] = Field(default_factory=list)
+
+class LocationBulkImportResult(BaseModel):
+    total_rows: int
+    imported_count: int
+    failed_count: int
+    errors: List[str] = Field(default_factory=list)
+
+
+# --- Admin Global Rooms & Global Cleaning Plans Schemas (Image 1 - Image 5) ---
+class AdminRoomCreate(BaseModel):
+    name: str
+    room_type: str = "Standard"
+    location_id: str
+    floor: int = 1
+    est_cleaning_duration_minutes: int = 45
+    required_photos_count: int = 4
+    tasks_count: int = 12
+    cleaning_plan_name: Optional[str] = "Standard Clean"
+
+class AdminRoomGridItem(BaseModel):
+    room_id: str
+    room_name: str
+    room_type: str
+    location_id: str
+    location_name: str
+    floor_label: str
+    duration_minutes: int = 45
+    required_photos_count: int = 4
+    tasks_count: int = 12
+    cleaning_plan_name: str = "Standard Clean"
+
+class AdminRoomGridPaginatedResponse(BaseModel):
+    total_count: int
+    page: int
+    limit: int
+    rooms: List[AdminRoomGridItem] = Field(default_factory=list)
+
+class RoomDrawerDetailResponse(BaseModel):
+    room_id: str
+    room_code: str
+    room_name: str
+    room_type: str
+    floor_label: str
+    location_name: str
+    cleaning_plan_name: str
+    duration_minutes: int
+    required_photos_count: int
+    tasks_count: int
+
+class AdminCleaningPlanCreate(BaseModel):
+    plan_name: str
+    client_id: str
+    location_id: str
+    duration_minutes: int = 45
+    required_photos_count: int = 4
+    checklist_tasks: List[str] = Field(default_factory=list)
+    photo_requirements: List[str] = Field(default_factory=list)
+
+class AdminCleaningPlanGridItem(BaseModel):
+    plan_id: str
+    plan_code: str
+    plan_name: str
+    client_company_name: str
+    location_name: str
+    room_pills: List[str] = Field(default_factory=list)
+    duration_minutes: int = 45
+    required_photos_count: int = 4
+    tasks_count: int = 12
+
+class AdminCleaningPlanGridPaginatedResponse(BaseModel):
+    total_count: int
+    page: int
+    limit: int
+    plans: List[AdminCleaningPlanGridItem] = Field(default_factory=list)
+
+class LocationDrawerCleaningPlanItem(BaseModel):
+    plan_id: str
+    title: str
+    subtitle: str
+    status: str = "Active"
+
+class LocationDrawerCleaningPlansResponse(BaseModel):
+    location_id: str
+    location_name: str
+    total_plans_count: int
+    plans: List[LocationDrawerCleaningPlanItem] = Field(default_factory=list)
+
+
+# --- Global Quality Control Reports Schemas (Image Mockup) ---
+class ShiftTrendDataPoint(BaseModel):
+    label: str
+    count: int
+
+class PhotoQualityDistributionData(BaseModel):
+    approved: int = 67
+    pending: int = 12
+    rejected: int = 8
+
+class QualityControlReportResponse(BaseModel):
+    timeframe: Literal["week", "month", "quarter", "year"] = "month"
+    total_shifts: int = 1245
+    total_photos_approved: int = 67
+    escalations_count: int = 23
+    shift_trends: List[ShiftTrendDataPoint] = Field(default_factory=list)
+    photo_quality_distribution: PhotoQualityDistributionData
+    pdf_download_url: str = "/admin/reports/quality-control/pdf?timeframe=month"
+
+
+
+
+

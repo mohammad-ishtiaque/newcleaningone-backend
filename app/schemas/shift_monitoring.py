@@ -144,3 +144,54 @@ class WorkerDailyActivityResponse(BaseModel):
     absent_days: int
     total_shifts: int
     daily_activity: List[WorkerDailyActivityRow] = Field(default_factory=list)
+
+
+# --- Picture 4: Live Worker Details Drawer Schemas ---
+class WorkerLiveShiftDetail(BaseModel):
+    check_in: str = "--:--"
+    check_out: str = "--:--"
+    duration: str = "0h"
+    status: str = "Scheduled"
+
+class WorkerLiveDetailsResponse(BaseModel):
+    worker_id: str
+    worker_name: str
+    worker_type: str
+    position: Optional[str] = None
+    shift_id: Optional[str] = None
+    shift_label: Optional[str] = None
+    current_status: str = "On Time"
+    profile_picture: Optional[str] = None
+    period: Literal["today", "weekly", "monthly"] = "today"
+    hours_worked: str = "0h"
+    hours_worked_numeric: float = 0.0
+    shifts_count: int = 0
+    avg_duration: str = "0.0h"
+    avg_duration_numeric: float = 0.0
+    shift_details: WorkerLiveShiftDetail
+    activity_history_available: bool = True
+
+
+# --- Picture 5: Worker Attendance Stats Drawer Schemas ---
+class WeeklyTrendItem(BaseModel):
+    week_label: str
+    hours: float
+
+class MonthlyTrendItem(BaseModel):
+    month_label: str
+    hours: float
+
+class WorkerAttendanceStatsDrawerResponse(BaseModel):
+    worker_id: str
+    worker_name: str
+    worker_type: str
+    profile_picture: Optional[str] = None
+    hours_worked: str
+    hours_worked_numeric: float
+    completed_shifts: int
+    avg_shift_duration: str
+    avg_shift_duration_numeric: float
+    late_checkins: int
+    weekly_hours_trend: List[WeeklyTrendItem] = Field(default_factory=list)
+    monthly_hours_trend: List[MonthlyTrendItem] = Field(default_factory=list)
+

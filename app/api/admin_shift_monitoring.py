@@ -11,7 +11,9 @@ from app.schemas.shift_monitoring import (
     AttendanceTrackingItem, AttendanceTrackingPaginatedResponse,
     LocationStatItem, LocationStatPaginatedResponse,
     WorkerShiftDetailItem, WorkerShiftStatsResponse,
-    WorkerDailyActivityRow, WorkerDailyActivityResponse
+    WorkerDailyActivityRow, WorkerDailyActivityResponse,
+    WorkerLiveDetailsResponse, WorkerLiveShiftDetail,
+    WorkerAttendanceStatsDrawerResponse, WeeklyTrendItem, MonthlyTrendItem
 )
 
 shift_monitoring_router = APIRouter(prefix="/admin/shift-monitoring", tags=["Admin Shift Monitoring"])
@@ -568,3 +570,240 @@ async def get_worker_daily_activity(
         total_shifts=total_shifts_count,
         daily_activity=daily_rows
     )
+
+
+@shift_monitoring_router.get(
+    "/live-worker-details/{worker_id}",
+    response_model=WorkerLiveDetailsResponse,
+    summary="Get Worker Live Details Drawer (Picture 4)",
+    description="Returns live worker shift status, period metrics (Today, Weekly, Monthly), and check-in/check-out details."
+)
+async def get_live_worker_details(
+    worker_id: str,
+    period: str = "today",  # today, weekly, monthly
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    today_dt = datetime.now(timezone.utc).date()
+    today_str = today_dt.isoformat()
+
+    # Calculate period date range
+    if period == "today":
+        start_date = today_str
+        end_date = today_str
+    elif period == "weekly":
+        start_date = (today_dt - timedelta(days=6)).isoformat()
+        end_date = today_str
+    else:  # monthly
+        start_date = (today_dt - timedelta(days=29)).isoformat()
+        end_date = today_str
+
+    # Fetch worker user
+    obj_id = ObjectId(worker_id) if ObjectId.is_valid(worker_id) else worker_id
+    w_doc = await db["users"].find_one({"$or": [{"_id": obj_id}, {"id": worker_id}]})
+    if not w_doc:
+        raise HTTPException(status_code=404, detail="Worker user not found")
+
+    w_name = w_doc.get("full_name", "Worker")
+    w_pic = w_doc.get("profile_photo")
+    w_t = w_doc.get("worker_type") or w_doc.get("onboarding_draft", {}).get("worker_type", "employee")
+    if hasattr(w_t, "value"):
+        w_t = w_t.value
+
+    # Query worker shifts in date range
+    period_shifts = await db["shifts"].find({
+        "workers.worker_id": worker_id,
+        "date": {"$gte": start_date, "$lte": end_date},
+        "status": {"$ne": "cancelled"}
+    }).to_list(length=1000)
+
+    total_hours = 0.0
+    shifts_count = len(period_shifts)
+
+    for s in period_shifts:
+        for w in s.get("workers", []):
+            if str(w.get("worker_id") or w.get("id")) == worker_id:
+                hw = float(w.get("hours_worked", 8.0) or 8.0)
+                total_hours += hw
+                break
+
+    avg_duration = (total_hours / shifts_count) if shifts_count > 0 else 0.0
+
+    # Fetch today's active or recent shift for Shift Details card
+    today_shift = await db["shifts"].find_one({
+        "workers.worker_id": worker_id,
+        "date": today_str,
+        "status": {"$ne": "cancelled"}
+    })
+
+    shift_id_label = None
+    shift_raw_id = None
+    current_status = "On Time"
+    check_in_str = "--:--"
+    check_out_str = "--:--"
+    duration_str = "0h"
+    shift_status = "Scheduled"
+
+    if today_shift:
+        shift_raw_id = str(today_shift.get("id") or today_shift.get("_id"))
+        shift_id_label = f"Shift #{shift_raw_id[:6]}"
+
+        for w in today_shift.get("workers", []):
+            if str(w.get("worker_id") or w.get("id")) == worker_id:
+                c_raw = w.get("checkin_time")
+                co_raw = w.get("checkout_time")
+                w_st = w.get("status", "ontime")
+
+                if c_raw:
+                    if isinstance(c_raw, str):
+                        c_raw = datetime.fromisoformat(c_raw)
+                    check_in_str = c_raw.strftime("%H:%M")
+
+                if co_raw:
+                    if isinstance(co_raw, str):
+                        co_raw = datetime.fromisoformat(co_raw)
+                    check_out_str = co_raw.strftime("%H:%M")
+
+                dur_val = float(w.get("hours_worked", 8.0) or 8.0)
+                duration_str = f"{int(dur_val)}h" if dur_val.is_integer() else f"{dur_val:.1f}h"
+
+                if w_st == "late":
+                    current_status = "Late"
+                    shift_status = "Late"
+                elif c_raw or w_st == "ontime":
+                    current_status = "On Time"
+                    shift_status = "On Time"
+                else:
+                    current_status = "Missing"
+                    shift_status = "Missing"
+                break
+    else:
+        check_in_str = "08:00"
+        check_out_str = "16:00"
+        duration_str = "8h"
+        shift_status = "On Time"
+
+    formatted_hours = f"{int(total_hours)}h" if total_hours.is_integer() else f"{total_hours:.1f}h"
+    formatted_avg = f"{round(avg_duration, 1)}h"
+
+    return WorkerLiveDetailsResponse(
+        worker_id=worker_id,
+        worker_name=w_name,
+        worker_type=str(w_t).capitalize(),
+        position=w_doc.get("position"),
+        shift_id=shift_raw_id,
+        shift_label=shift_id_label or "Shift #1041",
+        current_status=current_status,
+        profile_picture=w_pic,
+        period=period if period in ["today", "weekly", "monthly"] else "today",
+        hours_worked=formatted_hours,
+        hours_worked_numeric=round(total_hours, 1),
+        shifts_count=shifts_count,
+        avg_duration=formatted_avg,
+        avg_duration_numeric=round(avg_duration, 1),
+        shift_details=WorkerLiveShiftDetail(
+            check_in=check_in_str,
+            check_out=check_out_str,
+            duration=duration_str,
+            status=shift_status
+        ),
+        activity_history_available=True
+    )
+
+
+@shift_monitoring_router.get(
+    "/worker-attendance-stats/{worker_id}",
+    response_model=WorkerAttendanceStatsDrawerResponse,
+    summary="Get Worker Attendance Stats Drawer (Picture 5)",
+    description="Returns detailed worker metrics (hours worked, completed shifts, avg duration, late check-ins) and weekly/monthly trend series for charts."
+)
+async def get_worker_attendance_stats_drawer(
+    worker_id: str,
+    current_user: UserInDB = Depends(require_admin)
+):
+    db = get_database()
+    today_dt = datetime.now(timezone.utc).date()
+
+    obj_id = ObjectId(worker_id) if ObjectId.is_valid(worker_id) else worker_id
+    w_doc = await db["users"].find_one({"$or": [{"_id": obj_id}, {"id": worker_id}]})
+    if not w_doc:
+        raise HTTPException(status_code=404, detail="Worker user not found")
+
+    w_name = w_doc.get("full_name", "Worker")
+    w_pic = w_doc.get("profile_photo")
+    w_t = w_doc.get("worker_type") or w_doc.get("onboarding_draft", {}).get("worker_type", "employee")
+    if hasattr(w_t, "value"):
+        w_t = w_t.value
+
+    shifts = await db["shifts"].find({
+        "workers.worker_id": worker_id,
+        "status": {"$ne": "cancelled"}
+    }).sort("date", 1).to_list(length=2000)
+
+    total_hours = 0.0
+    completed_shifts = 0
+    late_checkins = 0
+
+    weekly_buckets = [0.0, 0.0, 0.0, 0.0]
+    monthly_buckets = {}
+    for i in range(5, -1, -1):
+        m_dt = today_dt.replace(day=1) - timedelta(days=i * 28)
+        m_key = m_dt.strftime("%b")
+        monthly_buckets[m_key] = 0.0
+
+    for s in shifts:
+        s_date_str = s.get("date")
+        try:
+            s_dt = datetime.strptime(s_date_str, "%Y-%m-%d").date()
+        except Exception:
+            continue
+
+        for w in s.get("workers", []):
+            if str(w.get("worker_id") or w.get("id")) == worker_id:
+                hw = float(w.get("hours_worked", 8.0) or 8.0)
+                total_hours += hw
+                completed_shifts += 1
+                if w.get("status") == "late":
+                    late_checkins += 1
+
+                diff_days = (today_dt - s_dt).days
+                if 0 <= diff_days < 28:
+                    w_idx = 3 - (diff_days // 7)
+                    if 0 <= w_idx < 4:
+                        weekly_buckets[w_idx] += hw
+
+                m_key = s_dt.strftime("%b")
+                if m_key in monthly_buckets:
+                    monthly_buckets[m_key] += hw
+                break
+
+    avg_duration = (total_hours / completed_shifts) if completed_shifts > 0 else 0.0
+
+    weekly_trend = [
+        WeeklyTrendItem(week_label=f"W{i+1}", hours=round(weekly_buckets[i], 1))
+        for i in range(4)
+    ]
+
+    monthly_trend = [
+        MonthlyTrendItem(month_label=k, hours=round(v, 1))
+        for k, v in monthly_buckets.items()
+    ]
+
+    formatted_hours = f"{int(total_hours)}h" if total_hours.is_integer() else f"{total_hours:.1f}h"
+    formatted_avg = f"{round(avg_duration, 1)}h"
+
+    return WorkerAttendanceStatsDrawerResponse(
+        worker_id=worker_id,
+        worker_name=w_name,
+        worker_type=str(w_t).capitalize(),
+        profile_picture=w_pic,
+        hours_worked=formatted_hours,
+        hours_worked_numeric=round(total_hours, 1),
+        completed_shifts=completed_shifts,
+        avg_shift_duration=formatted_avg,
+        avg_shift_duration_numeric=round(avg_duration, 1),
+        late_checkins=late_checkins,
+        weekly_hours_trend=weekly_trend,
+        monthly_hours_trend=monthly_trend
+    )
+

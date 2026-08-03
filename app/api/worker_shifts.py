@@ -318,7 +318,8 @@ async def get_worker_home_dashboard(
     "/roster",
     response_model=WorkerRosterResponse,
     summary="Get Worker Roster",
-    description="Returns worker's shift roster grouped by date with shift status (upcoming, running, completed), client details, location details, room count, and assigned admin info."
+    description="Returns worker's shift roster grouped by date with shift status (upcoming, running, completed), client details, location details, room count, and assigned admin info.",
+    include_in_schema=False
 )
 async def get_worker_roster(
     start_date: Optional[str] = None,
@@ -1021,4 +1022,176 @@ async def worker_shift_check_out(
         checkout_time=res.checkout_time or datetime.now(timezone.utc),
         hours_worked=res.hours_worked or 0.0
     )
+
+
+@worker_shift_router.post(
+    "/{shift_id}/rooms/{room_id}/photos",
+    response_model=PhotoUploadResponse,
+    summary="Worker Submit Room Photo (Before & After) with Custom PyTorch AI Analysis"
+)
+async def upload_worker_room_photo(
+    shift_id: str,
+    room_id: str,
+    photo_type: str = Form("after"),
+    file: UploadFile = File(...),
+    current_user: UserInDB = Depends(require_worker)
+):
+    db = get_database()
+    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", "w_1"))
+    worker_name = getattr(current_user, "full_name", "Worker")
+
+    os.makedirs("uploads/photo_reviews", exist_ok=True)
+    file_ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
+    filename = f"{shift_id}_{room_id}_{photo_type}_{uuid.uuid4().hex[:6]}.{file_ext}"
+    file_path = os.path.join("uploads/photo_reviews", filename)
+
+    contents = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(contents)
+
+    photo_url = f"/uploads/photo_reviews/{filename}"
+    now = datetime.now(timezone.utc)
+
+    s_doc = await db["shifts"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+    c_name = s_doc.get("client_name", "NH Hotels Nederland") if s_doc else "NH Hotels Nederland"
+    l_name = s_doc.get("location_name", "NH Hotel Amsterdam Centrum") if s_doc else "NH Hotel Amsterdam Centrum"
+    r_name = f"Room {room_id}"
+    if s_doc:
+        for r in s_doc.get("rooms", []):
+            if str(r.get("id") or r.get("room_id") or r.get("name")) == room_id:
+                r_name = r.get("name", r_name)
+                break
+
+    rev_id = f"RV-{uuid.uuid4().hex[:6].upper()}"
+    review_query = {"shift_id": shift_id, "room.room_id": room_id}
+    existing_rev = await db["photo_reviews"].find_one(review_query)
+
+    before_path = None
+    after_path = file_path
+    if photo_type == "before":
+        before_path = file_path
+        after_path = existing_rev.get("after_photo_path") if existing_rev else file_path
+    elif existing_rev:
+        before_path = existing_rev.get("before_photo_path")
+
+    from app.services.ai_vision_engine import analyze_photo_quality
+    ai_score, ai_conf, breakdown = await analyze_photo_quality(after_photo_path=after_path, before_photo_path=before_path)
+
+    review_doc = {
+        "review_id": existing_rev.get("review_id", rev_id) if existing_rev else rev_id,
+        "shift_id": shift_id,
+        "cleaner": {
+            "worker_id": worker_id,
+            "name": worker_name,
+            "profile_picture": getattr(current_user, "profile_photo", None)
+        },
+        "client": {
+            "client_id": s_doc.get("client_id", "c_1") if s_doc else "c_1",
+            "name": c_name
+        },
+        "location": {
+            "location_id": s_doc.get("location_id", "l_1") if s_doc else "l_1",
+            "name": l_name
+        },
+        "room": {
+            "room_id": room_id,
+            "name": r_name
+        },
+        "before_photo_url": photo_url if photo_type == "before" else (existing_rev.get("before_photo_url") if existing_rev else None),
+        "before_photo_path": before_path,
+        "after_photo_url": photo_url if photo_type == "after" else (existing_rev.get("after_photo_url") if existing_rev else photo_url),
+        "after_photo_path": after_path,
+        "photo_url": photo_url,
+        "photo_name": f"{r_name} {photo_type.capitalize()} Photo",
+        "ai_score": ai_score,
+        "ai_confidence": ai_conf,
+        "ai_feature_breakdown": breakdown,
+        "status": "pending_review",
+        "date_submitted": now,
+        "updated_at": now
+    }
+
+    await db["photo_reviews"].update_one(
+        review_query,
+        {"$set": review_doc},
+        upsert=True
+    )
+
+    return PhotoUploadResponse(
+        shift_id=shift_id,
+        room_id=room_id,
+        photo_url=photo_url,
+        status="pending_review",
+        message=f"{photo_type.capitalize()} photo submitted successfully. Custom PyTorch AI Score: {ai_score}% ({ai_conf.capitalize()} confidence)"
+    )
+
+
+from app.schemas.escalation import EscalationCreate, EscalationItem, EscalationReporterDetail
+
+@worker_shift_router.post(
+    "/{shift_id}/escalations",
+    response_model=EscalationItem,
+    status_code=status.HTTP_201_CREATED,
+    summary="Worker Submit Escalation / Issue during Active Running Shift"
+)
+async def create_worker_shift_escalation(
+    shift_id: str,
+    esc_in: EscalationCreate,
+    current_user: UserInDB = Depends(require_worker)
+):
+    db = get_database()
+    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", "w_1"))
+    worker_name = getattr(current_user, "full_name", "Worker")
+
+    now = datetime.now(timezone.utc)
+    esc_id = f"ESC-{uuid.uuid4().hex[:6].upper()}"
+
+    s_doc = await db["shifts"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+    loc_name = esc_in.location_name or (s_doc.get("location_name") if s_doc else "NH Hotel Amsterdam")
+    rm_name = esc_in.room_name or "General Area"
+
+    sub_title = f"{loc_name} - {rm_name}"
+
+    doc = {
+        "_id": esc_id,
+        "escalation_id": esc_id,
+        "shift_id": shift_id,
+        "title": esc_in.title,
+        "subtitle": sub_title,
+        "description": esc_in.description,
+        "severity": esc_in.severity,
+        "reporter": {
+            "worker_id": worker_id,
+            "name": worker_name,
+            "profile_picture": getattr(current_user, "profile_photo", None)
+        },
+        "assigned_to": None,
+        "status": "open",
+        "photo_url": esc_in.photo_url,
+        "created_at": now,
+        "updated_at": now
+    }
+
+    await db["escalations"].insert_one(doc)
+
+    return EscalationItem(
+        escalation_id=esc_id,
+        shift_id=shift_id,
+        title=esc_in.title,
+        subtitle=sub_title,
+        description=esc_in.description,
+        severity=esc_in.severity,
+        reporter=EscalationReporterDetail(
+            worker_id=worker_id,
+            name=worker_name,
+            profile_picture=getattr(current_user, "profile_photo", None)
+        ),
+        assigned_to=None,
+        status="open",
+        status_label="Open",
+        photo_url=esc_in.photo_url,
+        created_at=now
+    )
+
+
 

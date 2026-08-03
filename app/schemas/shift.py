@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict
 from datetime import datetime
 from app.schemas.client_list import (
     CleaningTaskCreate, CleaningTaskResponse,
@@ -61,12 +61,13 @@ class ShiftRoomDetail(BaseModel):
 class ShiftDraftCreate(BaseModel):
     client_id: str = Field(..., json_schema_extra={"example": "6a61b7f68ad7764bf1032f67"})
     location_id: str = Field(..., json_schema_extra={"example": "2a78f050-4410-424f-86dd-d9a442b67816"})
-    date: str = Field(..., json_schema_extra={"example": "2026-07-25"})
+    date: str = Field(..., json_schema_extra={"example": "2026-08-03"})
     start_time: str = Field(..., json_schema_extra={"example": "08:00"})
     end_time: str = Field(..., json_schema_extra={"example": "16:00"})
+    repeat_shift: Optional[str] = Field(default="Does not repeat", json_schema_extra={"example": "Does not repeat"})
     shift_notes: Optional[str] = Field(default=None, json_schema_extra={"example": "Deep clean executive floor"})
-    cleaning_plan_id: Optional[str] = Field(default=None, json_schema_extra={"example": "cleaning_plan_id_here"})
-    room_ids: Optional[List[str]] = Field(default=None, json_schema_extra={"example": ["room_id_1", "room_id_2"]})
+    cleaning_plan_id: Optional[str] = Field(default=None)
+    room_ids: Optional[List[str]] = Field(default=None)
     rooms: Optional[List[ShiftRoomInput]] = Field(default=None)
 
 class ShiftDraftResponse(BaseModel):
@@ -78,6 +79,7 @@ class ShiftDraftResponse(BaseModel):
     date: str
     start_time: str
     end_time: str
+    repeat_shift: Optional[str] = "Does not repeat"
     shift_notes: Optional[str] = None
     cleaning_plan_id: Optional[str] = None
     rooms: List[ShiftRoomDetail] = Field(default_factory=list)
@@ -92,15 +94,16 @@ class ShiftDraftResponse(BaseModel):
         from_attributes = True
 
 class ShiftDraftUpdate(BaseModel):
-    client_id: Optional[str] = Field(default=None, json_schema_extra={"example": "6a61b7f68ad7764bf1032f67"})
-    location_id: Optional[str] = Field(default=None, json_schema_extra={"example": "2a78f050-4410-424f-86dd-d9a442b67816"})
-    date: Optional[str] = Field(default=None, json_schema_extra={"example": "2026-07-26"})
-    start_time: Optional[str] = Field(default=None, json_schema_extra={"example": "09:00"})
-    end_time: Optional[str] = Field(default=None, json_schema_extra={"example": "17:00"})
-    shift_notes: Optional[str] = Field(default=None, json_schema_extra={"example": "Updated draft notes"})
-    cleaning_plan_id: Optional[str] = Field(default=None)
-    room_ids: Optional[List[str]] = Field(default=None)
-    rooms: Optional[List[ShiftRoomInput]] = Field(default=None)
+    client_id: Optional[str] = None
+    location_id: Optional[str] = None
+    date: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    repeat_shift: Optional[str] = None
+    shift_notes: Optional[str] = None
+    cleaning_plan_id: Optional[str] = None
+    room_ids: Optional[List[str]] = None
+    rooms: Optional[List[ShiftRoomInput]] = None
 
 class ShiftDraftPaginatedResponse(BaseModel):
     total_count: int
@@ -112,8 +115,9 @@ class WorkerDropdownItem(BaseModel):
     worker_id: str
     name: str
     profile_picture: Optional[str] = None
-    status: Literal["available", "on_shift"]
-    worker_type: str
+    status: Literal["available", "on_shift", "off_duty"] = "available"
+    worker_type: str = "employee"
+    position: Optional[str] = None
 
 class WorkerDropdownPaginatedResponse(BaseModel):
     total_count: int
@@ -127,6 +131,7 @@ class WorkerShiftAssignmentItem(BaseModel):
 
 class ShiftAssignRequest(BaseModel):
     draft_id: str = Field(..., json_schema_extra={"example": "draft_uuid_12345"})
+    team_leader_id: Optional[str] = Field(default=None, json_schema_extra={"example": "6a61be526067f847e843f8f9"})
     worker_ids: Optional[List[str]] = Field(default=None, json_schema_extra={"example": ["worker_id_1", "worker_id_2"]})
     worker_assignments: Optional[List[WorkerShiftAssignmentItem]] = Field(
         default=None,
@@ -288,6 +293,24 @@ class PhotoReviewPaginatedResponse(BaseModel):
     pending_reviews_count: int
     reviews: List[PhotoReviewItem] = Field(default_factory=list)
 
+class PhotoReviewDetailModalResponse(BaseModel):
+    review_id: str
+    shift_id: str
+    cleaner: PhotoReviewCleanerDetail
+    client: PhotoReviewClientDetail
+    location: PhotoReviewLocationDetail
+    room: PhotoReviewRoomDetail
+    before_photo_url: Optional[str] = None
+    after_photo_url: str
+    photo_name: str
+    ai_score: float = 90.0
+    ai_confidence: str = "high"
+    ai_feature_breakdown: Dict[str, float] = Field(default_factory=dict)
+    status: Literal["pending_review", "approved", "rejected"] = "pending_review"
+    rejection_reason: Optional[str] = None
+    date_submitted: datetime
+
+
 class LiveStatusTaskItem(BaseModel):
     id: str
     name: str
@@ -424,6 +447,141 @@ class ClientScheduleResponse(BaseModel):
     page: int
     limit: int
     visits: List[ClientCleaningVisitItem] = Field(default_factory=list)
+
+
+# --- Admin Roaster Management Schemas ---
+class DailyRosterShiftItem(BaseModel):
+    shift_id: str
+    client_id: str
+    client_name: str
+    location_id: str
+    location_name: str
+    start_time: str
+    end_time: str
+    time_label: str
+    duration_hours: float
+    status: str = "scheduled"
+    shift_notes: Optional[str] = None
+    rooms_count: int = 0
+
+class DailyRosterWorkerRow(BaseModel):
+    worker_id: str
+    worker_name: str
+    profile_photo: Optional[str] = None
+    worker_type: Optional[str] = "employee"
+    shifts_today_count: int = 0
+    shifts_today_label: str = "0 shifts today"
+    shifts: List[DailyRosterShiftItem] = Field(default_factory=list)
+
+class DailyRosterBanner(BaseModel):
+    header_title: str = "DAILY ROSTER"
+    date_str: str
+    full_date: str
+    total_scheduled_shifts: int = 0
+    total_scheduled_hours: float = 0.0
+
+class AdminDailyRosterResponse(BaseModel):
+    banner: DailyRosterBanner
+    total_team_members: int
+    team_members: List[DailyRosterWorkerRow] = Field(default_factory=list)
+
+class WeeklyRosterDayShiftItem(BaseModel):
+    shift_id: str
+    client_id: str
+    client_name: str
+    location_id: str
+    location_name: str
+    start_time: str
+    end_time: str
+    duration_hours: float
+    status: str = "scheduled"
+
+class WeeklyRosterDayCell(BaseModel):
+    day_name: str
+    date_str: str
+    full_date: str
+    status: str = "Available"
+    shift_count: int = 0
+    shifts: List[WeeklyRosterDayShiftItem] = Field(default_factory=list)
+
+class WeeklyRosterWorkerRow(BaseModel):
+    worker_id: str
+    worker_name: str
+    profile_photo: Optional[str] = None
+    shifts_this_week_count: int = 0
+    shifts_this_week_label: str = "0 shifts this week"
+    daily_schedule: List[WeeklyRosterDayCell] = Field(default_factory=list)
+
+class WeeklyRosterBanner(BaseModel):
+    header_title: str = "WEEKLY ROSTER"
+    range_str: str
+    start_date: str
+    end_date: str
+    total_scheduled_shifts: int = 0
+    total_scheduled_hours: float = 0.0
+
+class AdminWeeklyRosterResponse(BaseModel):
+    banner: WeeklyRosterBanner
+    days: List[dict] = Field(default_factory=list)
+    total_team_members: int
+    team_members: List[WeeklyRosterWorkerRow] = Field(default_factory=list)
+
+class MonthlyRosterDaySummary(BaseModel):
+    day_number: int
+    full_date: str
+    shift_count: int = 0
+    total_hours: float = 0.0
+    shifts: List[WeeklyRosterDayShiftItem] = Field(default_factory=list)
+
+class MonthlyRosterWorkerRow(BaseModel):
+    worker_id: str
+    worker_name: str
+    profile_photo: Optional[str] = None
+    total_month_shifts: int = 0
+    total_month_shifts_label: str = "0 shifts"
+    daily_summaries: List[MonthlyRosterDaySummary] = Field(default_factory=list)
+
+class MonthlyRosterBanner(BaseModel):
+    header_title: str = "MONTHLY ROSTER"
+    month_str: str
+    month: int
+    year: int
+    total_scheduled_shifts: int = 0
+    total_team_members: int = 0
+
+class AdminMonthlyRosterResponse(BaseModel):
+    banner: MonthlyRosterBanner
+    days_in_month: int
+    team_members: List[MonthlyRosterWorkerRow] = Field(default_factory=list)
+
+class RosterShiftDetailModalResponse(BaseModel):
+    shift_id: str
+    worker_id: str
+    worker_name: str
+    worker_profile_photo: Optional[str] = None
+    assignment_label: str = "Scheduled assignment"
+    location_id: str
+    location_name: str
+    location_address: Optional[str] = None
+    start_time: str
+    end_time: str
+    time_range: str
+    date: str
+    client_id: str
+    client_name: str
+    status: str = "scheduled"
+
+class RosterShiftCreateRequest(BaseModel):
+    client_id: str = Field(..., json_schema_extra={"example": "6a61b7fa8ad7764bf1032f70"})
+    location_id: str = Field(..., json_schema_extra={"example": "7d355c71-a0bb-4ca1-a468-9cebf06bb0dc"})
+    date: str = Field(..., json_schema_extra={"example": "2026-08-03"})
+    start_time: str = Field(..., json_schema_extra={"example": "08:00"})
+    end_time: str = Field(..., json_schema_extra={"example": "14:00"})
+    worker_ids: List[str] = Field(..., json_schema_extra={"example": ["6a61be526067f847e843f8f9"]})
+    shift_notes: Optional[str] = Field(default=None, json_schema_extra={"example": "Regular office cleaning"})
+    cleaning_plan_id: Optional[str] = Field(default=None)
+    room_ids: Optional[List[str]] = Field(default=None)
+
 
 
 

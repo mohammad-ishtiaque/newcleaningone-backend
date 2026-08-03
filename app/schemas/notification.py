@@ -22,3 +22,20 @@ class NotificationListResponse(BaseModel):
     page: int
     limit: int
     notifications: List[NotificationResponse]
+
+class AdminNotificationItem(BaseModel):
+    id: str
+    title: str
+    message: str
+    time_ago: str
+    notification_type: str
+    is_read: bool = False
+    created_at: datetime
+
+class AdminNotificationCenterResponse(BaseModel):
+    total_count: int
+    unread_count: int
+    page: int
+    limit: int
+    notifications: List[AdminNotificationItem] = Field(default_factory=list)
+
