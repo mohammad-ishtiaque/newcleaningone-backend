@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # Server Config
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8080
-    ADMIN_PORT: int = 8081
+    ADMIN_PORT: int = 8084
     CLIENT_PORT: int = 8082
     WORKER_PORT: int = 8083
 
