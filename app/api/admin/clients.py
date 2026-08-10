@@ -7,7 +7,7 @@ from app.core.database import get_database
 from app.schemas.client_list import (
     ClientListCreate, ClientListUpdate, ClientListResponse, ClientListPaginatedResponse,
     ContractRenewRequest, ClientGridDropdownItem, ClientGridDropdownPaginatedResponse,
-    ClientOverviewListPaginatedResponse, ClientDashboardOverviewResponse, ClientContractDetailsResponse
+    ClientOverviewListPaginatedResponse, ClientOverviewItemResponse, ClientDashboardOverviewResponse, ClientContractDetailsResponse
 )
 from app.schemas.client_approvals import (
     ClientApproveRequest, ClientRejectRequest, PendingClientApprovalsPaginatedResponse
@@ -169,48 +169,52 @@ async def create_client(
     return _format_client_response(doc)
 
 
-@client_mgmt_router.get("/clients/deleted-list", response_model=ClientOverviewListPaginatedResponse, summary="List Deleted Clients")
-async def list_deleted_clients(
+@client_mgmt_router.get("/clients", response_model=ClientOverviewListPaginatedResponse, summary="List All Clients Grid (Image 1)")
+async def list_clients_grid(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"status": "deleted"}
+    query = {"status": {"$ne": "deleted"}}
     if search:
         query["$or"] = [
             {"company_name": {"$regex": search, "$options": "i"}},
             {"email": {"$regex": search, "$options": "i"}}
         ]
-        
+
     total_count = await db["client_list"].count_documents(query)
     skip = (page - 1) * limit
-    cursor = db["client_list"].find(query).sort("updated_at", -1).skip(skip).limit(limit)
+    cursor = db["client_list"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     raw_clients = await cursor.to_list(length=limit)
-    
-    clients = []
+
+    items = []
     for c in raw_clients:
-        clients.append(ClientOverviewItemResponse(
-            id=str(c.get("_id") or c.get("id")),
-            company_name=c.get("company_name", ""),
-            industry=c.get("industry", ""),
-            status=c.get("status", "deleted"),
+        cid = str(c.get("_id") or c.get("id"))
+        loc_count = await db["locations"].count_documents({"client_id": cid})
+        shift_count = await db["shifts"].count_documents({"client_id": cid})
+        items.append(ClientOverviewItemResponse(
+            id=cid,
+            company_name=c.get("company_name", "Client Company"),
+            industry=c.get("industry", "Corporate"),
+            status=c.get("status", "active"),
             primary_contact_name=c.get("primary_contact_name", ""),
             email=c.get("email", ""),
             phone=c.get("phone", ""),
-            locations_count=c.get("total_locations_count", 0),
-            contract_status=c.get("contract_status", "no_contract"),
-            created_at=c.get("created_at"),
-            updated_at=c.get("updated_at")
+            locations_count=loc_count,
+            contract_status=c.get("contract_status", "active"),
+            created_at=c.get("created_at") if isinstance(c.get("created_at"), datetime) else datetime.now(timezone.utc),
+            updated_at=c.get("updated_at") if isinstance(c.get("updated_at"), datetime) else datetime.now(timezone.utc)
         ))
-        
+
     return ClientOverviewListPaginatedResponse(
         total_count=total_count,
         page=page,
         limit=limit,
-        clients=clients
+        clients=items
     )
+
 @client_mgmt_router.get("/clients/{client_id}", response_model=ClientListResponse, summary="Get Client by ID")
 async def get_client_by_id(
     client_id: str,
@@ -272,6 +276,49 @@ async def delete_client(
         )
         
     return {"message": "Client deleted successfully"}
+
+@client_mgmt_router.get("/clients/deleted-list", response_model=ClientOverviewListPaginatedResponse, summary="List Deleted Clients")
+async def list_deleted_clients(
+    page: int = 1,
+    limit: int = 10,
+    search: Optional[str] = None,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"status": "deleted"}
+    if search:
+        query["$or"] = [
+            {"company_name": {"$regex": search, "$options": "i"}},
+            {"email": {"$regex": search, "$options": "i"}}
+        ]
+        
+    total_count = await db["client_list"].count_documents(query)
+    skip = (page - 1) * limit
+    cursor = db["client_list"].find(query).sort("updated_at", -1).skip(skip).limit(limit)
+    raw_clients = await cursor.to_list(length=limit)
+    
+    clients = []
+    for c in raw_clients:
+        clients.append(ClientOverviewItemResponse(
+            id=str(c.get("_id") or c.get("id")),
+            company_name=c.get("company_name", ""),
+            industry=c.get("industry", ""),
+            status=c.get("status", "deleted"),
+            primary_contact_name=c.get("primary_contact_name", ""),
+            email=c.get("email", ""),
+            phone=c.get("phone", ""),
+            locations_count=c.get("total_locations_count", 0),
+            contract_status=c.get("contract_status", "no_contract"),
+            created_at=c.get("created_at"),
+            updated_at=c.get("updated_at")
+        ))
+        
+    return ClientOverviewListPaginatedResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        clients=clients
+    )
 
 
 @client_mgmt_router.post("/clients/{client_id}/restore", status_code=status.HTTP_200_OK, summary="Restore Deleted Client")
@@ -505,51 +552,7 @@ async def reject_client_signup(
 
 
 
-@client_mgmt_router.get("/clients-overview", response_model=ClientOverviewListPaginatedResponse, summary="Client Overview List")
-async def list_clients_overview(
-    page: int = 1,
-    limit: int = 10,
-    search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    query = {"status": {"$ne": "deleted"}}
-    if search:
-        query["$or"] = [
-            {"company_name": {"$regex": search, "$options": "i"}},
-            {"email": {"$regex": search, "$options": "i"}}
-        ]
 
-    total_count = await db["client_list"].count_documents(query)
-    skip = (page - 1) * limit
-    cursor = db["client_list"].find(query).sort("created_at", -1).skip(skip).limit(limit)
-    raw_clients = await cursor.to_list(length=limit)
-
-    items = []
-    for c in raw_clients:
-        cid = str(c.get("_id") or c.get("id"))
-        loc_count = await db["locations"].count_documents({"client_id": cid})
-        shift_count = await db["shifts"].count_documents({"client_id": cid})
-        items.append(ClientOverviewItemResponse(
-            id=cid,
-            company_name=c.get("company_name", "Client Company"),
-            industry=c.get("industry", "Corporate"),
-            status=c.get("status", "active"),
-            primary_contact_name=c.get("primary_contact_name", ""),
-            email=c.get("email", ""),
-            phone=c.get("phone", ""),
-            locations_count=loc_count,
-            contract_status=c.get("contract_status", "active"),
-            created_at=c.get("created_at") if isinstance(c.get("created_at"), datetime) else datetime.now(timezone.utc),
-            updated_at=c.get("updated_at") if isinstance(c.get("updated_at"), datetime) else datetime.now(timezone.utc)
-        ))
-
-    return ClientOverviewListPaginatedResponse(
-        total_count=total_count,
-        page=page,
-        limit=limit,
-        clients=items
-    )
 
 
 # ================================
