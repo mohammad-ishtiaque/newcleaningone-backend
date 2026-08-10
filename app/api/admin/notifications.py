@@ -8,15 +8,15 @@ from app.schemas.notification import (
     AdminNotificationCenterResponse, AdminNotificationItem
 )
 from app.models.user import UserInDB
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 
-admin_notifications_router = APIRouter(prefix="/admin", tags=["Admin Notification Center"])
+admin_notifications_router = APIRouter(prefix="/manager", tags=["Admin Notification Center"])
 
 @admin_notifications_router.get("/notifications", response_model=AdminNotificationCenterResponse, summary="Admin Notification Center (Image Mockup)")
 async def get_admin_notification_center(
     page: int = 1,
     limit: int = 10,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     admin_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "admin_1")
@@ -84,7 +84,7 @@ async def get_admin_notification_center(
 
 @admin_notifications_router.post("/notifications/mark-all-read", summary="Mark All Notifications as Read ('Mark all read' Button Image Mockup)")
 async def mark_all_admin_notifications_read(
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     now = datetime.now(timezone.utc)
@@ -103,7 +103,7 @@ async def mark_all_admin_notifications_read(
 @admin_notifications_router.patch("/notifications/{notification_id}/read", summary="Mark Single Notification as Read")
 async def mark_single_admin_notification_read(
     notification_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     now = datetime.now(timezone.utc)
@@ -126,7 +126,7 @@ async def mark_single_admin_notification_read(
 @admin_notifications_router.delete("/notifications/{notification_id}", summary="Dismiss / Delete Notification ('x' Button Image Mockup)")
 async def delete_admin_notification(
     notification_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
 

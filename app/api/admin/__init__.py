@@ -1,4 +1,4 @@
-from app.api.admin.profile_company import router, require_admin
+from app.api.admin.profile_company import router, require_manager
 from app.api.admin.overview_users import get_user_service
 from app.api.admin.clients import client_mgmt_router
 from app.api.admin.client_details_tabs import client_details_tabs_router
@@ -30,7 +30,7 @@ __all__ = [
     "escalations_router",
     "qc_reports_router",
     "admin_notifications_router",
-    "require_admin",
+    "require_manager",
     "get_user_service"
 ]
 

@@ -11,9 +11,9 @@ from app.schemas.shift import (
     PhotoReviewPaginatedResponse, PhotoReviewItem, PhotoReviewRejectRequest
 )
 from app.models.user import UserInDB
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 
-shift_mgmt_router = APIRouter(prefix="/admin", tags=["Admin Shift Management"])
+shift_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Shift Management"])
 
 def _format_shift_response(doc: dict) -> ShiftResponse:
     s_id = str(doc.get("_id") or doc.get("id"))
@@ -63,7 +63,7 @@ def _format_shift_response(doc: dict) -> ShiftResponse:
 @shift_mgmt_router.post("/shifts/drafts", response_model=ShiftDraftResponse, status_code=status.HTTP_201_CREATED)
 async def create_shift_draft(
     draft_in: ShiftDraftCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     cdoc = await db["client_list"].find_one({"$or": [{"_id": draft_in.client_id}, {"id": draft_in.client_id}]})
@@ -122,7 +122,7 @@ async def create_shift_draft(
 async def list_shift_drafts(
     page: int = 1,
     limit: int = 10,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -168,7 +168,7 @@ async def list_shift_drafts(
 @shift_mgmt_router.post("/shifts/assign", response_model=ShiftResponse, status_code=status.HTTP_201_CREATED)
 async def assign_workers_and_publish_shift(
     assign_in: ShiftAssignRequest,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     draft_query = {"$or": [{"_id": assign_in.draft_id}, {"id": assign_in.draft_id}]}
@@ -227,7 +227,7 @@ async def list_published_shifts(
     location_id: Optional[str] = None,
     date: Optional[str] = None,
     status_filter: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -255,7 +255,7 @@ async def list_published_shifts(
 @shift_mgmt_router.get("/shifts/{shift_id}", response_model=ShiftResponse)
 async def get_shift_by_id(
     shift_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"$or": [{"_id": shift_id}, {"id": shift_id}]}

@@ -8,14 +8,14 @@ from app.schemas.client_list import (
     QualityControlReportResponse, ShiftTrendDataPoint, PhotoQualityDistributionData
 )
 from app.models.user import UserInDB
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 
-qc_reports_router = APIRouter(prefix="/admin", tags=["Admin Quality Control Reports"])
+qc_reports_router = APIRouter(prefix="/manager", tags=["Admin Quality Control Reports"])
 
 @qc_reports_router.get("/reports/quality-control", response_model=QualityControlReportResponse, summary="Global Quality Control Reports Dashboard (Image Mockup)")
 async def get_quality_control_report(
     timeframe: Literal["week", "month", "quarter", "year"] = "month",
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     tf = timeframe.lower()
@@ -95,7 +95,7 @@ async def get_quality_control_report(
 @qc_reports_router.get("/reports/quality-control/pdf", summary="Export Quality Control Report PDF (Top Right PDF Button Image Mockup)")
 async def export_quality_control_report_pdf(
     timeframe: Literal["week", "month", "quarter", "year"] = "month",
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     tf_str = timeframe.capitalize()
     now_str = datetime.now(timezone.utc).strftime("%B %d, %Y")

@@ -12,10 +12,10 @@ from app.schemas.user import (
     WorkerBulkImportResult
 )
 from app.models.user import UserInDB
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 from app.api.admin.worker_csv_utils import generate_csv_template, parse_and_validate_worker_csv, export_workers_to_csv
 
-worker_mgmt_router = APIRouter(prefix="/admin", tags=["Admin Worker Management"])
+worker_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Worker Management"])
 
 # ================================
 # 1. Admin Workers Overview Table & Stats (Image 1)
@@ -28,7 +28,7 @@ async def get_admin_workers_table(
     worker_type: Optional[str] = None,  # all, employee, freelancer
     status_filter: Optional[str] = None,  # all, on_shift, active, off_duty, suspended, banned
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"role": "worker"}
@@ -135,7 +135,7 @@ async def get_admin_workers_table(
 @worker_mgmt_router.post("/workers", response_model=AdminWorkerTableItem, status_code=status.HTTP_201_CREATED, summary="Add New Worker (Image 2 Modal)")
 async def create_new_worker(
     worker_in: AdminWorkerCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     email_clean = worker_in.email.lower().strip()
@@ -211,7 +211,7 @@ async def create_new_worker(
 async def update_worker_status(
     worker_id: str,
     status_in: AdminWorkerStatusUpdate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"_id": worker_id}
@@ -239,7 +239,7 @@ async def update_worker_status(
 
 @worker_mgmt_router.get("/workers/bulk-import/template", summary="Download CSV Bulk Import Template (Image 3)")
 async def download_worker_import_template(
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     template_content = generate_csv_template()
     return Response(
@@ -251,7 +251,7 @@ async def download_worker_import_template(
 @worker_mgmt_router.post("/workers/bulk-import", response_model=WorkerBulkImportResult, summary="Validate & Bulk Import CSV Worker Data (Image 3 Modal)")
 async def bulk_import_workers_csv(
     file: UploadFile = File(...),
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported for bulk import")
@@ -268,7 +268,7 @@ async def bulk_import_workers_csv(
 @worker_mgmt_router.get("/workers/export", summary="Export Workers Data to CSV")
 async def export_workers_csv(
     worker_type: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"role": "worker"}
@@ -294,7 +294,7 @@ async def list_pending_worker_approvals(
     limit: int = 10,
     status_filter: Optional[str] = "pending",
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"role": "worker"}
@@ -343,7 +343,7 @@ async def list_pending_worker_approvals(
 async def update_worker_approval_status(
     worker_id: str,
     approval_in: WorkerApprovalUpdate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"_id": worker_id}
@@ -385,7 +385,7 @@ async def list_available_workers(
     page: int = 1,
     limit: int = 20,
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"role": "worker", "is_active": True}

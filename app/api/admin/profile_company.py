@@ -14,11 +14,11 @@ from app.models.user import RoleEnum, UserInDB
 from app.repositories.user_repo import UserRepository
 from app.dependencies.auth import get_current_user
 
-router = APIRouter(prefix="/admin", tags=["Admin"])
+router = APIRouter(prefix="/manager", tags=["Admin"])
 
-def require_admin(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
-    if current_user.role not in [RoleEnum.admin, RoleEnum.super_admin]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+def require_manager(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
+    if current_user.role not in [RoleEnum.manager, RoleEnum.admin]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Manager role required")
     return current_user
 
 # ================================
@@ -26,13 +26,13 @@ def require_admin(current_user: UserInDB = Depends(get_current_user)) -> UserInD
 # ================================
 
 @router.get("/me", response_model=AdminProfileResponse)
-async def get_my_admin_profile(current_user: UserInDB = Depends(require_admin)):
+async def get_my_admin_profile(current_user: UserInDB = Depends(require_manager)):
     return AdminProfileResponse(**current_user.model_dump())
 
 @router.patch("/me", response_model=AdminProfileResponse)
 async def update_my_admin_profile(
     admin_update: AdminUpdate,
-    current_user: UserInDB = Depends(require_admin),
+    current_user: UserInDB = Depends(require_manager),
     user_repo: UserRepository = Depends(UserRepository)
 ):
     update_data = admin_update.model_dump(exclude_unset=True)
@@ -47,7 +47,7 @@ async def update_my_admin_profile(
 # ================================
 
 @router.get("/company-profile", response_model=CompanyProfileResponse)
-async def get_company_profile(current_user: UserInDB = Depends(require_admin)):
+async def get_company_profile(current_user: UserInDB = Depends(require_manager)):
     db = get_database()
     profile = await db["company_profile"].find_one({"type": "main"})
     if not profile:
@@ -64,7 +64,7 @@ async def get_company_profile(current_user: UserInDB = Depends(require_admin)):
 @router.patch("/company-profile", response_model=CompanyProfileResponse)
 async def update_company_profile(
     update_data: CompanyProfileUpdate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     fields = update_data.model_dump(exclude_unset=True)
@@ -87,7 +87,7 @@ async def update_company_profile(
 @router.get("/legal-documents/{type}", response_model=LegalDocumentResponse)
 async def get_legal_document(
     type: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     if type not in ["privacy_policy", "terms_and_conditions"]:
         raise HTTPException(status_code=400, detail="Invalid document type")
@@ -119,7 +119,7 @@ async def get_legal_document(
 async def update_legal_document(
     type: str,
     doc_update: LegalDocumentUpdate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     if type not in ["privacy_policy", "terms_and_conditions"]:
         raise HTTPException(status_code=400, detail="Invalid document type")
@@ -151,7 +151,7 @@ async def list_support_messages(
     page: int = 1,
     limit: int = 10,
     status_filter: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     skip = (page - 1) * limit
@@ -207,7 +207,7 @@ async def list_support_messages(
 async def reply_support_message(
     message_id: str,
     reply_in: SupportReplyRequest,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"_id": ObjectId(message_id)} if ObjectId.is_valid(message_id) else {"_id": message_id}
@@ -259,7 +259,7 @@ async def reply_support_message(
 # ================================
 
 @router.get("/faqs", response_model=List[FAQResponse])
-async def list_admin_faqs(current_user: UserInDB = Depends(require_admin)):
+async def list_admin_faqs(current_user: UserInDB = Depends(require_manager)):
     db = get_database()
     cursor = db["faqs"].find().sort("created_at", -1)
     raw_faqs = await cursor.to_list(length=100)
@@ -284,7 +284,7 @@ async def list_admin_faqs(current_user: UserInDB = Depends(require_admin)):
 @router.post("/faqs", response_model=FAQResponse, status_code=status.HTTP_201_CREATED)
 async def create_faq(
     faq_in: FAQCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     now = datetime.now(timezone.utc)
@@ -309,7 +309,7 @@ async def create_faq(
 async def update_faq(
     faq_id: str,
     faq_in: FAQUpdate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"$or": [{"_id": faq_id}, {"id": faq_id}]}
@@ -340,7 +340,7 @@ async def update_faq(
 @router.delete("/faqs/{faq_id}", status_code=status.HTTP_200_OK)
 async def delete_faq(
     faq_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"$or": [{"_id": faq_id}, {"id": faq_id}]}

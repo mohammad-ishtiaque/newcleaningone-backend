@@ -12,12 +12,12 @@ from app.schemas.extra_services import (
     ExtraServiceResponse, ExtraServicePaginatedResponse
 )
 
-router = APIRouter(prefix="/admin/extra-services", tags=["Admin Extra Service Management"])
+router = APIRouter(prefix="/manager/extra-services", tags=["Admin Extra Service Management"])
 
 
-def require_admin(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
-    if current_user.role != RoleEnum.admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+def require_manager(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
+    if current_user.role not in [RoleEnum.manager, RoleEnum.admin]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Manager role required")
     return current_user
 
 
@@ -32,7 +32,7 @@ async def list_admin_extra_services(
     search: Optional[str] = None,
     page: int = 1,
     limit: int = 10,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin List Extra Services Endpoint.
@@ -70,7 +70,7 @@ async def list_admin_extra_services(
 )
 async def get_admin_extra_service_detail(
     request_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Get Single Extra Service Detail Endpoint.
@@ -91,7 +91,7 @@ async def get_admin_extra_service_detail(
 async def reject_extra_service_request(
     request_id: str,
     reject_in: ExtraServiceRejectRequest,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Reject Extra Service Endpoint.
@@ -123,7 +123,7 @@ async def reject_extra_service_request(
 async def approve_extra_service_request(
     request_id: str,
     approve_in: ExtraServiceApproveRequest,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Approve Extra Service Endpoint.
@@ -184,7 +184,7 @@ async def approve_extra_service_request(
 )
 async def final_approve_extra_service_completion(
     request_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Final Approve & Credit Working Hours Endpoint.

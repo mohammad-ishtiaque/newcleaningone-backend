@@ -13,9 +13,9 @@ from app.models.user import RoleEnum, UserInDB, WorkerTypeEnum
 from app.services.user_service import UserService
 from app.repositories.user_repo import UserRepository
 from app.security.password import get_password_hash
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 
-router = APIRouter(prefix="/admin", tags=["Admin Overview & User Management"])
+router = APIRouter(prefix="/manager", tags=["Admin Overview & User Management"])
 
 def get_user_service(user_repo: UserRepository = Depends(UserRepository)) -> UserService:
     return UserService(user_repo)
@@ -25,7 +25,7 @@ def get_user_service(user_repo: UserRepository = Depends(UserRepository)) -> Use
 # ================================
 
 @router.get("/overview")
-async def get_admin_overview_stats(current_user: UserInDB = Depends(require_admin)):
+async def get_admin_overview_stats(current_user: UserInDB = Depends(require_manager)):
     db = get_database()
     total_workers = await db["users"].count_documents({"role": "worker"})
     total_clients = await db["client_list"].count_documents({})
@@ -44,29 +44,7 @@ async def get_admin_overview_stats(current_user: UserInDB = Depends(require_admi
 # Super Admin Creation
 # ================================
 
-@router.post("/create-super-admin", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def create_super_admin(
-    user_in: AdminCreate,
-    secret_key: str,
-    user_service: UserService = Depends(get_user_service)
-):
-    import os
-    expected_secret = os.getenv("ADMIN_CREATION_SECRET", "super_admin_secret_key_123")
-    if secret_key != expected_secret:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin creation secret key")
 
-    user_dict = user_in.model_dump()
-    user_dict["role"] = RoleEnum.super_admin
-    user_dict["is_verified"] = True
-    user_dict["is_active"] = True
-
-    existing = await user_service.user_repo.get_by_email(user_in.email)
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    user_in_db = UserInDB(**user_dict, hashed_password=get_password_hash(user_in.password))
-    created_user = await user_service.user_repo.create(user_in_db)
-    return UserResponse(**created_user.model_dump())
 
 # ================================
 # Admin Worker CRUD
@@ -75,7 +53,7 @@ async def create_super_admin(
 @router.post("/workers", response_model=AdminWorkerResponse, status_code=status.HTTP_201_CREATED)
 async def create_worker_by_admin(
     worker_in: AdminWorkerCreate,
-    current_user: UserInDB = Depends(require_admin),
+    current_user: UserInDB = Depends(require_manager),
     user_repo: UserRepository = Depends(UserRepository)
 ):
     existing = await user_repo.get_by_email(worker_in.email)
@@ -137,7 +115,7 @@ async def list_workers(
     limit: int = 10,
     search: Optional[str] = None,
     worker_type: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"role": "worker"}
@@ -191,7 +169,7 @@ async def list_workers(
     )
 
 @router.get("/workers-count", response_model=WorkerCountResponse)
-async def get_worker_counts(current_user: UserInDB = Depends(require_admin)):
+async def get_worker_counts(current_user: UserInDB = Depends(require_manager)):
     db = get_database()
     total_workers = await db["users"].count_documents({"role": "worker"})
     approved_workers = await db["users"].count_documents({"role": "worker", "approval_status": "approved"})

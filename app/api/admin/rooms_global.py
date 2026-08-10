@@ -8,9 +8,9 @@ from app.schemas.client_list import (
     RoomDrawerDetailResponse
 )
 from app.models.user import UserInDB
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 
-rooms_global_router = APIRouter(prefix="/admin", tags=["Admin Room Management"])
+rooms_global_router = APIRouter(prefix="/manager", tags=["Admin Room Management"])
 
 @rooms_global_router.get("/rooms", response_model=AdminRoomGridPaginatedResponse, summary="Global Rooms Grid Page (Image 2)")
 async def get_global_rooms_grid(
@@ -18,7 +18,7 @@ async def get_global_rooms_grid(
     limit: int = 10,
     search: Optional[str] = None,
     location_id: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -97,7 +97,7 @@ async def get_global_rooms_grid(
 @rooms_global_router.post("/rooms", response_model=AdminRoomGridItem, status_code=status.HTTP_201_CREATED, summary="Add New Room Modal API (Text Prompt 1 + Image 2)")
 async def create_admin_room(
     room_in: AdminRoomCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     l_doc = await db["locations"].find_one({"$or": [{"_id": room_in.location_id}, {"id": room_in.location_id}]})
@@ -147,7 +147,7 @@ async def create_admin_room(
 @rooms_global_router.get("/rooms/{room_id}/drawer", response_model=RoomDrawerDetailResponse, summary="Room Details Drawer API (Image 3)")
 async def get_room_drawer_details(
     room_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     r_query = {"$or": [{"_id": room_id}, {"id": room_id}]}

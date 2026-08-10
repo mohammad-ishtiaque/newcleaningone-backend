@@ -15,10 +15,10 @@ from app.schemas.shift import (
 )
 from app.schemas.client_list import LocationDropdownItemResponse, LocationDropdownPaginatedResponse, RoomDropdownItemResponse, RoomDropdownPaginatedResponse
 from app.models.user import UserInDB, RoleEnum
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 from app.api.admin.shifts import _format_shift_response
 
-roster_mgmt_router = APIRouter(prefix="/admin/roster", tags=["Admin Roaster Management"])
+roster_mgmt_router = APIRouter(prefix="/manager/roster", tags=["Admin Roaster Management"])
 
 def _calculate_hours(start_time: str, end_time: str) -> float:
     try:
@@ -39,7 +39,7 @@ def _calculate_hours(start_time: str, end_time: str) -> float:
 @roster_mgmt_router.get("/daily", response_model=AdminDailyRosterResponse, summary="Get Admin Daily Roster")
 async def get_daily_roster(
     target_date: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     if not target_date:
@@ -146,7 +146,7 @@ async def get_daily_roster(
 @roster_mgmt_router.get("/weekly", response_model=AdminWeeklyRosterResponse, summary="Get Admin Weekly Roster")
 async def get_weekly_roster(
     start_date: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     if not start_date:
@@ -283,7 +283,7 @@ async def get_weekly_roster(
 async def get_monthly_roster(
     month: Optional[int] = None,
     year: Optional[int] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     now = datetime.now(timezone.utc)
@@ -399,7 +399,7 @@ async def get_monthly_roster(
 @roster_mgmt_router.get("/shifts/{shift_id}", response_model=RosterShiftDetailModalResponse, summary="Get Shift Details Modal Card")
 async def get_roster_shift_details(
     shift_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"$or": [{"_id": shift_id}, {"id": shift_id}]}
@@ -452,7 +452,7 @@ async def get_roster_shift_details(
 @roster_mgmt_router.post("/drafts", response_model=ShiftDraftResponse, status_code=status.HTTP_201_CREATED, summary="Step 1: Create Shift Draft")
 async def create_roster_shift_draft(
     draft_in: ShiftDraftCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     cdoc = await db["client_list"].find_one({"$or": [{"_id": draft_in.client_id}, {"id": draft_in.client_id}]})
@@ -513,7 +513,7 @@ async def create_roster_shift_draft(
 async def list_roster_shift_drafts(
     page: int = 1,
     limit: int = 10,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -560,7 +560,7 @@ async def list_roster_shift_drafts(
 @roster_mgmt_router.post("/shifts/assign", response_model=ShiftResponse, status_code=status.HTTP_201_CREATED, summary="Step 2: Assign Employees & Publish Shift")
 async def assign_workers_and_publish_roster_shift(
     assign_in: ShiftAssignRequest,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     draft_query = {"$or": [{"_id": assign_in.draft_id}, {"id": assign_in.draft_id}]}
@@ -620,7 +620,7 @@ async def assign_workers_and_publish_roster_shift(
 @roster_mgmt_router.get("/dropdowns/clients", summary="Roster Client Dropdown List")
 async def get_roster_client_dropdowns(
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"is_active": True}
@@ -643,7 +643,7 @@ async def get_roster_location_dropdowns(
     search: Optional[str] = None,
     page: int = 1,
     limit: int = 50,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -685,7 +685,7 @@ async def get_roster_room_dropdowns(
     search: Optional[str] = None,
     page: int = 1,
     limit: int = 50,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -731,7 +731,7 @@ async def get_roster_worker_dropdowns(
     target_date: Optional[str] = None,
     page: int = 1,
     limit: int = 50,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"role": "worker", "is_active": True}
@@ -790,7 +790,7 @@ async def get_roster_worker_dropdowns(
 @roster_mgmt_router.post("/shifts", response_model=ShiftResponse, status_code=status.HTTP_201_CREATED, summary="Direct Create Roster Shift")
 async def create_roster_shift(
     shift_in: RosterShiftCreateRequest,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     cdoc = await db["client_list"].find_one({"$or": [{"_id": shift_in.client_id}, {"id": shift_in.client_id}]})
@@ -842,7 +842,7 @@ async def create_roster_shift(
 @roster_mgmt_router.delete("/shifts/{shift_id}", status_code=status.HTTP_200_OK, summary="Delete Roster Shift")
 async def delete_roster_shift(
     shift_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"$or": [{"_id": shift_id}, {"id": shift_id}]}

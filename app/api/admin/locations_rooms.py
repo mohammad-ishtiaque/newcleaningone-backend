@@ -14,15 +14,15 @@ from app.schemas.client_list import (
     LocationBulkImportResult
 )
 from app.models.user import UserInDB
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 from app.api.admin.location_csv_utils import (
     generate_location_csv_template,
     parse_and_validate_location_csv,
     export_locations_to_csv
 )
 
-location_mgmt_router = APIRouter(prefix="/admin", tags=["Admin Location Management"])
-room_mgmt_router = APIRouter(prefix="/admin", tags=["Admin Room Management"])
+location_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Location Management"])
+room_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Room Management"])
 
 def _format_location_response(doc: dict) -> LocationResponse:
     loc_id = str(doc.get("_id") or doc.get("id"))
@@ -52,7 +52,7 @@ async def get_admin_locations_grid(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -128,7 +128,7 @@ async def get_admin_locations_grid(
 @location_mgmt_router.post("/locations", response_model=LocationResponse, status_code=status.HTTP_201_CREATED, summary="Add New Location Modal (Image 2)")
 async def create_new_location(
     loc_in: AdminLocationCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     now = datetime.now(timezone.utc)
@@ -159,7 +159,7 @@ async def create_new_location(
 
 @location_mgmt_router.get("/locations/bulk-import/template", summary="Download CSV Template (Image 3)")
 async def download_location_import_template(
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     template_content = generate_location_csv_template()
     return Response(
@@ -171,7 +171,7 @@ async def download_location_import_template(
 @location_mgmt_router.post("/locations/bulk-import", response_model=LocationBulkImportResult, summary="Bulk Import Locations CSV (Image 3)")
 async def bulk_import_locations_csv(
     file: UploadFile = File(...),
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are supported for location bulk import")
@@ -185,7 +185,7 @@ async def bulk_import_locations_csv(
 
 @location_mgmt_router.get("/locations/export", summary="Export Locations to CSV")
 async def export_locations_csv(
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     raw_locs = await db["locations"].find({}).sort("created_at", -1).to_list(length=1000)
@@ -218,7 +218,7 @@ async def export_locations_csv(
 async def create_location(
     client_id: str,
     location_in: LocationCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_doc = await db["client_list"].find_one({"$or": [{"_id": client_id}, {"id": client_id}]})
@@ -252,7 +252,7 @@ async def list_locations_for_client(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"client_id": client_id}
@@ -280,7 +280,7 @@ async def list_global_locations(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -327,7 +327,7 @@ async def get_location_dropdowns(
     search: Optional[str] = None,
     page: int = 1,
     limit: int = 50,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -391,7 +391,7 @@ def _format_room_response(doc: dict) -> RoomResponse:
 async def create_room(
     location_id: str,
     room_in: RoomCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     l_doc = await db["locations"].find_one({"$or": [{"_id": location_id}, {"id": location_id}]})
@@ -427,7 +427,7 @@ async def list_rooms_for_location(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"location_id": location_id}
@@ -452,7 +452,7 @@ async def get_room_dropdowns(
     search: Optional[str] = None,
     page: int = 1,
     limit: int = 50,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}

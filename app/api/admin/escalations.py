@@ -8,9 +8,9 @@ from app.schemas.escalation import (
     EscalationReporterDetail, EscalationAssigneeDetail, EscalationStatusUpdate
 )
 from app.models.user import UserInDB
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 
-escalations_router = APIRouter(prefix="/admin", tags=["Admin Escalation Management"])
+escalations_router = APIRouter(prefix="/manager", tags=["Admin Escalation Management"])
 
 @escalations_router.get("/escalations", response_model=EscalationPaginatedResponse, summary="Admin Escalations Grid (Image 1 Mockup)")
 async def get_admin_escalations(
@@ -18,7 +18,7 @@ async def get_admin_escalations(
     limit: int = 10,
     status_filter: Optional[str] = None,  # all, open, in_progress, resolved, closed
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -124,7 +124,7 @@ async def get_admin_escalations(
 @escalations_router.get("/escalations/{escalation_id}", response_model=EscalationDrawerResponse, summary="Get Escalation Drawer Details (Image 2 Mockup)")
 async def get_escalation_drawer_details(
     escalation_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     e = await db["escalations"].find_one({"$or": [{"_id": escalation_id}, {"escalation_id": escalation_id}]})
@@ -179,7 +179,7 @@ async def get_escalation_drawer_details(
 async def update_escalation_status(
     escalation_id: str,
     status_in: EscalationStatusUpdate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     admin_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "admin_1")

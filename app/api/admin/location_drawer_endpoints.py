@@ -8,14 +8,14 @@ from app.schemas.client_list import (
     LocationDrawerRoomsResponse, LocationDrawerRoomItem
 )
 from app.models.user import UserInDB
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 
-location_drawer_router = APIRouter(prefix="/admin", tags=["Admin Location Management"])
+location_drawer_router = APIRouter(prefix="/manager", tags=["Admin Location Management"])
 
 @location_drawer_router.get("/locations/{location_id}/overview", response_model=LocationDrawerOverviewResponse, summary="Location Details Drawer: Overview Tab (Image 4)")
 async def get_location_drawer_overview(
     location_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     l_query = {"$or": [{"_id": location_id}, {"id": location_id}]}
@@ -84,7 +84,7 @@ async def get_location_drawer_overview(
 @location_drawer_router.get("/locations/{location_id}/rooms-tab", response_model=LocationDrawerRoomsResponse, summary="Location Details Drawer: Rooms Tab (Image 5)")
 async def get_location_drawer_rooms(
     location_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     l_query = {"$or": [{"_id": location_id}, {"id": location_id}]}
@@ -142,7 +142,7 @@ async def get_location_drawer_rooms(
 @location_drawer_router.get("/locations/{location_id}/cleaning-plans-tab", summary="Location Details Drawer: Cleaning Plans Tab (Image 4)")
 async def get_location_drawer_cleaning_plans(
     location_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     l_query = {"$or": [{"_id": location_id}, {"id": location_id}]}

@@ -12,10 +12,10 @@ from app.schemas.client_list import (
     ClientReportItem, ClientReportsListResponse, SendReportEmailRequest
 )
 from app.models.user import UserInDB
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 from app.api.admin.client_reports_plans import get_default_cleaning_plan_tasks, get_default_reports, generate_report_pdf_bytes
 
-client_details_tabs_router = APIRouter(prefix="/admin", tags=["Admin Client Management"])
+client_details_tabs_router = APIRouter(prefix="/manager", tags=["Admin Client Management"])
 
 # ================================
 # 1. Contacts Tab (Image 3)
@@ -26,7 +26,7 @@ async def get_client_contacts(
     client_id: str,
     page: int = 1,
     limit: int = 10,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -67,7 +67,7 @@ async def get_client_contacts(
 async def add_client_contact(
     client_id: str,
     contact_in: ContactCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -104,7 +104,7 @@ async def add_client_contact(
 async def delete_client_contact(
     client_id: str,
     contact_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     await db["contacts"].delete_one({"$or": [{"_id": contact_id}, {"id": contact_id}]})
@@ -119,7 +119,7 @@ async def get_client_locations_tab(
     client_id: str,
     page: int = 1,
     limit: int = 10,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -162,7 +162,7 @@ async def get_client_locations_tab(
 async def add_client_location(
     client_id: str,
     location_in: LocationCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -204,7 +204,7 @@ async def add_client_location(
 async def delete_client_location(
     client_id: str,
     location_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     await db["locations"].delete_one({"$or": [{"_id": location_id}, {"id": location_id}]})
@@ -217,7 +217,7 @@ async def delete_client_location(
 @client_details_tabs_router.get("/clients/{client_id}/cleaning-plan", response_model=ClientCleaningPlanResponse, summary="Client Detailed View: Cleaning Plan Tab (Task Builder Image 1)")
 async def get_client_cleaning_plan(
     client_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -257,7 +257,7 @@ async def get_client_cleaning_plan(
 async def update_client_cleaning_plan(
     client_id: str,
     plan_in: ClientCleaningPlanUpdate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -301,7 +301,7 @@ async def update_client_cleaning_plan(
 async def assign_cleaning_plan_location(
     client_id: str,
     assign_in: AssignLocationRequest,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -326,7 +326,7 @@ async def assign_cleaning_plan_location(
 @client_details_tabs_router.get("/clients/{client_id}/reports", response_model=ClientReportsListResponse, summary="Client Detailed View: Reports Tab (Image 2)")
 async def get_client_reports(
     client_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -360,7 +360,7 @@ async def get_client_reports(
 @client_details_tabs_router.post("/clients/{client_id}/reports/generate", response_model=ClientReportItem, summary="Generate Report Button (Image 2)")
 async def generate_client_report(
     client_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -402,7 +402,7 @@ async def generate_client_report(
 async def export_client_report_pdf(
     client_id: str,
     report_id: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -424,7 +424,7 @@ async def export_client_report_pdf(
 async def send_client_report_email(
     client_id: str,
     req_in: Optional[SendReportEmailRequest] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}

@@ -89,7 +89,7 @@ async def get_me(current_user: UserInDB = Depends(get_current_user)) -> Any:
         return WorkerProfileResponse(**user_data)
     elif current_user.role == RoleEnum.client:
         return ClientProfileResponse(**user_data)
-    elif current_user.role == RoleEnum.admin or current_user.role == RoleEnum.super_admin:
+    elif current_user.role in [RoleEnum.manager, RoleEnum.admin]:
         return AdminProfileResponse(**user_data)
     return UserResponse(**user_data)
 

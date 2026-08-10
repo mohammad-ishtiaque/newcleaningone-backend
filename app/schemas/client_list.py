@@ -95,13 +95,16 @@ class ContractResponse(BaseModel):
 # --- Cleaning Plans & Tasks ---
 class CleaningTaskCreate(BaseModel):
     name: str = Field(..., json_schema_extra={"example": "Deep Floor Scrubbing"})
+    frequency_type: Optional[str] = Field(default="every_visit", json_schema_extra={"example": "every_visit"}) # every_visit, weekly, monthly, yearly
 
 class CleaningTaskUpdate(BaseModel):
     name: Optional[str] = None
+    frequency_type: Optional[str] = None
 
 class CleaningTaskResponse(BaseModel):
     id: str
     name: str
+    frequency_type: Optional[str] = "every_visit"
 
 class CleaningPlanCreate(BaseModel):
     plan_name: str = Field(..., json_schema_extra={"example": "Daily Office Hygiene"})
@@ -335,6 +338,7 @@ class RoomDropdownItemResponse(BaseModel):
     floor: Optional[int] = 1
     cleaning_type: Optional[str] = "standard"
     duration: Optional[int] = 30
+    monthly_cleaning_frequency: int = Field(default=4, description="Dynamic frequency: how many times a month this room is cleaned.")
 
     def __init__(self, **data):
         if "room_id" in data and not data.get("id"):
@@ -357,18 +361,21 @@ class RoomDropdownPaginatedResponse(BaseModel):
 class RequiredPhotoCreate(BaseModel):
     id: Optional[str] = None
     name: str = Field(..., json_schema_extra={"example": "Before cleaning photo"})
+    frequency_type: Optional[str] = Field(default="every_visit", json_schema_extra={"example": "every_visit"}) # every_visit, weekly, monthly, yearly
 
 class RequiredPhotoResponse(BaseModel):
     id: str
     name: str
+    frequency_type: Optional[str] = "every_visit"
 
 # --- Room Management Schemas ---
 class RoomCreate(BaseModel):
     room_name: str = Field(..., json_schema_extra={"example": "Room 301 - Executive Suite"})
     room_type: str = Field(..., json_schema_extra={"example": "suite"})  # standard, deluxe, suite, junior_suite
-    location_id: str = Field(..., json_schema_extra={"example": "location_id_here"})
+    location_id: Optional[str] = Field(default=None, json_schema_extra={"example": "location_id_here"})
     floor: int = Field(default=1, json_schema_extra={"example": 3})
     duration: int = Field(default=30, json_schema_extra={"example": 45})  # minutes
+    monthly_cleaning_frequency: int = Field(default=4, json_schema_extra={"example": 4})
     required_photos: Optional[List[RequiredPhotoCreate]] = Field(default_factory=list)
     clean_type: str = Field(default="standard", json_schema_extra={"example": "standard"})  # standard, premium
     tasks: Optional[List[CleaningTaskCreate]] = Field(default_factory=list)
@@ -379,6 +386,7 @@ class RoomUpdate(BaseModel):
     location_id: Optional[str] = None
     floor: Optional[int] = None
     duration: Optional[int] = None
+    monthly_cleaning_frequency: Optional[int] = None
     required_photos: Optional[List[RequiredPhotoCreate]] = None
     clean_type: Optional[str] = None
     tasks: Optional[List[CleaningTaskCreate]] = None
@@ -393,6 +401,7 @@ class RoomResponse(BaseModel):
     location_name: str
     floor: int
     duration: int
+    monthly_cleaning_frequency: int = 4
     required_photos: List[RequiredPhotoResponse] = Field(default_factory=list)
     photo_number: int = 0
     task_number: int = 0
@@ -741,6 +750,7 @@ class AdminRoomCreate(BaseModel):
     location_id: str
     floor: int = 1
     est_cleaning_duration_minutes: int = 45
+    monthly_cleaning_frequency: int = 4
     required_photos_count: int = 4
     tasks_count: int = 12
     cleaning_plan_name: Optional[str] = "Standard Clean"
@@ -753,6 +763,7 @@ class AdminRoomGridItem(BaseModel):
     location_name: str
     floor_label: str
     duration_minutes: int = 45
+    monthly_cleaning_frequency: int = Field(default=4, description="Dynamic frequency: how many times a month this room is cleaned.")
     required_photos_count: int = 4
     tasks_count: int = 12
     cleaning_plan_name: str = "Standard Clean"
@@ -772,6 +783,7 @@ class RoomDrawerDetailResponse(BaseModel):
     location_name: str
     cleaning_plan_name: str
     duration_minutes: int
+    monthly_cleaning_frequency: int = Field(default=4, description="Dynamic frequency: how many times a month this room is cleaned.")
     required_photos_count: int
     tasks_count: int
 

@@ -15,11 +15,11 @@ from app.schemas.admin_dashboard import (
     AdminDashboardOperationsOverviewResponse
 )
 
-admin_dashboard_router = APIRouter(prefix="/admin/dashboard", tags=["Admin Dashboard HomePage"])
+admin_dashboard_router = APIRouter(prefix="/manager/dashboard", tags=["Admin Dashboard HomePage"])
 
-def require_admin(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
-    if current_user.role not in [RoleEnum.admin, RoleEnum.super_admin, "admin", "super_admin"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+def require_manager(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
+    if current_user.role not in [RoleEnum.manager, RoleEnum.admin, "manager", "admin"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Manager role required")
     return current_user
 
 
@@ -44,7 +44,7 @@ async def _find_location_image_url(db, location_id: str) -> Optional[str]:
 )
 async def get_admin_dashboard_overview(
     status_filter: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     now_utc = datetime.now(timezone.utc)
@@ -190,7 +190,7 @@ async def get_in_progress_shifts(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     now_utc = datetime.now(timezone.utc)
@@ -295,7 +295,7 @@ async def get_in_progress_shifts(
     description="Returns breakdown metrics for today's shifts containing worker_id, name, profile picture, and worker_type for total checkin count, late worker count, and missing worker count."
 )
 async def get_worker_attendance_summary(
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     now_utc = datetime.now(timezone.utc)

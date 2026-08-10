@@ -6,8 +6,9 @@ from pydantic import BaseModel, EmailStr, Field
 class RoleEnum(str, Enum):
     worker = "worker"
     client = "client"
+    manager = "manager"
     admin = "admin"
-    super_admin = "super_admin"
+
 
 class WorkerTypeEnum(str, Enum):
     full_time = "full_time"

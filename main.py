@@ -6,15 +6,17 @@ from app.core.config import settings
 # Determine service name from command line arguments (e.g., python main.py admin)
 service_name = sys.argv[1].lower().strip() if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "all"
 
-if service_name not in ("admin", "client", "worker", "all"):
-    print(f"Unknown service '{service_name}'. Valid options: admin, client, worker, all")
+if service_name not in ("manager", "admin", "client", "worker", "all"):
+    print(f"Unknown service '{service_name}'. Valid options: manager, admin, client, worker, all")
     print("Defaulting to 'all'...")
     service_name = "all"
 
 app = create_app(service_name)
 
 def get_port(service: str) -> int:
-    if service == "admin":
+    if service == "manager":
+        return settings.MANAGER_PORT
+    elif service == "admin":
         return settings.ADMIN_PORT
     elif service == "client":
         return settings.CLIENT_PORT

@@ -11,9 +11,9 @@ from app.schemas.client_list import (
     AdminCleaningPlanCreate, AdminCleaningPlanGridItem, AdminCleaningPlanGridPaginatedResponse
 )
 from app.models.user import UserInDB
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 
-cleaning_plan_mgmt_router = APIRouter(prefix="/admin", tags=["Admin Cleaning Plan Management"])
+cleaning_plan_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Cleaning Plan Management"])
 
 def _format_cleaning_plan_response(doc: dict) -> CleaningPlanResponse:
     cp_id = str(doc.get("_id") or doc.get("id"))
@@ -40,7 +40,7 @@ def _format_cleaning_plan_response(doc: dict) -> CleaningPlanResponse:
 async def create_cleaning_plan(
     location_id: str,
     plan_in: CleaningPlanCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     l_doc = await db["locations"].find_one({"$or": [{"_id": location_id}, {"id": location_id}]})
@@ -76,7 +76,7 @@ async def list_cleaning_plans_for_location(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"location_id": location_id}
@@ -106,7 +106,7 @@ async def list_global_cleaning_plans(
     search: Optional[str] = None,
     client_id: Optional[str] = None,
     location_id: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -159,7 +159,7 @@ async def list_global_cleaning_plans(
 @cleaning_plan_mgmt_router.post("/global-cleaning-plans", response_model=GlobalCleaningPlanResponse, status_code=status.HTTP_201_CREATED)
 async def create_global_cleaning_plan(
     plan_in: GlobalCleaningPlanCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     cdoc = await db["client_list"].find_one({"$or": [{"_id": plan_in.client_id}, {"id": plan_in.client_id}]})
@@ -216,7 +216,7 @@ async def get_admin_cleaning_plans_grid(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -294,7 +294,7 @@ async def get_admin_cleaning_plans_grid(
 @cleaning_plan_mgmt_router.post("/cleaning-plans", response_model=AdminCleaningPlanGridItem, status_code=status.HTTP_201_CREATED, summary="Create Cleaning Plan Modal API (Text Prompt 2 + Image 5)")
 async def create_admin_cleaning_plan(
     plan_in: AdminCleaningPlanCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     cdoc = await db["client_list"].find_one({"$or": [{"_id": plan_in.client_id}, {"id": plan_in.client_id}]})

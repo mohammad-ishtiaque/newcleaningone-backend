@@ -13,6 +13,7 @@ def create_app(service_name: str = "all") -> FastAPI:
     service_name = service_name.lower().strip()
     
     title_map = {
+        "manager": "Clean Ones Manager API",
         "admin": "Cleaning One Admin API",
         "client": "Cleaning One Client API",
         "worker": "Cleaning One Worker API",
@@ -54,7 +55,7 @@ def create_app(service_name: str = "all") -> FastAPI:
     app.include_router(profile.router)
     app.include_router(chat.router)
 
-    if service_name in ("admin", "all"):
+    if service_name in ("manager", "all"):
         app.include_router(admin.router)
         app.include_router(admin.client_mgmt_router)
         app.include_router(admin.client_details_tabs_router)
@@ -74,6 +75,10 @@ def create_app(service_name: str = "all") -> FastAPI:
         app.include_router(admin_chat.router)
         app.include_router(admin_shift_monitoring.shift_monitoring_router)
         app.include_router(admin_dashboard.admin_dashboard_router)
+
+    if service_name in ("admin", "all"):
+        from app.api import admin_users
+        app.include_router(admin_users.router)
 
     if service_name in ("client", "all"):
         app.include_router(client.router)

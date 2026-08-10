@@ -16,12 +16,12 @@ from app.schemas.chat import (
     AttachmentUploadResponse, PaginatedConversationsResponse
 )
 
-router = APIRouter(prefix="/admin/chat", tags=["Admin Chat Management"])
+router = APIRouter(prefix="/manager/chat", tags=["Admin Chat Management"])
 
 
-def require_admin(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
-    if current_user.role != RoleEnum.admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+def require_manager(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
+    if current_user.role not in [RoleEnum.manager, RoleEnum.admin]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Manager role required")
     return current_user
 
 
@@ -34,7 +34,7 @@ def require_admin(current_user: UserInDB = Depends(get_current_user)) -> UserInD
 async def list_admin_conversations(
     page: int = 1,
     limit: int = 20,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin List All Conversations Endpoint (Paginated).
@@ -61,7 +61,7 @@ async def list_admin_conversations(
 async def admin_list_client_conversations(
     page: int = 1,
     limit: int = 20,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin List Client Conversations Endpoint (Paginated).
@@ -120,7 +120,7 @@ async def admin_list_client_conversations(
 async def admin_list_employee_conversations(
     page: int = 1,
     limit: int = 20,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin List Employee Conversations Endpoint (Paginated).
@@ -177,7 +177,7 @@ async def admin_list_employee_conversations(
 )
 async def create_admin_conversation(
     conv_in: ConversationCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Create or Get Conversation Endpoint.
@@ -243,7 +243,7 @@ async def create_admin_conversation(
 )
 async def get_admin_conversation_detail(
     conversation_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Get Conversation Details Endpoint.
@@ -265,7 +265,7 @@ async def get_admin_conversation_detail(
 async def get_admin_participant_profile(
     conversation_id: str,
     target_user_id: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Participant Profile Sidebar Endpoint.
@@ -301,7 +301,7 @@ async def get_admin_conversation_messages(
     conversation_id: str,
     page: int = 1,
     limit: int = 20,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Get Paginated Messages Endpoint.
@@ -334,7 +334,7 @@ async def get_admin_conversation_messages(
 async def send_admin_message(
     conversation_id: str,
     msg_in: MessageCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Send Message Endpoint.
@@ -391,7 +391,7 @@ async def send_admin_message(
 async def edit_admin_message(
     message_id: str,
     msg_in: MessageUpdate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Edit Message Endpoint.
@@ -418,7 +418,7 @@ async def edit_admin_message(
 )
 async def delete_admin_message(
     message_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Delete Message Endpoint.
@@ -439,7 +439,7 @@ async def delete_admin_message(
 )
 async def mark_admin_messages_read(
     conversation_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Mark Messages as Read Endpoint.
@@ -469,7 +469,7 @@ async def mark_admin_messages_read(
 )
 async def upload_admin_chat_attachment(
     file: UploadFile = File(...),
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Admin Upload Chat Attachment Endpoint.

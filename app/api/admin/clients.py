@@ -10,9 +10,9 @@ from app.schemas.client_list import (
     ClientDashboardOverviewResponse, ClientContractDetailsResponse
 )
 from app.models.user import UserInDB
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 
-client_mgmt_router = APIRouter(prefix="/admin", tags=["Admin Client Management"])
+client_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Client Management"])
 
 def _format_date_human(d_val) -> str:
     if not d_val:
@@ -59,7 +59,7 @@ def _format_client_response(doc: dict) -> ClientListResponse:
 @client_mgmt_router.post("/clients", response_model=ClientListResponse, status_code=status.HTTP_201_CREATED, summary="Add New Client (Image 1 Modal)")
 async def create_client(
     client_in: ClientListCreate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     existing = await db["client_list"].find_one({"email": client_in.email})
@@ -92,7 +92,7 @@ async def list_clients(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -121,7 +121,7 @@ async def list_clients_overview(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -165,7 +165,7 @@ async def list_clients_overview(
 @client_mgmt_router.get("/clients/{client_id}", response_model=ClientListResponse, summary="Get Client by ID")
 async def get_client_by_id(
     client_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -178,7 +178,7 @@ async def get_client_by_id(
 async def update_client(
     client_id: str,
     client_in: ClientListUpdate,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -196,7 +196,7 @@ async def update_client(
 @client_mgmt_router.delete("/clients/{client_id}", status_code=status.HTTP_200_OK, summary="Delete Client")
 async def delete_client(
     client_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -212,7 +212,7 @@ async def delete_client(
 @client_mgmt_router.get("/clients/{client_id}/dashboard-overview", response_model=ClientDashboardOverviewResponse, summary="Client Detailed View: Overview Tab (Image 2)")
 async def get_client_dashboard_overview(
     client_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -264,7 +264,7 @@ async def get_client_dashboard_overview(
 @client_mgmt_router.get("/clients/{client_id}/contract", response_model=ClientContractDetailsResponse, summary="Client Detailed View: Contract Tab (Image 5)")
 async def get_client_contract_details(
     client_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -294,7 +294,7 @@ async def get_client_contract_details(
 async def renew_client_contract(
     client_id: str,
     renew_in: ContractRenewRequest,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}
@@ -333,7 +333,7 @@ async def renew_client_contract(
 async def upload_client_contract_pdf(
     client_id: str,
     file: UploadFile = File(...),
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     c_query = {"$or": [{"_id": client_id}, {"id": client_id}]}

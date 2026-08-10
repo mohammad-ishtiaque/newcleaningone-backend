@@ -16,11 +16,11 @@ from app.schemas.shift_monitoring import (
     WorkerAttendanceStatsDrawerResponse, WeeklyTrendItem, MonthlyTrendItem
 )
 
-shift_monitoring_router = APIRouter(prefix="/admin/shift-monitoring", tags=["Admin Shift Monitoring"])
+shift_monitoring_router = APIRouter(prefix="/manager/shift-monitoring", tags=["Admin Shift Monitoring"])
 
-def require_admin(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
-    if current_user.role not in [RoleEnum.admin, RoleEnum.super_admin, "admin", "super_admin"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+def require_manager(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
+    if current_user.role not in [RoleEnum.manager, RoleEnum.admin, "manager", "admin"]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Manager role required")
     return current_user
 
 
@@ -51,7 +51,7 @@ async def get_live_shift_monitoring(
     checkin_status: Optional[str] = None,  # all, ontime, late, missing
     worker_type: Optional[str] = None,      # all, employee, freelancer
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     target_date = date_val or datetime.now(timezone.utc).date().isoformat()
@@ -168,7 +168,7 @@ async def get_attendance_time_tracking(
     search: Optional[str] = None,
     page: int = 1,
     limit: int = 10,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     start_date, end_date = _get_period_date_range(period)
@@ -269,7 +269,7 @@ async def get_location_statistics(
     search: Optional[str] = None,
     page: int = 1,
     limit: int = 10,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     start_date, end_date = _get_period_date_range(period)
@@ -354,7 +354,7 @@ async def get_location_statistics(
 async def get_worker_detailed_stats(
     worker_id: str,
     period: str = "monthly",
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     start_date, end_date = _get_period_date_range(period)
@@ -444,7 +444,7 @@ async def get_worker_detailed_stats(
 async def get_worker_daily_activity(
     worker_id: str,
     month: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
 
@@ -581,7 +581,7 @@ async def get_worker_daily_activity(
 async def get_live_worker_details(
     worker_id: str,
     period: str = "today",  # today, weekly, monthly
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     today_dt = datetime.now(timezone.utc).date()
@@ -719,7 +719,7 @@ async def get_live_worker_details(
 )
 async def get_worker_attendance_stats_drawer(
     worker_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     today_dt = datetime.now(timezone.utc).date()

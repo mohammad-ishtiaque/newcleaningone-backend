@@ -9,10 +9,10 @@ from app.schemas.shift import (
     PhotoReviewRoomDetail, PhotoReviewRejectRequest
 )
 from app.models.user import UserInDB
-from app.api.admin.profile_company import require_admin
+from app.api.admin.profile_company import require_manager
 from app.services.ai_vision_engine import update_ai_model_online_learning
 
-photo_reviews_router = APIRouter(prefix="/admin", tags=["Admin Photo Reviews & Quality Control"])
+photo_reviews_router = APIRouter(prefix="/manager", tags=["Admin Photo Reviews & Quality Control"])
 
 def _format_date_submitted(dt) -> str:
     if isinstance(dt, datetime):
@@ -25,7 +25,7 @@ async def get_admin_photo_reviews(
     limit: int = 10,
     status_filter: Optional[str] = None,  # all, pending_review, approved, rejected
     search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
@@ -137,7 +137,7 @@ async def get_admin_photo_reviews(
 @photo_reviews_router.get("/photo-reviews/{review_id}", response_model=PhotoReviewDetailModalResponse, summary="Get Photo Review Details Modal")
 async def get_photo_review_details(
     review_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     r = await db["photo_reviews"].find_one({"$or": [{"_id": review_id}, {"review_id": review_id}]})
@@ -261,7 +261,7 @@ async def _sync_shift_room_approval(db, r_doc: dict, is_approved: bool):
 @photo_reviews_router.patch("/photo-reviews/{review_id}/approve", summary="Approve Photo Review (Triggers PyTorch Online Learning & Completes Room)")
 async def approve_photo_review(
     review_id: str,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Approve Photo Review Endpoint.
@@ -308,7 +308,7 @@ async def approve_photo_review(
 async def reject_photo_review(
     review_id: str,
     reject_in: PhotoReviewRejectRequest,
-    current_user: UserInDB = Depends(require_admin)
+    current_user: UserInDB = Depends(require_manager)
 ):
     """
     Reject Photo Review Endpoint.
