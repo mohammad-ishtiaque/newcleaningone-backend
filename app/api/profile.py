@@ -32,7 +32,8 @@ def process_image(file_bytes: bytes, size: tuple = (1080, 1080)) -> bytes:
 async def get_profile(current_user: UserInDB = Depends(get_current_user)):
     return {
         "full_name": current_user.full_name,
-        "profile_photo": current_user.profile_photo
+        "profile_photo": current_user.profile_photo,
+        "role": current_user.role
     }
 
 @router.post("/")

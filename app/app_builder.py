@@ -20,10 +20,32 @@ def create_app(service_name: str = "all") -> FastAPI:
         "all": "Cleaning One Monolith API"
     }
     
+    tags_metadata = [
+        {"name": "Auth"},
+        {"name": "Profile"},
+        {"name": "Admin"},
+        {"name": "Admin Dashboard HomePage"},
+        {"name": "Admin Shift Monitoring"},
+        {"name": "Admin Shift Management"},
+        {"name": "Admin Worker Management"},
+        {"name": "Admin Roaster Management"},
+        {"name": "Admin Client Management"},
+        {"name": "Admin Location Management"},
+        {"name": "Admin Room Management"},
+        {"name": "Admin Cleaning Plan Management"},
+        {"name": "Admin Extra Service Management"},
+        {"name": "Admin Photo Reviews & Quality Control"},
+        {"name": "Admin Chat Management"},
+        {"name": "Admin Quality Control Reports"},
+        {"name": "Admin Escalation Management"},
+        {"name": "Admin Notification Center"}
+    ]
+    
     app = FastAPI(
         title=title_map.get(service_name, "Cleaning One API"),
         description=f"Production-ready FastAPI {service_name.capitalize()} System",
-        version="1.0.0"
+        version="1.0.0",
+        openapi_tags=tags_metadata
     )
     
     origins = [
@@ -77,8 +99,9 @@ def create_app(service_name: str = "all") -> FastAPI:
         app.include_router(admin_dashboard.admin_dashboard_router)
 
     if service_name in ("admin", "all"):
-        from app.api import admin_users
+        from app.api import admin_users, admin_client_approvals
         app.include_router(admin_users.router)
+        app.include_router(admin_client_approvals.router)
 
     if service_name in ("client", "all"):
         app.include_router(client.router)

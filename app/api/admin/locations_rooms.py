@@ -11,7 +11,8 @@ from app.schemas.client_list import (
     RoomDropdownItemResponse, RoomDropdownPaginatedResponse,
     RoomCreate, RoomUpdate, RoomResponse, RoomPaginatedResponse,
     AdminLocationCreate, AdminLocationGridItem, AdminLocationGridPaginatedResponse,
-    LocationBulkImportResult
+    LocationBulkImportResult,
+    ClientGridDropdownPaginatedResponse, ClientGridDropdownItem
 )
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
@@ -46,6 +47,44 @@ def _format_location_response(doc: dict) -> LocationResponse:
     )
 
 # Admin Locations Grid & Create (Image 1 & Image 2)
+
+@location_mgmt_router.get("/dropdowns/clients", response_model=ClientGridDropdownPaginatedResponse, summary="List All Clients")
+async def list_clients_for_locations(
+    page: int = 1,
+    limit: int = 10,
+    search: Optional[str] = None,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"status": {"$ne": "deleted"}}
+    if search:
+        query["$or"] = [
+            {"company_name": {"$regex": search, "$options": "i"}},
+            {"email": {"$regex": search, "$options": "i"}},
+            {"phone": {"$regex": search, "$options": "i"}},
+            {"industry": {"$regex": search, "$options": "i"}}
+        ]
+
+    total_count = await db["client_list"].count_documents(query)
+    skip = (page - 1) * limit
+    cursor = db["client_list"].find(query).sort("created_at", -1).skip(skip).limit(limit)
+    raw_clients = await cursor.to_list(length=limit)
+
+    clients = []
+    for c in raw_clients:
+        clients.append(ClientGridDropdownItem(
+            id=str(c.get("_id") or c.get("id")),
+            primary_contact_name=c.get("primary_contact_name", ""),
+            company_name=c.get("company_name", "")
+        ))
+
+    return ClientGridDropdownPaginatedResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        clients=clients
+    )
+
 
 @location_mgmt_router.get("/locations", response_model=AdminLocationGridPaginatedResponse, summary="Main Locations Grid (Image 1)")
 async def get_admin_locations_grid(
@@ -246,6 +285,73 @@ async def create_location(
     )
     return _format_location_response(doc)
 
+@location_mgmt_router.delete("/clients/{client_id}/locations/{location_id}", status_code=status.HTTP_200_OK, summary="Delete Client Location (Image 4)")
+async def delete_client_location(
+    client_id: str,
+    location_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    await db["locations"].delete_one({"$or": [{"_id": location_id}, {"id": location_id}]})
+    return {"message": "Location deleted successfully"}
+
+@location_mgmt_router.patch("/clients/{client_id}/locations/{location_id}", response_model=LocationResponse, summary="Update Client Location")
+async def update_client_location(
+    client_id: str,
+    location_id: str,
+    location_in: LocationUpdate,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"$or": [{"_id": location_id}, {"id": location_id}], "client_id": client_id}
+    loc_doc = await db["locations"].find_one(query)
+    if not loc_doc:
+        raise HTTPException(status_code=404, detail="Location not found")
+
+    fields = location_in.model_dump(exclude_unset=True)
+    fields["updated_at"] = datetime.now(timezone.utc)
+
+    await db["locations"].update_one(query, {"$set": fields})
+    updated = await db["locations"].find_one(query)
+    
+    return LocationResponse(
+        id=str(updated.get("_id") or updated.get("id")),
+        name=updated.get("name", ""),
+        type=updated.get("type", "office"),
+        address=updated.get("address", ""),
+        floor=updated.get("floor", 1),
+        number_of_rooms=updated.get("number_of_rooms", 1),
+        description=updated.get("description", ""),
+        image_url=updated.get("image_url"),
+        created_at=updated.get("created_at"),
+        updated_at=updated.get("updated_at")
+    )
+
+@location_mgmt_router.get("/clients/{client_id}/locations/{location_id}", response_model=LocationResponse, summary="Get Full Location Details")
+async def get_client_location_details(
+    client_id: str,
+    location_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"$or": [{"_id": location_id}, {"id": location_id}], "client_id": client_id}
+    loc_doc = await db["locations"].find_one(query)
+    if not loc_doc:
+        raise HTTPException(status_code=404, detail="Location not found")
+
+    return LocationResponse(
+        id=str(loc_doc.get("_id") or loc_doc.get("id")),
+        name=loc_doc.get("name", ""),
+        type=loc_doc.get("type", "office"),
+        address=loc_doc.get("address", ""),
+        floor=loc_doc.get("floor", 1),
+        number_of_rooms=loc_doc.get("number_of_rooms", 1),
+        description=loc_doc.get("description", ""),
+        image_url=loc_doc.get("image_url"),
+        created_at=loc_doc.get("created_at"),
+        updated_at=loc_doc.get("updated_at")
+    )
+
 @location_mgmt_router.get("/clients/{client_id}/locations", response_model=LocationPaginatedResponse)
 async def list_locations_for_client(
     client_id: str,
@@ -345,13 +451,16 @@ async def get_location_dropdowns(
     for l in raw_locs:
         cid = l.get("client_id", "")
         cdoc = await db["client_list"].find_one({"$or": [{"_id": cid}, {"id": cid}]})
-        cname = cdoc.get("company_name", "Client") if cdoc else "Client"
+        
+        cname = cdoc.get("primary_contact_name", "Unknown") if cdoc else "Unknown"
+        comp_name = cdoc.get("company_name", "") if cdoc else ""
         lid = str(l.get("_id") or l.get("id"))
 
         dropdowns.append(LocationDropdownItemResponse(
             location_id=lid,
             location_name=l.get("name", ""),
             client_id=cid,
+            company_name=comp_name,
             client_name=cname,
             address=l.get("address", "")
         ))
@@ -445,6 +554,53 @@ async def list_rooms_for_location(
         limit=limit,
         rooms=[_format_room_response(r) for r in raw_rooms]
     )
+
+@room_mgmt_router.patch("/rooms/{room_id}", response_model=RoomResponse, summary="Update Room")
+async def update_room(
+    room_id: str,
+    room_in: RoomUpdate,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    r_doc = await db["rooms"].find_one({"$or": [{"_id": room_id}, {"id": room_id}]})
+    if not r_doc:
+        raise HTTPException(status_code=404, detail="Room not found")
+        
+    update_data = room_in.model_dump(exclude_unset=True)
+    if not update_data:
+        return _format_room_response(r_doc)
+        
+    update_data["updated_at"] = datetime.now(timezone.utc)
+    
+    await db["rooms"].update_one(
+        {"_id": r_doc["_id"]},
+        {"$set": update_data}
+    )
+    
+    updated_doc = await db["rooms"].find_one({"_id": r_doc["_id"]})
+    return _format_room_response(updated_doc)
+
+
+@room_mgmt_router.delete("/rooms/{room_id}", status_code=status.HTTP_200_OK, summary="Delete Room")
+async def delete_room(
+    room_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    r_doc = await db["rooms"].find_one({"$or": [{"_id": room_id}, {"id": room_id}]})
+    if not r_doc:
+        raise HTTPException(status_code=404, detail="Room not found")
+        
+    await db["rooms"].delete_one({"_id": r_doc["_id"]})
+    
+    if r_doc.get("location_id"):
+        await db["locations"].update_one(
+            {"$or": [{"_id": r_doc["location_id"]}, {"id": r_doc["location_id"]}]},
+            {"$inc": {"rooms_count": -1}}
+        )
+    
+    return {"message": "Room deleted successfully"}
+
 
 @room_mgmt_router.get("/dropdowns/rooms", response_model=RoomDropdownPaginatedResponse)
 async def get_room_dropdowns(

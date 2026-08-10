@@ -1,5 +1,5 @@
 import os
-from fastapi import APIRouter, Depends, status, HTTPException
+from fastapi import APIRouter, Depends, status, HTTPException, Body
 from typing import List
 from app.models.user import RoleEnum, UserInDB
 from app.schemas.user import UserCreate, UserResponse, AdminCreate
@@ -28,7 +28,8 @@ async def create_admin(
     """
     Create a new Admin user using the secret key.
     """
-    expected_secret = os.getenv("ADMIN_CREATION_SECRET", "super_admin_secret_key_123")
+    from app.core.config import settings
+    expected_secret = settings.ADMIN_CREATION_SECRET
     if secret_key != expected_secret:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid admin creation secret key")
 
@@ -47,7 +48,18 @@ async def create_admin(
 
 @router.post("/create-manager", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_manager(
-    user_in: AdminCreate,
+    user_in: AdminCreate = Body(..., openapi_examples={
+        "manager_example": {
+            "summary": "A typical manager creation payload",
+            "value": {
+                "full_name": "Thakur Saad",
+                "email": "m1@yopmail.com",
+                "password": "Secure123",
+                "phone": "+8812345678987",
+                "role": "manager"
+            }
+        }
+    }),
     current_user: UserInDB = Depends(require_admin),
     user_service: UserService = Depends(get_user_service)
 ):

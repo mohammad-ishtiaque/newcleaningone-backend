@@ -5,7 +5,7 @@ from typing import List, Optional
 from bson import ObjectId
 from app.core.database import get_database
 from app.schemas.client_list import (
-    ContactCreate, LocationCreate,
+    ContactCreate, LocationCreate, LocationUpdate, LocationResponse,
     ClientContactItem, ClientContactPaginatedResponse,
     ClientLocationItem, ClientLocationPaginatedResponse,
     ClientCleaningPlanTaskItem, ClientCleaningPlanResponse, ClientCleaningPlanUpdate, AssignLocationRequest,
@@ -140,16 +140,9 @@ async def get_client_locations_tab(
         items.append(ClientLocationItem(
             id=lid,
             name=l.get("name", "Location"),
-            address=l.get("address", ""),
-            rooms_count=rcnt,
-            rooms_label=f"{rcnt} rooms"
+            address=l.get("address", "")
         ))
 
-    if not items:
-        items = [
-            ClientLocationItem(id="loc_1", name="Hoofdkantoor Amsterdam", address="Herengracht 500, Amsterdam", rooms_count=24, rooms_label="24 rooms"),
-            ClientLocationItem(id="loc_2", name="Bijkantoor Zuidas", address="Gustav Mahlerplein 2, Amsterdam", rooms_count=18, rooms_label="18 rooms")
-        ]
 
     return ClientLocationPaginatedResponse(
         total_count=len(items),
@@ -195,20 +188,10 @@ async def add_client_location(
     return ClientLocationItem(
         id=lid,
         name=location_in.name,
-        address=location_in.address,
-        rooms_count=rcnt,
-        rooms_label=f"{rcnt} rooms"
+        address=location_in.address
     )
 
-@client_details_tabs_router.delete("/clients/{client_id}/locations/{location_id}", status_code=status.HTTP_200_OK, summary="Delete Client Location (Image 4)")
-async def delete_client_location(
-    client_id: str,
-    location_id: str,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    await db["locations"].delete_one({"$or": [{"_id": location_id}, {"id": location_id}]})
-    return {"message": "Location deleted successfully"}
+
 
 # ================================
 # 3. Cleaning Plan Tab: Task Builder (Image 1)
@@ -297,7 +280,7 @@ async def update_client_cleaning_plan(
         assigned_location_ids=[]
     )
 
-@client_details_tabs_router.post("/clients/{client_id}/cleaning-plan/assign-location", summary="Assign Cleaning Plan to Location (Image 1)")
+@client_details_tabs_router.post("/clients/{client_id}/cleaning-plan/assign-location", summary="Assign Cleaning Plan to Location (Image 1)", include_in_schema=False)
 async def assign_cleaning_plan_location(
     client_id: str,
     assign_in: AssignLocationRequest,

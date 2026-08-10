@@ -5,12 +5,36 @@ from typing import List, Optional
 from app.core.database import get_database
 from app.schemas.client_list import (
     AdminRoomCreate, AdminRoomGridItem, AdminRoomGridPaginatedResponse,
-    RoomDrawerDetailResponse
+    RoomDrawerDetailResponse, AdminRoomLocationDropdownItem, AdminRoomLocationDropdownResponse
 )
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
 
 rooms_global_router = APIRouter(prefix="/manager", tags=["Admin Room Management"])
+
+@rooms_global_router.get("/dropdowns/locations", response_model=AdminRoomLocationDropdownResponse, summary="Get Room Locations Dropdown")
+async def get_room_locations_dropdown(
+    client_id: Optional[str] = None,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {}
+    if client_id:
+        query["client_id"] = client_id
+    
+    cursor = db["locations"].find(query).sort("name", 1)
+    raw_locs = await cursor.to_list(length=None)
+    
+    locations = []
+    for l in raw_locs:
+        locations.append(AdminRoomLocationDropdownItem(
+            id=str(l.get("_id") or l.get("id")),
+            name=l.get("name", ""),
+            total_rooms=l.get("rooms_count", 0)
+        ))
+        
+    return AdminRoomLocationDropdownResponse(locations=locations)
+
 
 @rooms_global_router.get("/rooms", response_model=AdminRoomGridPaginatedResponse, summary="Global Rooms Grid Page (Image 2)")
 async def get_global_rooms_grid(
@@ -94,7 +118,7 @@ async def get_global_rooms_grid(
         rooms=items
     )
 
-@rooms_global_router.post("/rooms", response_model=AdminRoomGridItem, status_code=status.HTTP_201_CREATED, summary="Add New Room Modal API (Text Prompt 1 + Image 2)")
+@rooms_global_router.post("/rooms", response_model=AdminRoomGridItem, status_code=status.HTTP_201_CREATED, summary="Add New Room Modal API (Text Prompt 1 + Image 2)", include_in_schema=False)
 async def create_admin_room(
     room_in: AdminRoomCreate,
     current_user: UserInDB = Depends(require_manager)
@@ -144,7 +168,7 @@ async def create_admin_room(
         cleaning_plan_name=room_in.cleaning_plan_name or "Standard Clean"
     )
 
-@rooms_global_router.get("/rooms/{room_id}/drawer", response_model=RoomDrawerDetailResponse, summary="Room Details Drawer API (Image 3)")
+@rooms_global_router.get("/rooms/{room_id}/drawer", response_model=RoomDrawerDetailResponse, summary="Room Details Drawer API (Image 3)", include_in_schema=False)
 async def get_room_drawer_details(
     room_id: str,
     current_user: UserInDB = Depends(require_manager)

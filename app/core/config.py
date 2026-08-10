@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     # JWT Config
     SECRET_KEY: str
     REFRESH_SECRET_KEY: str
+    ADMIN_CREATION_SECRET: str = "super_admin_secret_key_123"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 120
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
 

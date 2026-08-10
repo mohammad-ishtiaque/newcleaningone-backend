@@ -13,6 +13,7 @@ from app.services.user_service import UserService
 from app.services.notification_service import NotificationService
 from app.repositories.user_repo import UserRepository
 from app.dependencies.auth import get_current_user
+from app.dependencies.rate_limit import rate_limit_signup
 from app.models.user import UserInDB, RoleEnum
 from app.core.database import get_database
 
@@ -26,7 +27,7 @@ def require_client(current_user: UserInDB = Depends(get_current_user)) -> UserIn
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Client role required")
     return current_user
 
-@router.post("/signup", response_model=ClientProfileResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/signup", response_model=ClientProfileResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(rate_limit_signup)])
 async def signup_client(
     user_in: ClientSignup,
     user_service: UserService = Depends(get_user_service)

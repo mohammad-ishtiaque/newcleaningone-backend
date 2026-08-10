@@ -176,6 +176,7 @@ class ClientListCreate(BaseModel):
     email: EmailStr = Field(..., json_schema_extra={"example": "c1@yopmail.com"})
     phone: str = Field(..., json_schema_extra={"example": "+8801318532935"})
     status: Optional[str] = Field(default="pending", json_schema_extra={"example": "pending"})
+    license_expiration_date: Optional[str] = Field(default=None, json_schema_extra={"example": "2026-08-23"})
 
 class ClientListUpdate(BaseModel):
     company_name: Optional[str] = Field(default=None, json_schema_extra={"example": "Betopia Group"})
@@ -186,10 +187,15 @@ class ClientListUpdate(BaseModel):
     status: Optional[str] = Field(default=None, json_schema_extra={"example": "active"})
     is_signup: Optional[bool] = Field(default=None, json_schema_extra={"example": True})
 
+class AdminInfo(BaseModel):
+    id: str
+    name: str
+    profile_picture: Optional[str] = None
+
 class ClientListResponse(BaseModel):
     id: str
     _id: str
-    admin_name: str
+    admin: AdminInfo
     company_name: str
     industry: str
     status: str
@@ -199,6 +205,7 @@ class ClientListResponse(BaseModel):
     is_signup: bool
     locations_count: int = 0
     contract_status: str = "no_contract"
+    license_expiration_date: Optional[str] = None
     locations: List[LocationResponse] = Field(default_factory=list)
     contacts: List[ContactResponse] = Field(default_factory=list)
     contracts: List[ContractResponse] = Field(default_factory=list)
@@ -216,6 +223,17 @@ class ClientListPaginatedResponse(BaseModel):
     page: int
     limit: int
     clients: List[ClientListResponse]
+
+class ClientGridDropdownItem(BaseModel):
+    id: str
+    primary_contact_name: str
+    company_name: str
+
+class ClientGridDropdownPaginatedResponse(BaseModel):
+    total_count: int
+    page: int
+    limit: int
+    clients: List[ClientGridDropdownItem]
 
 class ClientOverviewItemResponse(BaseModel):
     id: str
@@ -306,7 +324,7 @@ class LocationDropdownItemResponse(BaseModel):
     name: str = ""
     client_id: str = ""
     company_name: str = ""
-    floor: int = 1
+    client_name: Optional[str] = None
     location_id: Optional[str] = None
     location_name: Optional[str] = None
     address: Optional[str] = None
@@ -419,6 +437,14 @@ class RoomPaginatedResponse(BaseModel):
     page: int
     limit: int
     rooms: List[RoomResponse]
+
+class AdminRoomLocationDropdownItem(BaseModel):
+    id: str
+    name: str
+    total_rooms: int
+
+class AdminRoomLocationDropdownResponse(BaseModel):
+    locations: List[AdminRoomLocationDropdownItem]
 
 # --- Admin Cleaning Plan Management Schemas ---
 class CleaningPlanRoomInput(BaseModel):
@@ -619,8 +645,6 @@ class ClientLocationItem(BaseModel):
     id: str
     name: str
     address: str
-    rooms_count: int = 0
-    rooms_label: str = "0 rooms"
 
 class ClientLocationPaginatedResponse(BaseModel):
     total_count: int

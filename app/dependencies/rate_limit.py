@@ -1,21 +1,35 @@
 import time
 from fastapi import Request, HTTPException, status
-from typing import Dict
+from app.core.database import get_database
+from datetime import datetime, timezone, timedelta
 
-# In-memory dictionary to store the last request time for each IP address.
-# Since the time window is short (2 seconds), memory usage won't grow significantly fast,
-# but it's a good practice to occasionally clear it or use an expiring cache if the window was larger.
-_ip_rate_limits: Dict[str, float] = {}
-
-def rate_limit_verify_email(request: Request):
+async def check_rate_limit(request: Request, action: str, max_requests: int, window_seconds: int):
     client_ip = request.client.host if request.client else "unknown"
-    current_time = time.time()
+    db = get_database()
     
-    last_request_time = _ip_rate_limits.get(client_ip)
-    if last_request_time and current_time - last_request_time < 2.0:
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(seconds=window_seconds)
+    
+    count = await db["rate_limits"].count_documents({
+        "ip": client_ip,
+        "action": action,
+        "timestamp": {"$gte": window_start}
+    })
+    
+    if count >= max_requests:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many requests. Please wait 2 seconds before trying again."
+            detail=f"Too many requests. Please try again later."
         )
         
-    _ip_rate_limits[client_ip] = current_time
+    await db["rate_limits"].insert_one({
+        "ip": client_ip,
+        "action": action,
+        "timestamp": now
+    })
+
+async def rate_limit_verify_email(request: Request):
+    await check_rate_limit(request, action="verify_email", max_requests=5, window_seconds=900)
+
+async def rate_limit_signup(request: Request):
+    await check_rate_limit(request, action="signup", max_requests=3, window_seconds=3600)

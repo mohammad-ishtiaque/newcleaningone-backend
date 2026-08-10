@@ -38,8 +38,8 @@ class AuthService:
                 detail="Email not verified. Please verify your email to login."
             )
             
-        # Worker approval check
-        if user.role == RoleEnum.worker:
+        # Worker and Client approval check
+        if user.role in [RoleEnum.worker, RoleEnum.client]:
             status_str = getattr(user, "approval_status", "approved")
             if status_str == "rejected":
                 reason = getattr(user, "rejection_reason", None)
@@ -48,7 +48,7 @@ class AuthService:
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail=detail_msg
                 )
-            if not user.is_approved or status_str == "pending":
+            if not getattr(user, "is_approved", True) or status_str == "pending":
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Your account is pending admin approval. Please wait for an administrator to approve your application."
@@ -142,6 +142,39 @@ class AuthService:
         # Check if individual worker pending admin approval
         if user.role == RoleEnum.worker and not getattr(user, "is_admin_created", False):
             if not getattr(user, "is_approved", False) or getattr(user, "approval_status", "pending") == "pending":
+                user_role = user.role.value if hasattr(user.role, "value") else str(user.role)
+                return Token(
+                    message="OTP verified successfully. Your account is pending admin approval.",
+                    name=user.full_name,
+                    role=user_role,
+                    is_approved=False,
+                    approval_status="pending"
+                )
+
+        # Check if client pending admin approval
+        if user.role == RoleEnum.client and not getattr(user, "is_admin_created", False):
+            if not getattr(user, "is_approved", False) or getattr(user, "approval_status", "pending") == "pending":
+                from app.services.notification_service import NotificationService
+                from app.api.chat import ws_manager
+                from app.core.database import get_database
+
+                notif_service = NotificationService()
+                await notif_service.create_notification(
+                    title="New Client Signup Request",
+                    message=f"A new client ({user.company_name or user.full_name}) has signed up and is awaiting approval.",
+                    notification_type="approval_request",
+                    recipient_type="admin"
+                )
+
+                db = get_database()
+                admin_cursor = db["users"].find({"role": {"$in": ["admin", "manager"]}})
+                admin_ids = [str(u.get("_id") or u.get("id")) async for u in admin_cursor]
+
+                await ws_manager.broadcast_to_users({
+                    "type": "new_approval_request",
+                    "message": f"New client signup request from {user.company_name or user.full_name}."
+                }, admin_ids)
+
                 user_role = user.role.value if hasattr(user.role, "value") else str(user.role)
                 return Token(
                     message="OTP verified successfully. Your account is pending admin approval.",
