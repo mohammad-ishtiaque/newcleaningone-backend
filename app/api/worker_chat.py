@@ -49,27 +49,6 @@ async def list_worker_conversations(
     cursor = db["conversations"].find(query).sort("updated_at", -1).skip(skip).limit(limit)
     raw_convs = await cursor.to_list(length=limit)
 
-    if not raw_convs and page == 1:
-        now = datetime.now(timezone.utc)
-        mock_convs = [
-            ConversationResponse(
-                id="conv_emp_1",
-                type="direct",
-                title="Cleaning One Admin",
-                subtitle="Support & Operations",
-                shift_id=None,
-                participants=[
-                    {"user_id": "admin_1", "name": "Admin", "role": "admin"},
-                    {"user_id": worker_id, "name": getattr(current_user, "full_name", "Worker"), "role": "worker"}
-                ],
-                last_message={"text": "The meeting rooms are complete. We are moving to the lobby.", "sender_id": worker_id, "sender_name": getattr(current_user, "full_name", "Worker"), "timestamp": "08:22"},
-                unread_count=0,
-                created_at=now,
-                updated_at=now
-            )
-        ]
-        return PaginatedConversationsResponse(total_count=1, page=1, limit=limit, conversations=mock_convs)
-
     convs_res = [format_conversation(c, current_user_id=worker_id) for c in raw_convs]
     return PaginatedConversationsResponse(total_count=total_count, page=page, limit=limit, conversations=convs_res)
 

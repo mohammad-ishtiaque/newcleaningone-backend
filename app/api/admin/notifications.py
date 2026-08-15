@@ -48,32 +48,6 @@ async def get_admin_notification_center(
             created_at=c_dt
         ))
 
-    if not items:
-        # Default mock notifications matching Image mockup
-        now = datetime.now(timezone.utc)
-        mock_data = [
-            ("notif_1", "New Escalation", "Urgent: Water leak reported in Hilton Rotterdam Room 701 by Emma Smit", "2 min ago", "escalation", False),
-            ("notif_2", "GPS Melding", "Noah Bos is located outside the designated area at UMC Utrecht", "5 min ago", "gps_alert", False),
-            ("notif_3", "Photo Rejected", "AI analysis failed for bathroom photo Room 305 - sharpnessScore 42/100", "12 min ago", "photo_rejected", False),
-            ("notif_4", "Service Completed", "Lucas Meijer completed service at NH Hotel Groningen (100% rooms done)", "18 min ago", "service_completed", False),
-            ("notif_5", "Late Check-in", "Anna Mulder is 15 minutes late for service at Keizersgracht Kantoren Amsterdam", "25 min ago", "late_checkin", True),
-            ("notif_6", "Photos Waiting for Review", "12 photos await review by manager in 3 locations", "35 min ago", "photo_review_pending", True),
-            ("notif_7", "Service Started", "Milan Dekker checked into Leiden University Hospital and started service #1048", "42 min ago", "service_started", True),
-            ("notif_8", "App Bijgewerkt", "New cleaning planner is synchronized with all devices", "1 hr ago", "app_update", True)
-        ]
-        unread_count = 4
-        total_count = len(mock_data)
-        for nid, title, msg, time_lbl, n_type, is_r in mock_data:
-            items.append(AdminNotificationItem(
-                id=nid,
-                title=title,
-                message=msg,
-                time_ago=time_lbl,
-                notification_type=n_type,
-                is_read=is_r,
-                created_at=now
-            ))
-
     return AdminNotificationCenterResponse(
         total_count=total_count,
         unread_count=unread_count,

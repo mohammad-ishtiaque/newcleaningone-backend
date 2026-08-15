@@ -27,52 +27,41 @@ async def get_quality_control_report(
     photos_rejected_cnt = await db["photo_reviews"].count_documents({"status": "rejected"})
     esc_cnt = await db["escalations"].count_documents({})
 
-    # Fallbacks matching Image mockup if sparse DB
-    if shifts_cnt == 0:
-        shifts_cnt = 1245
-    if photos_approved_cnt == 0:
-        photos_approved_cnt = 67
-    if photos_pending_cnt == 0:
-        photos_pending_cnt = 12
-    if photos_rejected_cnt == 0:
-        photos_rejected_cnt = 8
-    if esc_cnt == 0:
-        esc_cnt = 23
+    now = datetime.now(timezone.utc)
+    trends = []
 
-    # Dynamic Shift Trends Data Points based on Timeframe
     if tf == "week":
-        trends = [
-            ShiftTrendDataPoint(label="Mon", count=180),
-            ShiftTrendDataPoint(label="Tue", count=210),
-            ShiftTrendDataPoint(label="Wed", count=195),
-            ShiftTrendDataPoint(label="Thu", count=230),
-            ShiftTrendDataPoint(label="Fri", count=245),
-            ShiftTrendDataPoint(label="Sat", count=110),
-            ShiftTrendDataPoint(label="Sun", count=75)
-        ]
+        days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        for d_idx, day_name in enumerate(days):
+            # Calculate date for each day of current week
+            day_dt = now - timedelta(days=now.weekday()) + timedelta(days=d_idx)
+            day_str = day_dt.strftime("%Y-%m-%d")
+            c = await db["shifts"].count_documents({"date": day_str})
+            trends.append(ShiftTrendDataPoint(label=day_name, count=c))
     elif tf == "quarter":
-        trends = [
-            ShiftTrendDataPoint(label="Q1", count=835),
-            ShiftTrendDataPoint(label="Q2", count=940),
-            ShiftTrendDataPoint(label="Q3", count=890),
-            ShiftTrendDataPoint(label="Q4", count=1020)
+        curr_year = now.year
+        q_map = [
+            ("Q1", f"{curr_year}-01-01", f"{curr_year}-03-31"),
+            ("Q2", f"{curr_year}-04-01", f"{curr_year}-06-30"),
+            ("Q3", f"{curr_year}-07-01", f"{curr_year}-09-30"),
+            ("Q4", f"{curr_year}-10-01", f"{curr_year}-12-31"),
         ]
+        for q_label, q_start, q_end in q_map:
+            c = await db["shifts"].count_documents({"date": {"$gte": q_start, "$lte": q_end}})
+            trends.append(ShiftTrendDataPoint(label=q_label, count=c))
     elif tf == "year":
-        trends = [
-            ShiftTrendDataPoint(label="2023", count=2400),
-            ShiftTrendDataPoint(label="2024", count=3100),
-            ShiftTrendDataPoint(label="2025", count=3850),
-            ShiftTrendDataPoint(label="2026", count=1245)
-        ]
-    else:  # month (Default matching Image mockup)
-        trends = [
-            ShiftTrendDataPoint(label="Jan", count=260),
-            ShiftTrendDataPoint(label="Feb", count=300),
-            ShiftTrendDataPoint(label="Mar", count=275),
-            ShiftTrendDataPoint(label="Apr", count=325),
-            ShiftTrendDataPoint(label="May", count=370),
-            ShiftTrendDataPoint(label="Jun", count=225)
-        ]
+        curr_year = now.year
+        for yr in range(curr_year - 3, curr_year + 1):
+            yr_str = str(yr)
+            c = await db["shifts"].count_documents({"date": {"$regex": f"^{yr_str}"}})
+            trends.append(ShiftTrendDataPoint(label=yr_str, count=c))
+    else:  # month
+        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        curr_year = now.year
+        for m_idx, m_name in enumerate(months, start=1):
+            m_prefix = f"{curr_year}-{m_idx:02d}"
+            c = await db["shifts"].count_documents({"date": {"$regex": f"^{m_prefix}"}})
+            trends.append(ShiftTrendDataPoint(label=m_name, count=c))
 
     pie_dist = PhotoQualityDistributionData(
         approved=photos_approved_cnt,

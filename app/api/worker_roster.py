@@ -149,49 +149,6 @@ async def get_worker_roster_screen(
                 admin_contact_phone=admin_phone,
                 can_start_shift=can_start
             ))
-    else:
-        # Default mock shift cards matching Image Mockup layout
-        cards = [
-            RosterCardItem(
-                shift_id="sh_rost_1",
-                location_name="Hilton Hotel",
-                status="completed",
-                status_label="Completed",
-                time_range="2:00 PM - 6:00 PM",
-                address_district="Downtown Business District",
-                rooms_count=20,
-                rooms_count_str="20 rooms",
-                admin_contact_name=admin_name,
-                admin_contact_phone=admin_phone,
-                can_start_shift=False
-            ),
-            RosterCardItem(
-                shift_id="sh_rost_2",
-                location_name="Office Building A",
-                status="upcoming",
-                status_label="Upcoming",
-                time_range="2:00 PM - 6:00 PM",
-                address_district="Downtown Business District",
-                rooms_count=20,
-                rooms_count_str="20 rooms",
-                admin_contact_name=admin_name,
-                admin_contact_phone=admin_phone,
-                can_start_shift=True
-            ),
-            RosterCardItem(
-                shift_id="sh_rost_3",
-                location_name="Apartment Complex",
-                status="upcoming",
-                status_label="Upcoming",
-                time_range="2:00 PM - 6:00 PM",
-                address_district="Downtown Business District",
-                rooms_count=20,
-                rooms_count_str="20 rooms",
-                admin_contact_name=admin_name,
-                admin_contact_phone=admin_phone,
-                can_start_shift=True
-            )
-        ]
 
     return WorkerRosterScreenResponse(
         screen_title="My Roster",

@@ -99,13 +99,13 @@ async def get_worker_home_dashboard_screen(
     if active_shift_doc:
         active_shift_id = str(active_shift_doc.get("_id") or active_shift_doc.get("id"))
         rooms = active_shift_doc.get("rooms", [])
-        tot_r = len(rooms) or 12
-        comp_r = sum(1 for r in rooms if r.get("status") == "completed") or 7
-        pct = round((comp_r / tot_r * 100.0), 1) if tot_r > 0 else 62.0
+        tot_r = len(rooms)
+        comp_r = sum(1 for r in rooms if r.get("status") == "completed")
+        pct = round((comp_r / tot_r * 100.0), 1) if tot_r > 0 else 0.0
 
-        c_name = active_shift_doc.get("client_name", "Hilton Amsterdam")
-        l_name = active_shift_doc.get("location_name", "Main")
-        l_addr = active_shift_doc.get("location_address") or "Apollolaan 138"
+        c_name = active_shift_doc.get("client_name", "Client")
+        l_name = active_shift_doc.get("location_name", "Location")
+        l_addr = active_shift_doc.get("location_address") or ""
         t_slot = f"{active_shift_doc.get('start_time', '08:00')} - {active_shift_doc.get('end_time', '16:00')}"
 
         active_card = WorkerActiveShiftCard(
@@ -120,35 +120,22 @@ async def get_worker_home_dashboard_screen(
             overall_progress_percentage=pct,
             status=active_shift_doc.get("status", "running")
         )
-    else:
-        active_card = WorkerActiveShiftCard(
-            shift_id="sh_act_101",
-            client_name="Hilton Amsterdam",
-            location_name="Main",
-            location_address="Apollolaan 138",
-            time_range="08:00 - 16:00",
-            rooms_progress_str="7 / 12 rooms",
-            completed_rooms=7,
-            total_rooms=12,
-            overall_progress_percentage=62.0,
-            status="running"
-        )
 
     # 2. Stats Counters
     todays_count = await db["shifts"].count_documents({
         "workers.worker_id": worker_id,
         "date": today_str
-    }) or 3
+    })
 
     completed_rooms_cnt = await db["shifts"].count_documents({
         "workers.worker_id": worker_id,
         "rooms.status": "completed"
-    }) or 12
+    })
 
     pending_rooms_cnt = await db["shifts"].count_documents({
         "workers.worker_id": worker_id,
         "rooms.status": {"$in": ["pending", "in_progress"]}
-    }) or 8
+    })
 
     counters = WorkerHomeCounters(
         todays_shifts=todays_count,
@@ -172,27 +159,18 @@ async def get_worker_home_dashboard_screen(
     next_card = None
     if next_shift_doc:
         ns_id = str(next_shift_doc.get("_id") or next_shift_doc.get("id"))
-        loc_n = next_shift_doc.get("location_name", "Office Building A")
+        loc_n = next_shift_doc.get("location_name", "Location")
         s_time_12 = _format_time_12h(next_shift_doc.get("start_time", "14:00"))
         e_time_12 = _format_time_12h(next_shift_doc.get("end_time", "18:00"))
-        addr_dist = next_shift_doc.get("location_address", "Downtown Business District")
+        addr_dist = next_shift_doc.get("location_address", "")
 
         next_card = WorkerNextShiftCard(
             shift_id=ns_id,
             location_name=loc_n,
-            time_until_start="In 3 hours",
+            time_until_start="Upcoming",
             time_range=f"{s_time_12} - {e_time_12}",
             address_district=addr_dist,
             date=next_shift_doc.get("date", today_str)
-        )
-    else:
-        next_card = WorkerNextShiftCard(
-            shift_id="sh_nxt_202",
-            location_name="Office Building A",
-            time_until_start="In 3 hours",
-            time_range="2:00 PM - 6:00 PM",
-            address_district="Downtown Business District",
-            date=today_str
         )
 
     # 5. Recent Activity Feed
@@ -204,7 +182,7 @@ async def get_worker_home_dashboard_screen(
         for r in raw_reviews:
             r_id = str(r.get("_id") or r.get("review_id"))
             rm_info = r.get("room", {})
-            rm_n = rm_info.get("name") or r.get("room_name", "Room 105")
+            rm_n = rm_info.get("name") or r.get("room_name", "Room")
             sub_dt = r.get("date_submitted")
             time_str = _human_time_ago(sub_dt, now)
 
@@ -215,13 +193,6 @@ async def get_worker_home_dashboard_screen(
                 time_ago=time_str,
                 activity_type="photo_upload"
             ))
-
-    if not activities:
-        activities = [
-            ActivityFeedItem(id="act_1", title="Photo uploaded for Room 105", subtitle="Saved to inspection report.", time_ago="1h ago", activity_type="photo_upload"),
-            ActivityFeedItem(id="act_2", title="Photo uploaded for Room 103", subtitle="Saved to inspection report.", time_ago="1h ago", activity_type="photo_upload"),
-            ActivityFeedItem(id="act_3", title="Shift started", subtitle="Office Building A – 2:00 PM - 6:00 PM", time_ago="1h ago", activity_type="shift_start")
-        ]
 
     return WorkerHomeScreenResponse(
         greeting=greeting_str,
@@ -259,25 +230,13 @@ async def list_worker_next_shifts(
     }).sort([("date", 1), ("start_time", 1)])
 
     raw_shifts = await cursor.to_list(length=20)
-    if not raw_shifts:
-        return [
-            WorkerNextShiftCard(
-                shift_id="sh_nxt_202",
-                location_name="Office Building A",
-                time_until_start="In 3 hours",
-                time_range="2:00 PM - 6:00 PM",
-                address_district="Downtown Business District",
-                date=today_str
-            )
-        ]
-
     items = []
     for s in raw_shifts:
         s_id = str(s.get("_id") or s.get("id"))
-        loc_n = s.get("location_name", "Office Building A")
+        loc_n = s.get("location_name", "Location")
         s_time_12 = _format_time_12h(s.get("start_time", "14:00"))
         e_time_12 = _format_time_12h(s.get("end_time", "18:00"))
-        addr_dist = s.get("location_address", "Downtown Business District")
+        addr_dist = s.get("location_address", "")
 
         items.append(WorkerNextShiftCard(
             shift_id=s_id,

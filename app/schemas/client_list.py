@@ -47,7 +47,6 @@ class LocationCreate(BaseModel):
     type: str = Field(..., json_schema_extra={"example": "office"})
     address: str = Field(..., json_schema_extra={"example": "123 Business Way, Dhaka"})
     floor: int = Field(default=1, json_schema_extra={"example": 3})
-    number_of_rooms: int = Field(default=1, json_schema_extra={"example": 10})
     description: Optional[str] = Field(default="", json_schema_extra={"example": "Headquarters 3rd floor"})
 
 class LocationUpdate(BaseModel):
@@ -55,18 +54,25 @@ class LocationUpdate(BaseModel):
     type: Optional[str] = None
     address: Optional[str] = None
     floor: Optional[int] = None
-    number_of_rooms: Optional[int] = None
     description: Optional[str] = None
 
 class LocationResponse(BaseModel):
     id: str
+    client_id: Optional[str] = None
     name: str
     type: Optional[str] = "office"
     address: str
-    floor: int = 1
-    number_of_rooms: int = 1
+    city: Optional[str] = None
+    postal_code: Optional[str] = None
+    country: Optional[str] = "Netherlands"
+    floor: Optional[int] = 1
+    number_of_rooms: Optional[int] = 0
+    rooms_count: Optional[int] = 0
+    cleaning_plans_count: Optional[int] = 0
     description: Optional[str] = ""
     image_url: Optional[str] = None
+    is_active: Optional[bool] = True
+    notes: Optional[str] = None
     created_at: Union[str, datetime]
     updated_at: Union[str, datetime]
 
@@ -412,21 +418,21 @@ class RoomUpdate(BaseModel):
 class RoomResponse(BaseModel):
     id: str
     room_name: str
-    room_type: str
-    client_id: str
-    company_name: str
-    location_id: str
-    location_name: str
-    floor: int
-    duration: int
+    room_type: str = "standard"
+    client_id: str = ""
+    company_name: str = ""
+    location_id: str = ""
+    location_name: str = ""
+    floor: int = 1
+    duration: int = 30
     monthly_cleaning_frequency: int = 4
     required_photos: List[RequiredPhotoResponse] = Field(default_factory=list)
     photo_number: int = 0
     task_number: int = 0
-    clean_type: str
+    clean_type: str = "standard"
     tasks: List[CleaningTaskResponse] = Field(default_factory=list)
-    created_at: datetime
-    updated_at: datetime
+    created_at: Union[str, datetime]
+    updated_at: Union[str, datetime]
 
     class Config:
         populate_by_name = True
@@ -715,7 +721,7 @@ class AdminLocationGridItem(BaseModel):
     client_company_name: str
     address: str
     floors: int = 1
-    rooms: int = 1
+    rooms: int = 0
     required_hours_label: str = "0h"
     required_hours_numeric: float = 0.0
     created_at: datetime
@@ -782,15 +788,20 @@ class AdminRoomCreate(BaseModel):
 class AdminRoomGridItem(BaseModel):
     room_id: str
     room_name: str
-    room_type: str
-    location_id: str
-    location_name: str
-    floor_label: str
-    duration_minutes: int = 45
-    monthly_cleaning_frequency: int = Field(default=4, description="Dynamic frequency: how many times a month this room is cleaned.")
-    required_photos_count: int = 4
-    tasks_count: int = 12
-    cleaning_plan_name: str = "Standard Clean"
+    room_type: str = "standard"
+    client_id: str = ""
+    company_name: str = ""
+    location_id: str = ""
+    location_name: str = ""
+    monthly_cleaning_frequency: int = 4
+    photo_number: int = 0
+    task_number: int = 0
+    clean_type: str = "standard"
+    updated_at: Union[str, datetime]
+
+    class Config:
+        populate_by_name = True
+        from_attributes = True
 
 class AdminRoomGridPaginatedResponse(BaseModel):
     total_count: int
@@ -836,6 +847,102 @@ class AdminCleaningPlanGridPaginatedResponse(BaseModel):
     page: int
     limit: int
     plans: List[AdminCleaningPlanGridItem] = Field(default_factory=list)
+
+# --- Manager Cleaning Plan CRUD Schemas ---
+
+class CleaningPlanRoomDetail(BaseModel):
+    room_id: str
+    room_name: str
+    room_type: str = "standard"
+    floor: int = 1
+    duration: int = 30
+    monthly_cleaning_frequency: int = 4
+    clean_type: str = "standard"
+    tasks: List[CleaningTaskResponse] = Field(default_factory=list)
+    required_photos: List[RequiredPhotoResponse] = Field(default_factory=list)
+
+class CleaningPlanWorkerDetail(BaseModel):
+    worker_id: str
+    name: str
+    email: Optional[str] = None
+    role: Optional[str] = "worker"
+    phone: Optional[str] = None
+    profile_picture: Optional[str] = None
+
+class ManagerCleaningPlanCreate(BaseModel):
+    title: str = Field(..., json_schema_extra={"example": "Main Floor Daily Cleaning Plan"})
+    location_id: str = Field(..., json_schema_extra={"example": "loc_12345"})
+    room_ids: List[str] = Field(default_factory=list, json_schema_extra={"example": ["room_1", "room_2"]})
+    frequency_type: str = Field(default="weekly", json_schema_extra={"example": "weekly"})
+    duration_minutes: int = Field(default=60, json_schema_extra={"example": 60})
+    description: Optional[str] = Field(default="", json_schema_extra={"example": "Comprehensive cleaning plan for main floor"})
+    additional_tasks: Optional[List[CleaningTaskCreate]] = Field(default_factory=list)
+    additional_required_photos: Optional[List[RequiredPhotoCreate]] = Field(default_factory=list)
+
+class ManagerCleaningPlanUpdate(BaseModel):
+    title: Optional[str] = None
+    location_id: Optional[str] = None
+    room_ids: Optional[List[str]] = None
+    worker_ids: Optional[List[str]] = None
+    frequency_type: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    description: Optional[str] = None
+    additional_tasks: Optional[List[CleaningTaskCreate]] = None
+    additional_required_photos: Optional[List[RequiredPhotoCreate]] = None
+    is_active: Optional[bool] = None
+
+class ManagerCleaningPlanDetailResponse(BaseModel):
+    id: str
+    title: str
+    description: Optional[str] = ""
+    client_id: str = ""
+    company_name: str = ""
+    location_id: str = ""
+    location_name: str = ""
+    room_ids: List[str] = Field(default_factory=list)
+    rooms: List[CleaningPlanRoomDetail] = Field(default_factory=list)
+    rooms_count: int = 0
+    worker_ids: List[str] = Field(default_factory=list)
+    workers: List[CleaningPlanWorkerDetail] = Field(default_factory=list)
+    workers_count: int = 0
+    additional_tasks: List[CleaningTaskResponse] = Field(default_factory=list)
+    additional_required_photos: List[RequiredPhotoResponse] = Field(default_factory=list)
+    all_tasks: List[CleaningTaskResponse] = Field(default_factory=list)
+    all_required_photos: List[RequiredPhotoResponse] = Field(default_factory=list)
+    total_tasks_count: int = 0
+    total_photos_count: int = 0
+    frequency_type: str = "weekly"
+    duration_minutes: int = 60
+    is_active: bool = True
+    created_at: Union[str, datetime]
+    updated_at: Union[str, datetime]
+
+class ManagerCleaningPlanListItemResponse(BaseModel):
+    id: str
+    title: str
+    client_id: str = ""
+    company_name: str = ""
+    location_id: str = ""
+    location_name: str = ""
+    room_ids: List[str] = Field(default_factory=list)
+    room_names: List[str] = Field(default_factory=list)
+    rooms_count: int = 0
+    worker_ids: List[str] = Field(default_factory=list)
+    worker_names: List[str] = Field(default_factory=list)
+    workers_count: int = 0
+    total_tasks_count: int = 0
+    total_photos_count: int = 0
+    frequency_type: str = "weekly"
+    duration_minutes: int = 60
+    is_active: bool = True
+    created_at: Union[str, datetime]
+    updated_at: Union[str, datetime]
+
+class ManagerCleaningPlanPaginatedResponse(BaseModel):
+    total_count: int
+    page: int
+    limit: int
+    plans: List[ManagerCleaningPlanListItemResponse] = Field(default_factory=list)
 
 class LocationDrawerCleaningPlanItem(BaseModel):
     plan_id: str

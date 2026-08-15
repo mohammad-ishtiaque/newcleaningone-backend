@@ -15,9 +15,9 @@ class WorkerActiveShiftCard(BaseModel):
     status: str = "running"
 
 class WorkerHomeCounters(BaseModel):
-    todays_shifts: int = 3
-    completed_rooms: int = 12
-    pending_rooms: int = 8
+    todays_shifts: int = 0
+    completed_rooms: int = 0
+    pending_rooms: int = 0
 
 class QuickActionItem(BaseModel):
     id: str

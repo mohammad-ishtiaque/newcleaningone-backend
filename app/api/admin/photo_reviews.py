@@ -96,38 +96,8 @@ async def get_admin_photo_reviews(
             date_submitted=c_dt
         ))
 
-    if not items and not search:
-        # Default mock items matching Image mockup
-        now = datetime.now(timezone.utc)
-        mock_data = [
-            ("RV-001", "Lisa Visser", "NH Hotels Nederland", "NH Hotel Amsterdam Centrum", "Kamer 201", 91.0, "high", "pending_review"),
-            ("RV-002", "Emma Smit", "Kantoorschoonmaak Rotterdam", "Hilton Rotterdam", "Kamer 701", 88.0, "high", "approved"),
-            ("RV-003", "Noah Bos", "NH Hotels Nederland", "NH Hotel Groningen", "Kamer 105", 43.0, "low", "rejected"),
-            ("RV-004", "Sophie de Boer", "Facility Services Eindhoven", "Van der Valk Eindhoven", "Suite 1204", 76.0, "medium", "pending_review"),
-            ("RV-005", "Anna Mulder", "Zorg & Schoon Utrecht", "Zorg & Schoon - UMC Utrecht", "Zaal 1A", 95.0, "high", "approved")
-        ]
-        pending_count = 3
-        for r_code, c_name, cl_name, loc_name, rm_name, score, conf, st in mock_data:
-            if status_filter and status_filter.lower() != "all" and st != status_filter.lower().replace(" ", "_"):
-                continue
-            items.append(PhotoReviewItem(
-                review_id=r_code,
-                shift_id=f"shift_{r_code}",
-                cleaner=PhotoReviewCleanerDetail(worker_id=f"w_{r_code}", name=c_name, profile_picture=None),
-                client=PhotoReviewClientDetail(client_id=f"cli_{r_code}", name=cl_name),
-                location=PhotoReviewLocationDetail(location_id=f"loc_{r_code}", name=loc_name),
-                room=PhotoReviewRoomDetail(room_id=f"rm_{r_code}", name=rm_name),
-                photo_url=f"/uploads/photo_reviews/{r_code.lower()}.jpg",
-                photo_name=f"{rm_name} Cleaning Photo",
-                ai_score=score,
-                ai_confidence=conf,
-                status=st,
-                rejection_reason="Photo is blurry" if st == "rejected" else None,
-                date_submitted=now
-            ))
-
     return PhotoReviewPaginatedResponse(
-        total_count=len(items),
+        total_count=total_count,
         page=page,
         limit=limit,
         pending_reviews_count=pending_count,
@@ -144,29 +114,7 @@ async def get_photo_review_details(
     now = datetime.now(timezone.utc)
 
     if not r:
-        # Default mock detail matching Image mockup
-        return PhotoReviewDetailModalResponse(
-            review_id=review_id,
-            shift_id="shift_rv001",
-            cleaner=PhotoReviewCleanerDetail(worker_id="w_1", name="Lisa Visser", profile_picture=None),
-            client=PhotoReviewClientDetail(client_id="c_1", name="NH Hotels Nederland"),
-            location=PhotoReviewLocationDetail(location_id="l_1", name="NH Hotel Amsterdam Centrum"),
-            room=PhotoReviewRoomDetail(room_id="r_1", name="Kamer 201"),
-            before_photo_url="/uploads/photo_reviews/before_sample.jpg",
-            after_photo_url="/uploads/photo_reviews/after_sample.jpg",
-            photo_name="Kamer 201 Before & After Clean",
-            ai_score=91.0,
-            ai_confidence="high",
-            ai_feature_breakdown={
-                "ssim_transformation": 0.92,
-                "sharpness_score": 0.89,
-                "clutter_reduction": 0.95,
-                "illumination": 0.88,
-                "contrast": 0.91
-            },
-            status="pending_review",
-            date_submitted=now
-        )
+        raise HTTPException(status_code=404, detail="Photo review not found")
 
     cleaner_d = r.get("cleaner", {})
     client_d = r.get("client", {})

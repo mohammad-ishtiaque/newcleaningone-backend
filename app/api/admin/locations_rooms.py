@@ -12,7 +12,8 @@ from app.schemas.client_list import (
     RoomCreate, RoomUpdate, RoomResponse, RoomPaginatedResponse,
     AdminLocationCreate, AdminLocationGridItem, AdminLocationGridPaginatedResponse,
     LocationBulkImportResult,
-    ClientGridDropdownPaginatedResponse, ClientGridDropdownItem
+    ClientGridDropdownPaginatedResponse, ClientGridDropdownItem,
+    RequiredPhotoResponse, CleaningTaskResponse
 )
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
@@ -25,22 +26,28 @@ from app.api.admin.location_csv_utils import (
 location_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Location Management"])
 room_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Room Management"])
 
-def _format_location_response(doc: dict) -> LocationResponse:
+def _format_location_response(doc: dict, rooms_count: Optional[int] = None) -> LocationResponse:
     loc_id = str(doc.get("_id") or doc.get("id"))
     c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
     u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)
+    rcnt = rooms_count if rooms_count is not None else (doc.get("rooms_count", 0) or doc.get("number_of_rooms", 0))
 
     return LocationResponse(
         id=loc_id,
         client_id=doc.get("client_id", ""),
         name=doc.get("name", ""),
+        type=doc.get("type", "office"),
         address=doc.get("address", ""),
         city=doc.get("city", ""),
         postal_code=doc.get("postal_code", ""),
         country=doc.get("country", "Netherlands"),
+        floor=doc.get("floor") or doc.get("number_of_floors") or 1,
+        number_of_rooms=rcnt,
+        rooms_count=rcnt,
+        description=doc.get("description", ""),
+        image_url=doc.get("image_url"),
         is_active=doc.get("is_active", True),
         notes=doc.get("notes"),
-        rooms_count=doc.get("rooms_count", 0),
         cleaning_plans_count=doc.get("cleaning_plans_count", 0),
         created_at=c_at,
         updated_at=u_at
@@ -86,20 +93,129 @@ async def list_clients_for_locations(
     )
 
 
-@location_mgmt_router.get("/locations", response_model=AdminLocationGridPaginatedResponse, summary="Main Locations Grid (Image 1)")
-async def get_admin_locations_grid(
+
+# Client & Global Location Handlers
+
+@location_mgmt_router.post("/clients/{client_id}/locations", response_model=LocationResponse, status_code=status.HTTP_201_CREATED, summary="Create Client Location")
+async def create_location(
+    client_id: str,
+    location_in: LocationCreate,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    c_doc = await db["client_list"].find_one({"$or": [{"_id": client_id}, {"id": client_id}]})
+    if not c_doc:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    now = datetime.now(timezone.utc)
+    loc_id = f"loc_{uuid.uuid4().hex[:10]}"
+    doc = {
+        "_id": loc_id,
+        "id": loc_id,
+        "client_id": client_id,
+        "company_name": c_doc.get("company_name", "Client"),
+        **location_in.model_dump(),
+        "is_active": True,
+        "rooms_count": 0,
+        "number_of_rooms": 0,
+        "cleaning_plans_count": 0,
+        "created_at": now,
+        "updated_at": now
+    }
+
+    await db["locations"].insert_one(doc)
+    await db["client_list"].update_one(
+        {"$or": [{"_id": client_id}, {"id": client_id}]},
+        {"$inc": {"total_locations_count": 1}}
+    )
+    return _format_location_response(doc, rooms_count=0)
+
+@location_mgmt_router.get("/locations/{location_id}", response_model=LocationResponse, summary="Get Full Location Details")
+async def get_location_details(
+    location_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"$or": [{"_id": location_id}, {"id": location_id}]}
+    loc_doc = await db["locations"].find_one(query)
+    if not loc_doc:
+        raise HTTPException(status_code=404, detail="Location not found")
+
+    lid = str(loc_doc.get("_id") or loc_doc.get("id"))
+    rcnt = await db["rooms"].count_documents({"location_id": lid})
+    return _format_location_response(loc_doc, rooms_count=rcnt)
+
+@location_mgmt_router.patch("/locations/{location_id}", response_model=LocationResponse, summary="Update Location")
+async def update_location(
+    location_id: str,
+    location_in: LocationUpdate,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"$or": [{"_id": location_id}, {"id": location_id}]}
+    loc_doc = await db["locations"].find_one(query)
+    if not loc_doc:
+        raise HTTPException(status_code=404, detail="Location not found")
+
+    fields = location_in.model_dump(exclude_unset=True)
+    fields["updated_at"] = datetime.now(timezone.utc)
+
+    await db["locations"].update_one(query, {"$set": fields})
+    updated = await db["locations"].find_one(query)
+    lid = str(updated.get("_id") or updated.get("id"))
+    rcnt = await db["rooms"].count_documents({"location_id": lid})
+    return _format_location_response(updated, rooms_count=rcnt)
+
+@location_mgmt_router.delete("/locations/{location_id}", status_code=status.HTTP_200_OK, summary="Delete Location")
+async def delete_location(
+    location_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"$or": [{"_id": location_id}, {"id": location_id}]}
+    loc_doc = await db["locations"].find_one(query)
+    if not loc_doc:
+        raise HTTPException(status_code=404, detail="Location not found")
+
+    lid = str(loc_doc.get("_id") or loc_doc.get("id"))
+    cid = loc_doc.get("client_id")
+
+    await db["locations"].delete_one({"_id": loc_doc["_id"]})
+    await db["rooms"].delete_many({"location_id": lid})
+
+    if cid:
+        await db["client_list"].update_one(
+            {"$or": [{"_id": cid}, {"id": cid}]},
+            {"$inc": {"total_locations_count": -1}}
+        )
+
+    return {"message": "Location deleted successfully"}
+
+@location_mgmt_router.get("/locations", response_model=AdminLocationGridPaginatedResponse, summary="Global Locations Grid Page")
+async def get_global_locations_grid(
+    location_id: Optional[str] = None,
+    client_id: Optional[str] = None,
+    search: Optional[str] = None,
     page: int = 1,
     limit: int = 10,
-    search: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
+    if location_id:
+        query["$or"] = [{"_id": location_id}, {"id": location_id}]
+    if client_id:
+        query["client_id"] = client_id
     if search:
-        query["$or"] = [
+        search_filter = [
             {"name": {"$regex": search, "$options": "i"}},
-            {"address": {"$regex": search, "$options": "i"}}
+            {"address": {"$regex": search, "$options": "i"}},
+            {"company_name": {"$regex": search, "$options": "i"}}
         ]
+        if "$or" in query:
+            query = {"$and": [query, {"$or": search_filter}]}
+        else:
+            query["$or"] = search_filter
 
     total_count = await db["locations"].count_documents(query)
     skip = (page - 1) * limit
@@ -110,17 +226,15 @@ async def get_admin_locations_grid(
     for l in raw_locs:
         lid = str(l.get("_id") or l.get("id"))
         lname = l.get("name", "Location Name")
-        cid = l.get("client_id", "")
-        cdoc = await db["client_list"].find_one({"$or": [{"_id": cid}, {"id": cid}]}) if cid else None
+        cid_val = l.get("client_id", "")
+        cdoc = await db["client_list"].find_one({"$or": [{"_id": cid_val}, {"id": cid_val}]}) if cid_val else None
         cname = cdoc.get("company_name", "Client") if cdoc else l.get("company_name", "Client")
 
-        floors = l.get("number_of_floors") or l.get("floor") or 4
+        floors = l.get("number_of_floors") or l.get("floor") or 1
         rcnt = await db["rooms"].count_documents({"location_id": lid})
-        if rcnt == 0:
-            rcnt = l.get("number_of_rooms") or l.get("rooms_count") or 48
 
-        req_h = float(l.get("required_hours_per_month", 240.0))
-        req_lbl = f"{int(req_h)}h" if req_h > 0 else "240h"
+        req_h = float(l.get("required_hours_per_month", 0.0))
+        req_lbl = f"{int(req_h)}h" if req_h > 0 else "0h"
 
         c_at = l.get("created_at") if isinstance(l.get("created_at"), datetime) else datetime.now(timezone.utc)
         u_at = l.get("updated_at") if isinstance(l.get("updated_at"), datetime) else datetime.now(timezone.utc)
@@ -128,7 +242,7 @@ async def get_admin_locations_grid(
         grid_items.append(AdminLocationGridItem(
             location_id=lid,
             location_name=lname,
-            client_id=cid,
+            client_id=cid_val,
             client_company_name=cname,
             address=l.get("address", ""),
             floors=floors,
@@ -139,60 +253,12 @@ async def get_admin_locations_grid(
             updated_at=u_at
         ))
 
-    # Mock defaults if empty matching Image 1 mockup
-    if not grid_items:
-        mock_grid = [
-            ("NH Hotel Amsterdam Centrum", "NH Hotels Nederland", "Stadhouderskade 7, Amsterdam", 4, 48, 240.0),
-            ("Hilton Rotterdam", "Kantoorschoonmaak Rotterdam", "Weena 10, Rotterdam", 3, 36, 192.0),
-            ("Zorg & Schoon - UMC Utrecht", "Zorg & Schoon Utrecht", "Heidelberglaan 100, Utrecht", 15, 120, 304.0),
-            ("Van der Valk Eindhoven", "Facility Services Eindhoven", "Aalsterweg 322, Eindhoven", 2, 24, 120.0),
-            ("NH Hotel Groningen", "ProClean Groningen", "Hanzeplein 132, Groningen", 5, 60, 168.0),
-            ("Haarlem Stadsschouwburg", "Haarlem Schoonmaakdiensten", "Grote Markt 15, Haarlem", 3, 42, 104.0)
-        ]
-        now = datetime.now(timezone.utc)
-        for i, (l_n, c_n, addr, fl, rm, req) in enumerate(mock_grid):
-            grid_items.append(AdminLocationGridItem(
-                location_id=f"loc_grid_{i+1}", location_name=l_n, client_id=f"cli_{i+1}",
-                client_company_name=c_n, address=addr, floors=fl, rooms=rm,
-                required_hours_label=f"{int(req)}h", required_hours_numeric=req, created_at=now, updated_at=now
-            ))
-
     return AdminLocationGridPaginatedResponse(
-        total_count=len(grid_items),
+        total_count=total_count,
         page=page,
         limit=limit,
         locations=grid_items
     )
-
-@location_mgmt_router.post("/locations", response_model=LocationResponse, status_code=status.HTTP_201_CREATED, summary="Add New Location Modal (Image 2)")
-async def create_new_location(
-    loc_in: AdminLocationCreate,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    now = datetime.now(timezone.utc)
-    loc_id = f"loc_{uuid.uuid4().hex[:10]}"
-
-    c_doc = await db["client_list"].find_one({"$or": [{"_id": loc_in.client_id}, {"id": loc_in.client_id}]})
-    cname = c_doc.get("company_name", "Client Company") if c_doc else "Client Company"
-
-    doc = {
-        "_id": loc_id, "id": loc_id, "client_id": loc_in.client_id, "company_name": cname,
-        "name": loc_in.name, "address": loc_in.address, "floor": loc_in.number_of_floors,
-        "number_of_floors": loc_in.number_of_floors, "number_of_rooms": loc_in.number_of_rooms,
-        "rooms_count": loc_in.number_of_rooms, "required_hours_per_month": loc_in.required_hours_per_month,
-        "assigned_worker_ids": loc_in.assigned_worker_ids, "is_active": True, "cleaning_plans_count": 0,
-        "created_at": now, "updated_at": now
-    }
-
-    await db["locations"].insert_one(doc)
-    if c_doc:
-        await db["client_list"].update_one(
-            {"$or": [{"_id": loc_in.client_id}, {"id": loc_in.client_id}]},
-            {"$inc": {"total_locations_count": 1}}
-        )
-
-    return _format_location_response(doc)
 
 # Bulk Import & Export CSV (Image 3)
 
@@ -251,181 +317,35 @@ async def export_locations_csv(
         headers={"Content-Disposition": "attachment; filename=locations_export.csv"}
     )
 
-# Client & Global Location Handlers
-
-@location_mgmt_router.post("/clients/{client_id}/locations", response_model=LocationResponse, status_code=status.HTTP_201_CREATED)
-async def create_location(
-    client_id: str,
-    location_in: LocationCreate,
+@location_mgmt_router.post("/locations", response_model=LocationResponse, status_code=status.HTTP_201_CREATED, include_in_schema=False, summary="Add New Location Modal (Image 2)")
+async def create_new_location(
+    loc_in: AdminLocationCreate,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    c_doc = await db["client_list"].find_one({"$or": [{"_id": client_id}, {"id": client_id}]})
-    if not c_doc:
-        raise HTTPException(status_code=404, detail="Client not found")
-
     now = datetime.now(timezone.utc)
     loc_id = f"loc_{uuid.uuid4().hex[:10]}"
+
+    c_doc = await db["client_list"].find_one({"$or": [{"_id": loc_in.client_id}, {"id": loc_in.client_id}]})
+    cname = c_doc.get("company_name", "Client Company") if c_doc else "Client Company"
+
     doc = {
-        "_id": loc_id,
-        "id": loc_id,
-        "client_id": client_id,
-        **location_in.model_dump(),
-        "is_active": True,
-        "rooms_count": 0,
-        "cleaning_plans_count": 0,
-        "created_at": now,
-        "updated_at": now
+        "_id": loc_id, "id": loc_id, "client_id": loc_in.client_id, "company_name": cname,
+        "name": loc_in.name, "address": loc_in.address, "floor": loc_in.number_of_floors,
+        "number_of_floors": loc_in.number_of_floors, "number_of_rooms": loc_in.number_of_rooms,
+        "rooms_count": loc_in.number_of_rooms, "required_hours_per_month": loc_in.required_hours_per_month,
+        "assigned_worker_ids": loc_in.assigned_worker_ids, "is_active": True, "cleaning_plans_count": 0,
+        "created_at": now, "updated_at": now
     }
 
     await db["locations"].insert_one(doc)
-    await db["client_list"].update_one(
-        {"$or": [{"_id": client_id}, {"id": client_id}]},
-        {"$inc": {"total_locations_count": 1}}
-    )
+    if c_doc:
+        await db["client_list"].update_one(
+            {"$or": [{"_id": loc_in.client_id}, {"id": loc_in.client_id}]},
+            {"$inc": {"total_locations_count": 1}}
+        )
+
     return _format_location_response(doc)
-
-@location_mgmt_router.delete("/clients/{client_id}/locations/{location_id}", status_code=status.HTTP_200_OK, summary="Delete Client Location (Image 4)")
-async def delete_client_location(
-    client_id: str,
-    location_id: str,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    await db["locations"].delete_one({"$or": [{"_id": location_id}, {"id": location_id}]})
-    return {"message": "Location deleted successfully"}
-
-@location_mgmt_router.patch("/clients/{client_id}/locations/{location_id}", response_model=LocationResponse, summary="Update Client Location")
-async def update_client_location(
-    client_id: str,
-    location_id: str,
-    location_in: LocationUpdate,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    query = {"$or": [{"_id": location_id}, {"id": location_id}], "client_id": client_id}
-    loc_doc = await db["locations"].find_one(query)
-    if not loc_doc:
-        raise HTTPException(status_code=404, detail="Location not found")
-
-    fields = location_in.model_dump(exclude_unset=True)
-    fields["updated_at"] = datetime.now(timezone.utc)
-
-    await db["locations"].update_one(query, {"$set": fields})
-    updated = await db["locations"].find_one(query)
-    
-    return LocationResponse(
-        id=str(updated.get("_id") or updated.get("id")),
-        name=updated.get("name", ""),
-        type=updated.get("type", "office"),
-        address=updated.get("address", ""),
-        floor=updated.get("floor", 1),
-        number_of_rooms=updated.get("number_of_rooms", 1),
-        description=updated.get("description", ""),
-        image_url=updated.get("image_url"),
-        created_at=updated.get("created_at"),
-        updated_at=updated.get("updated_at")
-    )
-
-@location_mgmt_router.get("/clients/{client_id}/locations/{location_id}", response_model=LocationResponse, summary="Get Full Location Details")
-async def get_client_location_details(
-    client_id: str,
-    location_id: str,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    query = {"$or": [{"_id": location_id}, {"id": location_id}], "client_id": client_id}
-    loc_doc = await db["locations"].find_one(query)
-    if not loc_doc:
-        raise HTTPException(status_code=404, detail="Location not found")
-
-    return LocationResponse(
-        id=str(loc_doc.get("_id") or loc_doc.get("id")),
-        name=loc_doc.get("name", ""),
-        type=loc_doc.get("type", "office"),
-        address=loc_doc.get("address", ""),
-        floor=loc_doc.get("floor", 1),
-        number_of_rooms=loc_doc.get("number_of_rooms", 1),
-        description=loc_doc.get("description", ""),
-        image_url=loc_doc.get("image_url"),
-        created_at=loc_doc.get("created_at"),
-        updated_at=loc_doc.get("updated_at")
-    )
-
-@location_mgmt_router.get("/clients/{client_id}/locations", response_model=LocationPaginatedResponse)
-async def list_locations_for_client(
-    client_id: str,
-    page: int = 1,
-    limit: int = 10,
-    search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    query = {"client_id": client_id}
-    if search:
-        query["$or"] = [
-            {"name": {"$regex": search, "$options": "i"}},
-            {"address": {"$regex": search, "$options": "i"}},
-            {"city": {"$regex": search, "$options": "i"}}
-        ]
-
-    total_count = await db["locations"].count_documents(query)
-    skip = (page - 1) * limit
-    cursor = db["locations"].find(query).sort("created_at", -1).skip(skip).limit(limit)
-    raw_locs = await cursor.to_list(length=limit)
-
-    return LocationPaginatedResponse(
-        total_count=total_count,
-        page=page,
-        limit=limit,
-        locations=[_format_location_response(l) for l in raw_locs]
-    )
-
-@location_mgmt_router.get("/locations/global", response_model=GlobalLocationPaginatedResponse)
-async def list_global_locations(
-    page: int = 1,
-    limit: int = 10,
-    search: Optional[str] = None,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    query = {}
-    if search:
-        query["$or"] = [
-            {"name": {"$regex": search, "$options": "i"}},
-            {"address": {"$regex": search, "$options": "i"}}
-        ]
-
-    total_count = await db["locations"].count_documents(query)
-    skip = (page - 1) * limit
-    cursor = db["locations"].find(query).sort("created_at", -1).skip(skip).limit(limit)
-    raw_locs = await cursor.to_list(length=limit)
-
-    g_locs = []
-    for l in raw_locs:
-        cid = l.get("client_id", "")
-        cdoc = await db["client_list"].find_one({"$or": [{"_id": cid}, {"id": cid}]})
-        cname = cdoc.get("company_name", "Client") if cdoc else "Client"
-        lid = str(l.get("_id") or l.get("id"))
-        cat = l.get("created_at") if isinstance(l.get("created_at"), datetime) else datetime.now(timezone.utc)
-
-        g_locs.append(GlobalLocationResponse(
-            location_id=lid,
-            location_name=l.get("name", ""),
-            address=l.get("address", ""),
-            client_id=cid,
-            client_company_name=cname,
-            total_rooms_count=l.get("rooms_count", 0),
-            cleaning_plans_count=l.get("cleaning_plans_count", 0),
-            created_at=cat
-        ))
-
-    return GlobalLocationPaginatedResponse(
-        total_count=total_count,
-        page=page,
-        limit=limit,
-        locations=g_locs
-    )
 
 @location_mgmt_router.get("/dropdowns/locations", response_model=LocationDropdownPaginatedResponse)
 async def get_location_dropdowns(
@@ -474,29 +394,91 @@ async def get_location_dropdowns(
 
 # Room Management Handlers
 
-def _format_room_response(doc: dict) -> RoomResponse:
-    r_id = str(doc.get("_id") or doc.get("id"))
+async def _format_room_response(doc: dict, db) -> RoomResponse:
+    r_id = str(doc.get("_id") or doc.get("id") or doc.get("room_id"))
     c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
     u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)
 
+    lid = doc.get("location_id", "")
+    lname = doc.get("location_name", "")
+    cid = doc.get("client_id", "")
+    cname = doc.get("company_name", "")
+
+    if lid and (not lname or not cid or not cname):
+        ldoc = await db["locations"].find_one({"$or": [{"_id": lid}, {"id": lid}]})
+        if ldoc:
+            if not lname:
+                lname = ldoc.get("name", "")
+            if not cid:
+                cid = ldoc.get("client_id", "")
+            if not cname:
+                cname = ldoc.get("company_name", "")
+
+    if cid and not cname:
+        cdoc = await db["client_list"].find_one({"$or": [{"_id": cid}, {"id": cid}]})
+        if cdoc:
+            cname = cdoc.get("company_name", "")
+
+    req_photos_raw = doc.get("required_photos", [])
+    req_photos = []
+    if isinstance(req_photos_raw, list):
+        for p in req_photos_raw:
+            if isinstance(p, dict):
+                p_id = str(p.get("id") or p.get("_id") or uuid.uuid4().hex[:8])
+                req_photos.append(RequiredPhotoResponse(
+                    id=p_id,
+                    name=p.get("name", "Photo"),
+                    frequency_type=p.get("frequency_type", "every_visit")
+                ))
+            elif isinstance(p, str):
+                req_photos.append(RequiredPhotoResponse(
+                    id=uuid.uuid4().hex[:8],
+                    name=p,
+                    frequency_type="every_visit"
+                ))
+
+    tasks_raw = doc.get("tasks", [])
+    tasks = []
+    if isinstance(tasks_raw, list):
+        for t in tasks_raw:
+            if isinstance(t, dict):
+                t_id = str(t.get("id") or t.get("_id") or uuid.uuid4().hex[:8])
+                tasks.append(CleaningTaskResponse(
+                    id=t_id,
+                    name=t.get("name", "Task"),
+                    frequency_type=t.get("frequency_type", "every_visit")
+                ))
+            elif isinstance(t, str):
+                tasks.append(CleaningTaskResponse(
+                    id=uuid.uuid4().hex[:8],
+                    name=t,
+                    frequency_type="every_visit"
+                ))
+
+    photo_num = len(req_photos) if req_photos else (doc.get("photo_number") or doc.get("required_photos_count", 0))
+    task_num = len(tasks) if tasks else (doc.get("task_number") or doc.get("tasks_count", 0))
+
     return RoomResponse(
         id=r_id,
-        location_id=doc.get("location_id", ""),
-        client_id=doc.get("client_id", ""),
-        name=doc.get("name", ""),
-        room_type=doc.get("room_type", "standard"),
+        room_name=doc.get("room_name") or doc.get("name", "Room"),
+        room_type=doc.get("room_type") or doc.get("type", "standard"),
+        client_id=cid,
+        company_name=cname or "Client Company",
+        location_id=lid,
+        location_name=lname or "Location Name",
         floor=doc.get("floor", 1),
-        cleaning_type=doc.get("cleaning_type", "standard"),
-        est_cleaning_duration_minutes=doc.get("est_cleaning_duration_minutes", 30),
-        tasks=doc.get("tasks", []),
-        required_photos=doc.get("required_photos", []),
-        notes=doc.get("notes"),
-        is_active=doc.get("is_active", True),
+        duration=doc.get("duration") or doc.get("est_cleaning_duration_minutes", 30),
+        monthly_cleaning_frequency=doc.get("monthly_cleaning_frequency", 4),
+        required_photos=req_photos,
+        photo_number=photo_num,
+        task_number=task_num,
+        clean_type=doc.get("clean_type") or doc.get("cleaning_type", "standard"),
+        tasks=tasks,
         created_at=c_at,
         updated_at=u_at
     )
 
-@room_mgmt_router.post("/locations/{location_id}/rooms", response_model=RoomResponse, status_code=status.HTTP_201_CREATED)
+@room_mgmt_router.post("/locations/{location_id}/rooms", response_model=RoomResponse, status_code=status.HTTP_201_CREATED, summary="Create Room")
 async def create_room(
     location_id: str,
     room_in: RoomCreate,
@@ -510,12 +492,16 @@ async def create_room(
     now = datetime.now(timezone.utc)
     room_id = f"room_{uuid.uuid4().hex[:10]}"
     client_id = l_doc.get("client_id", "")
+    company_name = l_doc.get("company_name", "")
+    location_name = l_doc.get("name", "")
 
     doc = {
         "_id": room_id,
         "id": room_id,
         "location_id": location_id,
+        "location_name": location_name,
         "client_id": client_id,
+        "company_name": company_name,
         **room_in.model_dump(),
         "is_active": True,
         "created_at": now,
@@ -525,12 +511,24 @@ async def create_room(
     await db["rooms"].insert_one(doc)
     await db["locations"].update_one(
         {"$or": [{"_id": location_id}, {"id": location_id}]},
-        {"$inc": {"rooms_count": 1}}
+        {"$inc": {"rooms_count": 1, "number_of_rooms": 1}}
     )
 
-    return _format_room_response(doc)
+    return await _format_room_response(doc, db)
 
-@room_mgmt_router.get("/locations/{location_id}/rooms", response_model=RoomPaginatedResponse)
+@room_mgmt_router.get("/rooms/{room_id}", response_model=RoomResponse, summary="Get Full Room Details")
+async def get_room_details(
+    room_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    r_doc = await db["rooms"].find_one({"$or": [{"_id": room_id}, {"id": room_id}, {"room_id": room_id}]})
+    if not r_doc:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    return await _format_room_response(r_doc, db)
+
+@room_mgmt_router.get("/locations/{location_id}/rooms", response_model=RoomPaginatedResponse, include_in_schema=False, summary="List Rooms For Location")
 async def list_rooms_for_location(
     location_id: str,
     page: int = 1,
@@ -541,18 +539,23 @@ async def list_rooms_for_location(
     db = get_database()
     query = {"location_id": location_id}
     if search:
-        query["name"] = {"$regex": search, "$options": "i"}
+        query["$or"] = [
+            {"name": {"$regex": search, "$options": "i"}},
+            {"room_name": {"$regex": search, "$options": "i"}}
+        ]
 
     total_count = await db["rooms"].count_documents(query)
     skip = (page - 1) * limit
     cursor = db["rooms"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     raw_rooms = await cursor.to_list(length=limit)
 
+    room_items = [await _format_room_response(r, db) for r in raw_rooms]
+
     return RoomPaginatedResponse(
         total_count=total_count,
         page=page,
         limit=limit,
-        rooms=[_format_room_response(r) for r in raw_rooms]
+        rooms=room_items
     )
 
 @room_mgmt_router.patch("/rooms/{room_id}", response_model=RoomResponse, summary="Update Room")
@@ -562,13 +565,13 @@ async def update_room(
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    r_doc = await db["rooms"].find_one({"$or": [{"_id": room_id}, {"id": room_id}]})
+    r_doc = await db["rooms"].find_one({"$or": [{"_id": room_id}, {"id": room_id}, {"room_id": room_id}]})
     if not r_doc:
         raise HTTPException(status_code=404, detail="Room not found")
         
     update_data = room_in.model_dump(exclude_unset=True)
     if not update_data:
-        return _format_room_response(r_doc)
+        return await _format_room_response(r_doc, db)
         
     update_data["updated_at"] = datetime.now(timezone.utc)
     
@@ -578,8 +581,7 @@ async def update_room(
     )
     
     updated_doc = await db["rooms"].find_one({"_id": r_doc["_id"]})
-    return _format_room_response(updated_doc)
-
+    return await _format_room_response(updated_doc, db)
 
 @room_mgmt_router.delete("/rooms/{room_id}", status_code=status.HTTP_200_OK, summary="Delete Room")
 async def delete_room(
@@ -587,7 +589,7 @@ async def delete_room(
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    r_doc = await db["rooms"].find_one({"$or": [{"_id": room_id}, {"id": room_id}]})
+    r_doc = await db["rooms"].find_one({"$or": [{"_id": room_id}, {"id": room_id}, {"room_id": room_id}]})
     if not r_doc:
         raise HTTPException(status_code=404, detail="Room not found")
         
@@ -596,13 +598,12 @@ async def delete_room(
     if r_doc.get("location_id"):
         await db["locations"].update_one(
             {"$or": [{"_id": r_doc["location_id"]}, {"id": r_doc["location_id"]}]},
-            {"$inc": {"rooms_count": -1}}
+            {"$inc": {"rooms_count": -1, "number_of_rooms": -1}}
         )
     
     return {"message": "Room deleted successfully"}
 
-
-@room_mgmt_router.get("/dropdowns/rooms", response_model=RoomDropdownPaginatedResponse)
+@room_mgmt_router.get("/dropdowns/rooms", response_model=RoomDropdownPaginatedResponse, include_in_schema=False, summary="Get Room Dropdowns")
 async def get_room_dropdowns(
     location_id: Optional[str] = None,
     search: Optional[str] = None,
@@ -615,7 +616,10 @@ async def get_room_dropdowns(
     if location_id:
         query["location_id"] = location_id
     if search:
-        query["name"] = {"$regex": search, "$options": "i"}
+        query["$or"] = [
+            {"name": {"$regex": search, "$options": "i"}},
+            {"room_name": {"$regex": search, "$options": "i"}}
+        ]
 
     total_count = await db["rooms"].count_documents(query)
     skip = (page - 1) * limit
@@ -631,12 +635,12 @@ async def get_room_dropdowns(
 
         dropdowns.append(RoomDropdownItemResponse(
             room_id=rid,
-            room_name=r.get("name", ""),
+            room_name=r.get("room_name") or r.get("name", ""),
             location_id=lid,
             location_name=lname,
             floor=r.get("floor", 1),
-            cleaning_type=r.get("cleaning_type", "standard"),
-            duration=r.get("est_cleaning_duration_minutes", 30)
+            cleaning_type=r.get("clean_type") or r.get("cleaning_type", "standard"),
+            duration=r.get("duration") or r.get("est_cleaning_duration_minutes", 30)
         ))
 
     return RoomDropdownPaginatedResponse(

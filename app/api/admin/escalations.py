@@ -81,38 +81,8 @@ async def get_admin_escalations(
             created_at=c_dt
         ))
 
-    if not items and not search:
-        # Default mock items matching Image 1 mockup
-        now = datetime.now(timezone.utc)
-        mock_data = [
-            ("ESC-001", "Broken mirror in Room 305", "NH Hotel Amsterdam - Kamer 305", "A large bathroom mirror appears cracked. It is unclear whether it concerns existing damage.", "Lisa Visser", None, "open", "high"),
-            ("ESC-002", "Bathroom Water Leak - Room 701", "Hilton Rotterdam - Room 701", "Active water leak from the pipe under the sink. Water spreads to bedroom. Urgent maintenance required.", "Eva Smit", "Kaz Putters", "in_progress", "high"),
-            ("ESC-003", "Guest complained about missed areas", "NH Hotel Amsterdam - Kamer 203", "Guest from Room 203 reported that no cleaning had been done behind the bathroom door.", "Lisa Visser", "Jan de Vries", "in_progress", "medium"),
-            ("ESC-004", "Chemical spills on corridor floor", "UMC Utrecht - Floor 5 Corridor", "Cleaning agent accidentally spilled in the hallway. Area marked but requires clean cleaning and ventilation.", "Noah Bos", None, "open", "high"),
-            ("ESC-005", "Guest supplies not replenished", "Van der Valk Eindhoven - Storage", "Shampoo and conditioner not available in the storage room. Order must be placed.", "Sophie de Boer", "Marit Janssen", "resolved", "low")
-        ]
-        open_cnt, in_prog_cnt, res_cnt = 2, 2, 1
-        for e_code, title, sub, desc, rep_name, ass_name, st, sev in mock_data:
-            if status_filter and status_filter.lower() != "all" and st != status_filter.lower().replace(" ", "_"):
-                continue
-            assignee = EscalationAssigneeDetail(admin_id="adm_1", name=ass_name) if ass_name else None
-            items.append(EscalationItem(
-                escalation_id=e_code,
-                shift_id=f"shift_{e_code}",
-                title=title,
-                subtitle=sub,
-                description=desc,
-                severity=sev,
-                reporter=EscalationReporterDetail(worker_id=f"w_{e_code}", name=rep_name, profile_picture=None),
-                assigned_to=assignee,
-                status=st,
-                status_label=st.replace("_", " ").title(),
-                photo_url=f"/uploads/escalations/{e_code.lower()}.jpg",
-                created_at=now
-            ))
-
     return EscalationPaginatedResponse(
-        total_count=len(items),
+        total_count=total_count,
         open_count=open_cnt,
         in_progress_count=in_prog_cnt,
         resolved_count=res_cnt,
@@ -131,21 +101,7 @@ async def get_escalation_drawer_details(
     now = datetime.now(timezone.utc)
 
     if not e:
-        # Default mock detail matching Image 2 mockup
-        return EscalationDrawerResponse(
-            escalation_id=escalation_id,
-            shift_id="shift_esc001",
-            title="Broken mirror in Room 305",
-            subtitle="NH Hotel Amsterdam - Kamer 305",
-            description="A large bathroom mirror appears cracked. It is unclear whether it concerns existing damage.",
-            severity="high",
-            reporter=EscalationReporterDetail(worker_id="w_1", name="Lisa Visser", profile_picture=None),
-            assigned_to=EscalationAssigneeDetail(admin_id="adm_1", name="Kaz Putters"),
-            status="open",
-            photo_url="/uploads/escalations/esc-001.jpg",
-            created_at=now,
-            notes="Maintenance team requested on site."
-        )
+        raise HTTPException(status_code=404, detail="Escalation not found")
 
     rep_d = e.get("reporter", {})
     ass_d = e.get("assigned_to")

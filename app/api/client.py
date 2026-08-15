@@ -333,15 +333,15 @@ async def get_client_overview(
         "status": {"$ne": "cancelled"}
     }, sort=[("date", 1), ("start_time", 1)])
 
-    next_time_str = "Tomorrow, 09:00"
-    team_name = "Team Alpha"
-    spec_count = 3
-    team_avatars = ["LV", "ES", "NB"]
+    next_time_str = "No upcoming visits scheduled"
+    team_name = ""
+    spec_count = 0
+    team_avatars = []
 
     if upcoming_shift:
         u_date = upcoming_shift.get("date", "")
-        u_time = upcoming_shift.get("start_time", "09:00")
-        next_time_str = f"{u_date}, {u_time}"
+        u_time = upcoming_shift.get("start_time", "")
+        next_time_str = f"{u_date}, {u_time}".strip(", ")
         w_list = upcoming_shift.get("workers", [])
         if w_list:
             spec_count = len(w_list)
@@ -350,26 +350,28 @@ async def get_client_overview(
                 w_n = w.get("name", "Worker")
                 initials = "".join([part[0] for part in w_n.split() if part]).upper()
                 team_avatars.append(initials or "W")
+            w0 = w_list[0]
+            team_name = w0.get("team_name") or w0.get("worker_type") or "Team"
 
     last_shift = await db["shifts"].find_one({
         "client_id": client_id,
         "status": "completed"
     }, sort=[("date", -1)])
 
-    last_worked_str = "7h 18m worked"
-    last_sub_text = "Thursday • note available"
+    last_worked_str = "0h 00m worked"
+    last_sub_text = "No completed visits yet"
     if last_shift:
-        last_date = last_shift.get("date", "Thursday")
-        last_sub_text = f"{last_date} • note available"
+        last_date = last_shift.get("date", "")
+        last_sub_text = f"{last_date} • completed"
         try:
             st = datetime.strptime(last_shift.get("start_time", "08:00"), "%H:%M")
-            et = datetime.strptime(last_shift.get("end_time", "15:30"), "%H:%M")
+            et = datetime.strptime(last_shift.get("end_time", "16:00"), "%H:%M")
             l_dur = round((et - st).total_seconds() / 3600.0, 2)
             lh = int(l_dur)
             lm = int(round((l_dur - lh) * 60))
             last_worked_str = f"{lh}h {lm:02d}m worked"
         except Exception:
-            last_worked_str = "7h 18m worked"
+            last_worked_str = "0h 00m worked"
 
     quick_actions = [
         QuickActionItem(id="act_1", title="Request a service", subtitle="Describe what you need", action_type="request_extra_service"),
@@ -391,7 +393,7 @@ async def get_client_overview(
             status_badge=status_badge,
             location_name=loc_name,
             service_time_slot=time_slot,
-            tracking_note="Room progress is available because this location uses hotel-style room tracking."
+            tracking_note="Room progress is available because this location uses room tracking."
         ),
         metrics_grid=MetricsGrid(
             next_visit=NextVisitCard(
@@ -400,8 +402,8 @@ async def get_client_overview(
                 specialists_count=spec_count
             ),
             on_site_now=OnSiteNowCard(
-                specialists_count=len(active_workers) if active_workers else 2,
-                sub_text=f"{len(active_workers)} specialists active" if active_workers else "Both currently active"
+                specialists_count=len(active_workers),
+                sub_text=f"{len(active_workers)} specialists active" if active_workers else "No specialists on site"
             ),
             last_completed=LastCompletedCard(
                 worked_str=last_worked_str,
@@ -409,7 +411,7 @@ async def get_client_overview(
             )
         ),
         live_status=LiveStatusSection(
-            active_count=len(active_workers) if active_workers else 2,
+            active_count=len(active_workers),
             specialists=active_workers
         ),
         quick_actions=quick_actions,
@@ -418,6 +420,6 @@ async def get_client_overview(
             team_name=team_name,
             specialists_count=spec_count,
             team_avatars=team_avatars,
-            description=f"Regular cleaning • approximately {tot_hours if tot_hours > 0 else 7.5} hours"
+            description=f"Service scheduled • approximately {tot_hours} hours" if tot_hours > 0 else "No scheduled visits"
         )
     )

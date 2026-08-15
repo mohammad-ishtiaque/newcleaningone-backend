@@ -41,18 +41,47 @@ async def get_global_rooms_grid(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
+    room_id: Optional[str] = None,
     location_id: Optional[str] = None,
+    client_id: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {}
+    
+    if room_id:
+        query["$or"] = [{"_id": room_id}, {"id": room_id}, {"room_id": room_id}]
+
     if location_id:
         query["location_id"] = location_id
+
+    if client_id:
+        loc_docs = await db["locations"].find({"client_id": client_id}).to_list(length=1000)
+        loc_ids = [str(l.get("_id") or l.get("id")) for l in loc_docs]
+        if "location_id" in query:
+            pass
+        elif loc_ids:
+            if "$or" in query:
+                existing_or = query.pop("$or")
+                query["$and"] = [{"$or": existing_or}, {"$or": [{"client_id": client_id}, {"location_id": {"$in": loc_ids}}]}]
+            else:
+                query["$or"] = [{"client_id": client_id}, {"location_id": {"$in": loc_ids}}]
+        else:
+            query["client_id"] = client_id
+
     if search:
-        query["$or"] = [
+        search_filter = [
             {"name": {"$regex": search, "$options": "i"}},
+            {"room_name": {"$regex": search, "$options": "i"}},
             {"room_type": {"$regex": search, "$options": "i"}}
         ]
+        if "$and" in query:
+            query["$and"].append({"$or": search_filter})
+        elif "$or" in query:
+            existing_or = query.pop("$or")
+            query["$and"] = [{"$or": existing_or}, {"$or": search_filter}]
+        else:
+            query["$or"] = search_filter
 
     total_count = await db["rooms"].count_documents(query)
     skip = (page - 1) * limit
@@ -61,58 +90,52 @@ async def get_global_rooms_grid(
 
     items = []
     for r in raw_rooms:
-        rid = str(r.get("_id") or r.get("id"))
-        rname = r.get("name", "Room")
-        rtype = r.get("room_type") or r.get("type") or "Standard"
+        rid = str(r.get("_id") or r.get("id") or r.get("room_id"))
+        rname = r.get("room_name") or r.get("name") or "Room"
+        rtype = r.get("room_type") or r.get("type") or "standard"
         lid = r.get("location_id", "")
-        ldoc = await db["locations"].find_one({"$or": [{"_id": lid}, {"id": lid}]}) if lid else None
-        lname = ldoc.get("name", "Location Name") if ldoc else r.get("location_name", "NH Hotel Amsterdam Centrum")
+        lname = r.get("location_name", "")
+        cid = r.get("client_id", "")
+        cname = r.get("company_name", "")
 
-        fl = r.get("floor", 1)
-        dur = r.get("est_cleaning_duration_minutes", 45)
-        req_p = len(r.get("required_photos", [])) or r.get("required_photos_count", 4)
-        t_cnt = len(r.get("tasks", [])) or r.get("tasks_count", 12)
-        cp_name = r.get("cleaning_plan_name", "Standard Clean")
+        if lid and (not lname or not cid or not cname):
+            ldoc = await db["locations"].find_one({"$or": [{"_id": lid}, {"id": lid}]})
+            if ldoc:
+                if not lname:
+                    lname = ldoc.get("name", "")
+                if not cid:
+                    cid = ldoc.get("client_id", "")
+                if not cname:
+                    cname = ldoc.get("company_name", "")
+
+        if cid and not cname:
+            cdoc = await db["client_list"].find_one({"$or": [{"_id": cid}, {"id": cid}]})
+            if cdoc:
+                cname = cdoc.get("company_name", "")
+
+        freq = r.get("monthly_cleaning_frequency", 4)
+        req_p = len(r.get("required_photos", [])) if r.get("required_photos") else (r.get("photo_number") or r.get("required_photos_count", 0))
+        t_cnt = len(r.get("tasks", [])) if r.get("tasks") else (r.get("task_number") or r.get("tasks_count", 0))
+        ctype = r.get("clean_type") or r.get("cleaning_type") or "standard"
+        u_at = r.get("updated_at") if isinstance(r.get("updated_at"), datetime) else (r.get("created_at") if isinstance(r.get("created_at"), datetime) else datetime.now(timezone.utc))
 
         items.append(AdminRoomGridItem(
             room_id=rid,
             room_name=rname,
             room_type=rtype,
+            client_id=cid,
+            company_name=cname or "Client Company",
             location_id=lid,
-            location_name=lname,
-            floor_label=f"Verdieping {fl}",
-            duration_minutes=dur,
-            required_photos_count=req_p,
-            tasks_count=t_cnt,
-            cleaning_plan_name=cp_name
+            location_name=lname or "Location Name",
+            monthly_cleaning_frequency=freq,
+            photo_number=req_p,
+            task_number=t_cnt,
+            clean_type=ctype,
+            updated_at=u_at
         ))
 
-    if not items:
-        # Default mock items matching Image 2 mockup
-        mock_data = [
-            ("Kamer 201", "Standard", "NH Hotel Amsterdam Centrum", 2, 45, 4, 12, "Standard Clean"),
-            ("Kamer 202", "Deluxe", "NH Hotel Amsterdam Centrum", 2, 60, 6, 15, "Deluxe Clean"),
-            ("Suite 701", "Suite", "Hilton Rotterdam", 7, 90, 8, 20, "Suite Deep Clean"),
-            ("Kamer 105", "Standard", "NH Hotel Groningen", 1, 45, 4, 12, "Standard Clean"),
-            ("Junior Suite 1204", "Junior Suite", "Van der Valk Eindhoven", 12, 75, 7, 18, "Junior Suite Clean"),
-            ("Kamer 301", "Standard", "Zorg & Schoon - UMC Utrecht", 3, 45, 4, 12, "Standard Clean")
-        ]
-        for i, (rn, rt, ln, fl, dur, p_c, t_c, cp_n) in enumerate(mock_data):
-            items.append(AdminRoomGridItem(
-                room_id=f"rm_grid_{i+1}",
-                room_name=rn,
-                room_type=rt,
-                location_id=f"loc_{i+1}",
-                location_name=ln,
-                floor_label=f"Verdieping {fl}",
-                duration_minutes=dur,
-                required_photos_count=p_c,
-                tasks_count=t_c,
-                cleaning_plan_name=cp_n
-            ))
-
     return AdminRoomGridPaginatedResponse(
-        total_count=len(items),
+        total_count=total_count,
         page=page,
         limit=limit,
         rooms=items
@@ -127,6 +150,7 @@ async def create_admin_room(
     l_doc = await db["locations"].find_one({"$or": [{"_id": room_in.location_id}, {"id": room_in.location_id}]})
     lname = l_doc.get("name", "Location") if l_doc else "NH Hotel Amsterdam Centrum"
     cid = l_doc.get("client_id", "") if l_doc else ""
+    cname = l_doc.get("company_name", "") if l_doc else ""
 
     now = datetime.now(timezone.utc)
     room_id = f"room_{uuid.uuid4().hex[:10]}"
@@ -135,14 +159,19 @@ async def create_admin_room(
         "_id": room_id,
         "id": room_id,
         "location_id": room_in.location_id,
+        "location_name": lname,
         "client_id": cid,
+        "company_name": cname,
         "name": room_in.name,
+        "room_name": room_in.name,
         "room_type": room_in.room_type,
         "floor": room_in.floor,
         "est_cleaning_duration_minutes": room_in.est_cleaning_duration_minutes,
+        "monthly_cleaning_frequency": room_in.monthly_cleaning_frequency,
         "required_photos_count": room_in.required_photos_count,
         "tasks_count": room_in.tasks_count,
         "cleaning_plan_name": room_in.cleaning_plan_name or "Standard Clean",
+        "clean_type": room_in.cleaning_plan_name or "standard",
         "is_active": True,
         "created_at": now,
         "updated_at": now
@@ -152,20 +181,22 @@ async def create_admin_room(
     if l_doc:
         await db["locations"].update_one(
             {"$or": [{"_id": room_in.location_id}, {"id": room_in.location_id}]},
-            {"$inc": {"rooms_count": 1}}
+            {"$inc": {"rooms_count": 1, "number_of_rooms": 1}}
         )
 
     return AdminRoomGridItem(
         room_id=room_id,
         room_name=room_in.name,
         room_type=room_in.room_type,
+        client_id=cid,
+        company_name=cname or "Client Company",
         location_id=room_in.location_id,
         location_name=lname,
-        floor_label=f"Verdieping {room_in.floor}",
-        duration_minutes=room_in.est_cleaning_duration_minutes,
-        required_photos_count=room_in.required_photos_count,
-        tasks_count=room_in.tasks_count,
-        cleaning_plan_name=room_in.cleaning_plan_name or "Standard Clean"
+        monthly_cleaning_frequency=room_in.monthly_cleaning_frequency,
+        photo_number=room_in.required_photos_count,
+        task_number=room_in.tasks_count,
+        clean_type=room_in.cleaning_plan_name or "standard",
+        updated_at=now
     )
 
 @rooms_global_router.get("/rooms/{room_id}/drawer", response_model=RoomDrawerDetailResponse, summary="Room Details Drawer API (Image 3)", include_in_schema=False)

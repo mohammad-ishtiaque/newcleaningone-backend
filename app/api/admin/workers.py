@@ -7,6 +7,7 @@ from app.core.database import get_database
 from app.security.password import get_password_hash
 from app.schemas.user import (
     WorkerApprovalUpdate, WorkerApprovalResponse, WorkerApprovalPaginatedResponse,
+    WorkerApproveRequest, WorkerRejectRequest,
     WorkerListItem, WorkerListPaginatedResponse,
     AdminWorkerCreate, AdminWorkerStatusUpdate, AdminWorkerTableItem, AdminWorkerTablePaginatedResponse,
     WorkerBulkImportResult
@@ -17,11 +18,16 @@ from app.api.admin.worker_csv_utils import generate_csv_template, parse_and_vali
 
 worker_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Worker Management"])
 
-# ================================
-# 1. Admin Workers Overview Table & Stats (Image 1)
-# ================================
 
-@worker_mgmt_router.get("/workers", response_model=AdminWorkerTablePaginatedResponse, summary="Get Admin Workers Management Overview Table (Image 1)")
+# ============================================================================
+# 1. Admin Workers Overview Table & Stats (Image 1)
+# ============================================================================
+
+@worker_mgmt_router.get(
+    "/workers",
+    response_model=AdminWorkerTablePaginatedResponse,
+    summary="Get Admin Workers Management Overview Table (Image 1)"
+)
 async def get_admin_workers_table(
     page: int = 1,
     limit: int = 10,
@@ -31,7 +37,7 @@ async def get_admin_workers_table(
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"role": "worker"}
+    query = {"role": "worker", "account_status": {"$ne": "deleted"}}
 
     # Worker type filter
     if worker_type and worker_type.lower() != "all":
@@ -39,17 +45,21 @@ async def get_admin_workers_table(
 
     # Search filter
     if search:
-        query["$or"] = [
+        search_filter = [
             {"full_name": {"$regex": search, "$options": "i"}},
             {"position": {"$regex": search, "$options": "i"}},
             {"location": {"$regex": search, "$options": "i"}},
             {"email": {"$regex": search, "$options": "i"}}
         ]
+        if "$or" in query:
+            query = {"$and": [query, {"$or": search_filter}]}
+        else:
+            query["$or"] = search_filter
 
     # Overall Summary Counters
-    total_workers_cnt = await db["users"].count_documents({"role": "worker"})
-    employees_cnt = await db["users"].count_documents({"role": "worker", "worker_type": "employee"})
-    freelancers_cnt = await db["users"].count_documents({"role": "worker", "worker_type": "freelancer"})
+    total_workers_cnt = await db["users"].count_documents({"role": "worker", "account_status": {"$ne": "deleted"}})
+    employees_cnt = await db["users"].count_documents({"role": "worker", "worker_type": "employee", "account_status": {"$ne": "deleted"}})
+    freelancers_cnt = await db["users"].count_documents({"role": "worker", "worker_type": "freelancer", "account_status": {"$ne": "deleted"}})
 
     # Fetch currently active shifts for On Shift status
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -128,11 +138,17 @@ async def get_admin_workers_table(
         workers=paginated_workers
     )
 
-# ================================
-# 2. Add New Worker (Image 2 Modal)
-# ================================
 
-@worker_mgmt_router.post("/workers", response_model=AdminWorkerTableItem, status_code=status.HTTP_201_CREATED, summary="Add New Worker (Image 2 Modal)")
+# ============================================================================
+# 2. Add New Worker (Image 2 Modal)
+# ============================================================================
+
+@worker_mgmt_router.post(
+    "/workers",
+    response_model=AdminWorkerTableItem,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add New Worker (Image 2 Modal)"
+)
 async def create_new_worker(
     worker_in: AdminWorkerCreate,
     current_user: UserInDB = Depends(require_manager)
@@ -203,11 +219,15 @@ async def create_new_worker(
         is_active=worker_in.status.lower() == "active"
     )
 
-# ================================
-# 3. Suspend / Ban / Activate Worker
-# ================================
 
-@worker_mgmt_router.patch("/workers/{worker_id}/status", summary="Ban, Suspend, or Activate Worker")
+# ============================================================================
+# 3. Worker Status, Soft Delete & Restore Lifecycle
+# ============================================================================
+
+@worker_mgmt_router.patch(
+    "/workers/{worker_id}/status",
+    summary="Ban, Suspend, or Activate Worker"
+)
 async def update_worker_status(
     worker_id: str,
     status_in: AdminWorkerStatusUpdate,
@@ -233,11 +253,144 @@ async def update_worker_status(
     await db["users"].update_one(query, {"$set": update_fields})
     return {"message": f"Worker account status updated to '{new_st}' successfully"}
 
-# ================================
-# 4. Bulk CSV Import Template & Upload (Image 3)
-# ================================
 
-@worker_mgmt_router.get("/workers/bulk-import/template", summary="Download CSV Bulk Import Template (Image 3)")
+@worker_mgmt_router.delete(
+    "/workers/{worker_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Delete Worker"
+)
+async def delete_worker(
+    worker_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"$or": [{"_id": worker_id}, {"id": worker_id}]}
+    wdoc = await db["users"].find_one({"$and": [query, {"role": "worker"}]})
+    if not wdoc:
+        raise HTTPException(status_code=404, detail="Worker not found")
+
+    now = datetime.now(timezone.utc)
+    await db["users"].update_one(
+        {"_id": wdoc["_id"]},
+        {"$set": {
+            "account_status": "deleted",
+            "status": "deleted",
+            "is_active": False,
+            "updated_at": now
+        }}
+    )
+    email = wdoc.get("email")
+    if email:
+        await db["admin_workers"].update_one(
+            {"email": email},
+            {"$set": {"status": "deleted", "is_active": False, "updated_at": now}}
+        )
+
+    return {"message": "Worker deleted successfully"}
+
+
+@worker_mgmt_router.get(
+    "/workers/deleted-list",
+    response_model=AdminWorkerTablePaginatedResponse,
+    summary="List Deleted Workers"
+)
+async def list_deleted_workers(
+    page: int = 1,
+    limit: int = 10,
+    search: Optional[str] = None,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"role": "worker", "account_status": "deleted"}
+    if search:
+        search_filter = [
+            {"full_name": {"$regex": search, "$options": "i"}},
+            {"position": {"$regex": search, "$options": "i"}},
+            {"location": {"$regex": search, "$options": "i"}},
+            {"email": {"$regex": search, "$options": "i"}}
+        ]
+        query["$or"] = search_filter
+
+    total_count = await db["users"].count_documents(query)
+    skip = (page - 1) * limit
+    cursor = db["users"].find(query).sort("updated_at", -1).skip(skip).limit(limit)
+    raw_workers = await cursor.to_list(length=limit)
+
+    formatted_workers = []
+    for w in raw_workers:
+        wid = str(w.get("_id"))
+        langs = w.get("languages") or ["Nederlands", "English"]
+        loc = w.get("location") or w.get("base_location") or "Amsterdam-Centrum"
+
+        formatted_workers.append(AdminWorkerTableItem(
+            worker_id=wid,
+            full_name=w.get("full_name") or "Worker",
+            profile_photo=w.get("profile_photo"),
+            worker_type=str(w.get("worker_type") or "employee").capitalize(),
+            position=w.get("position") or "Cleaner",
+            location=loc,
+            languages=langs,
+            hours_worked="0h",
+            hours_worked_numeric=0.0,
+            status="Deleted",
+            account_status="deleted",
+            approval_status=w.get("approval_status") or "approved",
+            is_active=False
+        ))
+
+    return AdminWorkerTablePaginatedResponse(
+        total_workers=total_count,
+        employees_count=0,
+        freelancers_count=0,
+        page=page,
+        limit=limit,
+        workers=formatted_workers
+    )
+
+
+@worker_mgmt_router.post(
+    "/workers/{worker_id}/restore",
+    status_code=status.HTTP_200_OK,
+    summary="Restore Deleted Worker"
+)
+async def restore_worker(
+    worker_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"$or": [{"_id": worker_id}, {"id": worker_id}]}
+    wdoc = await db["users"].find_one({"$and": [query, {"role": "worker"}, {"account_status": "deleted"}]})
+    if not wdoc:
+        raise HTTPException(status_code=404, detail="Deleted worker not found")
+
+    now = datetime.now(timezone.utc)
+    await db["users"].update_one(
+        {"_id": wdoc["_id"]},
+        {"$set": {
+            "account_status": "active",
+            "status": "active",
+            "is_active": True,
+            "updated_at": now
+        }}
+    )
+    email = wdoc.get("email")
+    if email:
+        await db["admin_workers"].update_one(
+            {"email": email},
+            {"$set": {"status": "active", "is_active": True, "updated_at": now}}
+        )
+
+    return {"message": "Worker restored successfully"}
+
+
+# ============================================================================
+# 4. Bulk CSV Import Template & Upload (Image 3)
+# ============================================================================
+
+@worker_mgmt_router.get(
+    "/workers/bulk-import/template",
+    summary="Download CSV Bulk Import Template (Image 3)"
+)
 async def download_worker_import_template(
     current_user: UserInDB = Depends(require_manager)
 ):
@@ -248,7 +401,12 @@ async def download_worker_import_template(
         headers={"Content-Disposition": "attachment; filename=import_workers_template.csv"}
     )
 
-@worker_mgmt_router.post("/workers/bulk-import", response_model=WorkerBulkImportResult, summary="Validate & Bulk Import CSV Worker Data (Image 3 Modal)")
+
+@worker_mgmt_router.post(
+    "/workers/bulk-import",
+    response_model=WorkerBulkImportResult,
+    summary="Validate & Bulk Import CSV Worker Data (Image 3 Modal)"
+)
 async def bulk_import_workers_csv(
     file: UploadFile = File(...),
     current_user: UserInDB = Depends(require_manager)
@@ -261,17 +419,21 @@ async def bulk_import_workers_csv(
     result = await parse_and_validate_worker_csv(file_bytes, db)
     return result
 
-# ================================
-# 5. Worker CSV Export
-# ================================
 
-@worker_mgmt_router.get("/workers/export", summary="Export Workers Data to CSV")
+# ============================================================================
+# 5. Worker CSV Export
+# ============================================================================
+
+@worker_mgmt_router.get(
+    "/workers/export",
+    summary="Export Workers Data to CSV"
+)
 async def export_workers_csv(
     worker_type: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"role": "worker"}
+    query = {"role": "worker", "account_status": {"$ne": "deleted"}}
     if worker_type and worker_type.lower() != "all":
         query["worker_type"] = worker_type.lower()
 
@@ -284,11 +446,16 @@ async def export_workers_csv(
         headers={"Content-Disposition": "attachment; filename=workers_export.csv"}
     )
 
-# ================================
-# 6. Existing Approval & Worker Listing Endpoints
-# ================================
 
-@worker_mgmt_router.get("/worker-approvals", response_model=WorkerApprovalPaginatedResponse, summary="List Pending Worker Approvals")
+# ============================================================================
+# 6. Worker Approvals & Available Worker Listings
+# ============================================================================
+
+@worker_mgmt_router.get(
+    "/worker-approvals",
+    response_model=WorkerApprovalPaginatedResponse,
+    summary="List Pending Worker Approvals"
+)
 async def list_pending_worker_approvals(
     page: int = 1,
     limit: int = 10,
@@ -339,7 +506,187 @@ async def list_pending_worker_approvals(
         pending_approvals=approvals
     )
 
-@worker_mgmt_router.patch("/workers/{worker_id}/approval", response_model=WorkerApprovalResponse, summary="Update Worker Approval Status")
+
+@worker_mgmt_router.post(
+    "/workers/{worker_id}/approve",
+    response_model=WorkerApprovalResponse,
+    summary="Approve Worker Signup"
+)
+async def approve_worker_signup(
+    worker_id: str,
+    approve_in: Optional[WorkerApproveRequest] = None,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"$or": [{"_id": worker_id}, {"id": worker_id}]}
+    user = await db["users"].find_one({"$and": [query, {"role": "worker"}]})
+    if not user:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    if user.get("approval_status") == "approved":
+        raise HTTPException(status_code=400, detail="Worker is already approved")
+
+    now = datetime.now(timezone.utc)
+    w_type = approve_in.worker_type if approve_in and approve_in.worker_type else (user.get("worker_type") or "employee")
+    w_pos = approve_in.position if approve_in and approve_in.position else (user.get("position") or "Cleaner")
+    w_loc = approve_in.base_location if approve_in and approve_in.base_location else (user.get("base_location") or "Amsterdam-Centrum")
+
+    update_fields = {
+        "is_approved": True,
+        "approval_status": "approved",
+        "is_active": True,
+        "account_status": "active",
+        "worker_type": w_type,
+        "position": w_pos,
+        "base_location": w_loc,
+        "location": w_loc,
+        "updated_at": now
+    }
+
+    await db["users"].update_one({"_id": user["_id"]}, {"$set": update_fields})
+    updated = await db["users"].find_one({"_id": user["_id"]})
+
+    # Sync into admin_workers collection
+    await db["admin_workers"].update_one(
+        {"email": user.get("email")},
+        {"$set": {
+            "name": user.get("full_name"),
+            "email": user.get("email"),
+            "phone": user.get("phone"),
+            "worker_type": w_type,
+            "position": w_pos,
+            "base_location": w_loc,
+            "status": "active",
+            "is_active": True,
+            "updated_at": now
+        }},
+        upsert=True
+    )
+
+    # Log to worker approval history
+    await db["worker_approval_history"].insert_one({
+        "worker_id": str(user["_id"]),
+        "worker_name": user.get("full_name", ""),
+        "worker_email": user.get("email", ""),
+        "action": "approved",
+        "manager_id": str(current_user.id) if getattr(current_user, "id", None) else "unknown",
+        "manager_name": current_user.full_name,
+        "created_at": now
+    })
+
+    from app.services.notification_service import NotificationService
+    from app.api.chat import ws_manager
+
+    notif_service = NotificationService()
+    player_id = user.get("onesignal_player_id")
+    player_ids = [player_id] if player_id else None
+
+    await notif_service.create_notification(
+        title="Account Approved",
+        message="Your worker account has been approved by the admin. You can now login.",
+        notification_type="account_approved",
+        recipient_type="worker",
+        user_id=str(user["_id"]),
+        player_ids=player_ids
+    )
+
+    await ws_manager.broadcast_to_users({
+        "type": "account_approved",
+        "message": "Your worker account has been approved."
+    }, [str(user["_id"])])
+
+    cat = updated.get("created_at") if isinstance(updated.get("created_at"), datetime) else datetime.now(timezone.utc)
+    uat = updated.get("updated_at") if isinstance(updated.get("updated_at"), datetime) else datetime.now(timezone.utc)
+
+    return WorkerApprovalResponse(
+        id=str(updated["_id"]),
+        full_name=updated.get("full_name", ""),
+        email=updated.get("email", ""),
+        phone=updated.get("phone"),
+        worker_type=str(updated.get("worker_type", "employee")),
+        approval_status="approved",
+        is_approved=True,
+        rejection_reason=None,
+        created_at=cat,
+        updated_at=uat
+    )
+
+
+@worker_mgmt_router.post(
+    "/workers/{worker_id}/reject",
+    status_code=status.HTTP_200_OK,
+    summary="Reject Worker Signup"
+)
+async def reject_worker_signup(
+    worker_id: str,
+    reject_in: Optional[WorkerRejectRequest] = None,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"$or": [{"_id": worker_id}, {"id": worker_id}]}
+    user = await db["users"].find_one({"$and": [query, {"role": "worker"}]})
+    if not user:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    if user.get("approval_status") != "pending":
+        raise HTTPException(status_code=400, detail="Worker is not pending approval")
+
+    now = datetime.now(timezone.utc)
+    reason_txt = reject_in.reject_reason if reject_in else None
+
+    await db["users"].update_one(
+        {"_id": user["_id"]},
+        {"$set": {
+            "is_approved": False,
+            "approval_status": "rejected",
+            "account_status": "rejected",
+            "is_active": False,
+            "rejection_reason": reason_txt,
+            "updated_at": now
+        }}
+    )
+
+    await db["worker_approval_history"].insert_one({
+        "worker_id": str(user["_id"]),
+        "worker_name": user.get("full_name", ""),
+        "worker_email": user.get("email", ""),
+        "action": "rejected",
+        "manager_id": str(current_user.id) if getattr(current_user, "id", None) else "unknown",
+        "manager_name": current_user.full_name,
+        "reject_reason": reason_txt,
+        "created_at": now
+    })
+
+    from app.services.notification_service import NotificationService
+    from app.api.chat import ws_manager
+
+    notif_service = NotificationService()
+    player_id = user.get("onesignal_player_id")
+    player_ids = [player_id] if player_id else None
+
+    reject_msg = f"Your worker account has been rejected. Reason: {reason_txt}" if reason_txt else "Your worker account has been rejected."
+
+    await notif_service.create_notification(
+        title="Account Rejected",
+        message=reject_msg,
+        notification_type="account_rejected",
+        recipient_type="worker",
+        user_id=str(user["_id"]),
+        player_ids=player_ids
+    )
+
+    await ws_manager.broadcast_to_users({
+        "type": "account_rejected",
+        "message": reject_msg
+    }, [str(user["_id"])])
+
+    return {"message": "Worker signup rejected successfully"}
+
+
+@worker_mgmt_router.patch(
+    "/workers/{worker_id}/approval",
+    response_model=WorkerApprovalResponse,
+    include_in_schema=False,
+    summary="Update Worker Approval Status"
+)
 async def update_worker_approval_status(
     worker_id: str,
     approval_in: WorkerApprovalUpdate,
@@ -380,7 +727,12 @@ async def update_worker_approval_status(
         updated_at=uat
     )
 
-@worker_mgmt_router.get("/workers-list", response_model=WorkerListPaginatedResponse, summary="List Available Workers")
+
+@worker_mgmt_router.get(
+    "/workers-list",
+    response_model=WorkerListPaginatedResponse,
+    summary="List Available Workers"
+)
 async def list_available_workers(
     page: int = 1,
     limit: int = 20,
@@ -388,7 +740,7 @@ async def list_available_workers(
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"role": "worker", "is_active": True}
+    query = {"role": "worker", "is_active": True, "account_status": {"$ne": "deleted"}}
 
     if search:
         query["$or"] = [

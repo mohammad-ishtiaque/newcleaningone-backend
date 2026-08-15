@@ -67,12 +67,6 @@ async def get_client_schedule(
     }
     upcoming_total = await db["shifts"].count_documents(upcoming_query)
 
-    # Fallback to realistic totals matching Image mockup if MongoDB shifts count is sparse
-    if this_month_total == 0:
-        this_month_total = 8
-        completed_total = 2
-        upcoming_total = 6
-
     summary = ScheduleSummaryCounters(
         this_month_visits=this_month_total,
         completed_visits=completed_total,
@@ -167,35 +161,9 @@ async def get_client_schedule(
             date_raw=d_str
         ))
 
-    if not visits_res and (not status_val or status_val.lower() == "all"):
-        # Real mock list matching Image mockup if database shifts array is sparse
-        mock_data = [
-            ("visit_1", "JULY", "1", "Tuesday, July 1, 2026", "08:55 AM - 12:00 PM", "Team Alpha", "Regular Cleaning", "In Progress", "2026-07-01"),
-            ("visit_2", "JULY", "3", "Thursday, July 3, 2026", "09:00 AM - 12:30 PM", "Team Alpha", "Regular Cleaning", "Scheduled", "2026-07-03"),
-            ("visit_3", "JULY", "7", "Monday, July 7, 2026", "08:00 AM - 11:00 AM", "Team Beta", "Deep Cleaning", "Scheduled", "2026-07-07"),
-            ("visit_4", "JULY", "10", "Thursday, July 10, 2026", "09:00 AM - 12:30 PM", "Team Alpha", "Regular Cleaning", "Scheduled", "2026-07-10"),
-            ("visit_5", "JULY", "14", "Monday, July 14, 2026", "08:00 AM - 01:00 PM", "Team Gamma", "Window Cleaning", "Scheduled", "2026-07-14")
-        ]
-        for vid, b_m, b_d, f_dt, t_int, team, s_type, st_disp, d_raw in mock_data:
-            if status_val and status_val.lower() != "all" and st_disp.lower() != status_val.lower().replace("_", " "):
-                continue
-            visits_res.append(ClientCleaningVisitItem(
-                id=vid,
-                date_badge_month=b_m,
-                date_badge_day=b_d,
-                formatted_date=f_dt,
-                time_interval=t_int,
-                assigned_team=team,
-                service_type=s_type,
-                status=st_disp,
-                location_name="Floor 3 - Main Office",
-                location_id="loc_floor3",
-                date_raw=d_raw
-            ))
-
     return ClientScheduleResponse(
         summary=summary,
-        total_count=len(visits_res),
+        total_count=total_count,
         page=page,
         limit=limit,
         visits=visits_res
