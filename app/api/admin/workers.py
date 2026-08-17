@@ -16,7 +16,7 @@ from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
 from app.api.admin.worker_csv_utils import generate_csv_template, parse_and_validate_worker_csv, export_workers_to_csv
 
-worker_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Worker Management"])
+worker_mgmt_router = APIRouter(prefix="/manager", tags=["Manager Worker Management"])
 
 
 # ============================================================================

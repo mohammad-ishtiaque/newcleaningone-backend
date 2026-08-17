@@ -15,7 +15,7 @@ from app.repositories.user_repo import UserRepository
 from app.security.password import get_password_hash
 from app.api.admin.profile_company import require_manager
 
-router = APIRouter(prefix="/manager", tags=["Admin Overview & User Management"])
+router = APIRouter(prefix="/manager", tags=["Manager Overview & User Management"])
 
 def get_user_service(user_repo: UserRepository = Depends(UserRepository)) -> UserService:
     return UserService(user_repo)

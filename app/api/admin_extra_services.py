@@ -12,7 +12,7 @@ from app.schemas.extra_services import (
     ExtraServiceResponse, ExtraServicePaginatedResponse
 )
 
-router = APIRouter(prefix="/manager/extra-services", tags=["Admin Extra Service Management"])
+router = APIRouter(prefix="/manager/extra-services", tags=["Manager Extra Service Management"])
 
 
 def require_manager(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:

@@ -176,13 +176,26 @@ class ClientOverviewResponse(BaseModel):
 
 # --- Client List Base ---
 class ClientListCreate(BaseModel):
-    company_name: str = Field(..., json_schema_extra={"example": "Betopia Group"})
-    industry: str = Field(..., json_schema_extra={"example": "Cleaning Services"})
-    primary_contact_name: str = Field(..., json_schema_extra={"example": "Mahfuz Alam"})
-    email: EmailStr = Field(..., json_schema_extra={"example": "c1@yopmail.com"})
-    phone: str = Field(..., json_schema_extra={"example": "+8801318532935"})
-    status: Optional[str] = Field(default="pending", json_schema_extra={"example": "pending"})
+    company_name: str = Field(..., json_schema_extra={"example": "Prince Group"})
+    industry: str = Field(..., json_schema_extra={"example": "Polytechnic Institute"})
+    primary_contact_name: str = Field(..., json_schema_extra={"example": "Nasir Alam"})
+    email: EmailStr = Field(..., json_schema_extra={"example": "c3@yopmail.com"})
+    phone: str = Field(..., json_schema_extra={"example": "+8801318531875"})
     license_expiration_date: Optional[str] = Field(default=None, json_schema_extra={"example": "2026-08-23"})
+    status: Optional[str] = Field(default="pending", json_schema_extra={"example": "pending"})
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "company_name": "Prince Group",
+                "industry": "Polytechnic Institute",
+                "primary_contact_name": "Nasir Alam",
+                "email": "c3@yopmail.com",
+                "phone": "+8801318531875",
+                "license_expiration_date": "2026-08-23"
+            }
+        }
+    }
 
 class ClientListUpdate(BaseModel):
     company_name: Optional[str] = Field(default=None, json_schema_extra={"example": "Betopia Group"})
@@ -234,6 +247,7 @@ class ClientGridDropdownItem(BaseModel):
     id: str
     primary_contact_name: str
     company_name: str
+    is_signup: bool = False
 
 class ClientGridDropdownPaginatedResponse(BaseModel):
     total_count: int
@@ -249,6 +263,7 @@ class ClientOverviewItemResponse(BaseModel):
     primary_contact_name: str
     email: EmailStr
     phone: str
+    is_signup: bool = False
     locations_count: int = 0
     contract_status: str = "no_contract"
     created_at: datetime
@@ -272,6 +287,7 @@ class ClientOverviewDetailResponse(BaseModel):
     primary_contact_name: str
     email: EmailStr
     phone: str
+    is_signup: bool = False
     locations_count: int = 0
     contract_status: str = "no_contract"
     contract_expiry_date: Optional[str] = None
@@ -394,35 +410,124 @@ class RequiredPhotoResponse(BaseModel):
 
 # --- Room Management Schemas ---
 class RoomCreate(BaseModel):
-    room_name: str = Field(..., json_schema_extra={"example": "Room 301 - Executive Suite"})
+    room_name: str = Field(..., json_schema_extra={"example": "Ware House"})
     room_type: str = Field(..., json_schema_extra={"example": "suite"})  # standard, deluxe, suite, junior_suite
     location_id: Optional[str] = Field(default=None, json_schema_extra={"example": "location_id_here"})
-    floor: int = Field(default=1, json_schema_extra={"example": 3})
-    duration: int = Field(default=30, json_schema_extra={"example": 45})  # minutes
+    floor: int = Field(default=1, json_schema_extra={"example": 1})
+    duration: int = Field(default=90, json_schema_extra={"example": 90})  # minutes
     monthly_cleaning_frequency: int = Field(default=4, json_schema_extra={"example": 4})
     required_photos: Optional[List[RequiredPhotoCreate]] = Field(default_factory=list)
     clean_type: str = Field(default="standard", json_schema_extra={"example": "standard"})  # standard, premium
     tasks: Optional[List[CleaningTaskCreate]] = Field(default_factory=list)
 
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "room_name": "Ware House",
+                "room_type": "suite",
+                "duration": 90,
+                "monthly_cleaning_frequency": 4,
+                "required_photos": [
+                    {
+                        "name": "Before cleaning photo",
+                        "frequency_type": "every_visit"
+                    },
+                    {
+                        "name": "After cleaning photo",
+                        "frequency_type": "every_visit"
+                    }, 
+                    {
+                        "name": "Clean the ceiling",
+                        "frequency_type": "weekly"
+                    },
+                    {
+                        "name": "clean the fan",
+                        "frequency_type": "monthly"
+                    }
+                ],
+                "clean_type": "standard",
+                "tasks": [
+                    {
+                        "name": "Deep Floor Scrubbing",
+                        "frequency_type": "every_visit"
+                    },
+                    {
+                        "name": "Clean the ceiling",
+                        "frequency_type": "weekly"
+                    },
+                    {
+                        "name": "clean the fan",
+                        "frequency_type": "monthly"
+                    }
+                ]
+            }
+        }
+    }
+
 class RoomUpdate(BaseModel):
-    room_name: Optional[str] = None
-    room_type: Optional[str] = None
-    location_id: Optional[str] = None
-    floor: Optional[int] = None
-    duration: Optional[int] = None
-    monthly_cleaning_frequency: Optional[int] = None
+    room_name: Optional[str] = Field(default=None, json_schema_extra={"example": "Ware House Updated"})
+    room_type: Optional[str] = Field(default=None, json_schema_extra={"example": "suite"})
+    location_id: Optional[str] = Field(default=None, json_schema_extra={"example": "loc_099832da9e"})
+    floor: Optional[int] = Field(default=None, json_schema_extra={"example": 1})
+    duration: Optional[int] = Field(default=None, json_schema_extra={"example": 90})
+    monthly_cleaning_frequency: Optional[int] = Field(default=None, json_schema_extra={"example": 4})
+    clean_type: Optional[str] = Field(default=None, json_schema_extra={"example": "standard"})
     required_photos: Optional[List[RequiredPhotoCreate]] = None
-    clean_type: Optional[str] = None
     tasks: Optional[List[CleaningTaskCreate]] = None
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "room_name": "Ware House Updated",
+                "room_type": "suite",
+                "duration": 90,
+                "floor": 1,
+                "monthly_cleaning_frequency": 4,
+                "clean_type": "standard",
+                "required_photos": [
+                    {
+                        "name": "Before cleaning photo",
+                        "frequency_type": "every_visit"
+                    },
+                    {
+                        "name": "After cleaning photo",
+                        "frequency_type": "every_visit"
+                    },
+                    {
+                        "name": "Clean the ceiling",
+                        "frequency_type": "weekly"
+                    },
+                    {
+                        "name": "clean the fan",
+                        "frequency_type": "monthly"
+                    }
+                ],
+                "tasks": [
+                    {
+                        "name": "Deep Floor Scrubbing",
+                        "frequency_type": "every_visit"
+                    },
+                    {
+                        "name": "Clean the ceiling",
+                        "frequency_type": "weekly"
+                    },
+                    {
+                        "name": "clean the fan",
+                        "frequency_type": "monthly"
+                    }
+                ]
+            }
+        }
+    }
 
 class RoomResponse(BaseModel):
     id: str
     room_name: str
     room_type: str = "standard"
-    client_id: str = ""
-    company_name: str = ""
-    location_id: str = ""
-    location_name: str = ""
+    client_id: Optional[str] = ""
+    company_name: Optional[str] = ""
+    location_id: Optional[str] = ""
+    location_name: Optional[str] = ""
     floor: int = 1
     duration: int = 30
     monthly_cleaning_frequency: int = 4
@@ -434,9 +539,68 @@ class RoomResponse(BaseModel):
     created_at: Union[str, datetime]
     updated_at: Union[str, datetime]
 
-    class Config:
-        populate_by_name = True
-        from_attributes = True
+    model_config = {
+        "populate_by_name": True,
+        "from_attributes": True,
+        "json_schema_extra": {
+            "example": {
+                "id": "room_91eb4b2e51",
+                "room_name": "Ware House",
+                "room_type": "suite",
+                "client_id": "cli_46f0aebbeb",
+                "company_name": "Kafa Automation",
+                "location_id": "loc_099832da9e",
+                "location_name": "Main HQ Warehouse",
+                "floor": 1,
+                "duration": 90,
+                "monthly_cleaning_frequency": 4,
+                "required_photos": [
+                    {
+                        "id": "9ad40712",
+                        "name": "Before cleaning photo",
+                        "frequency_type": "every_visit"
+                    },
+                    {
+                        "id": "00176973",
+                        "name": "After cleaning photo",
+                        "frequency_type": "every_visit"
+                    },
+                    {
+                        "id": "f8f37b0d",
+                        "name": "Clean the ceiling",
+                        "frequency_type": "weekly"
+                    },
+                    {
+                        "id": "788a3b20",
+                        "name": "clean the fan",
+                        "frequency_type": "monthly"
+                    }
+                ],
+                "photo_number": 4,
+                "task_number": 3,
+                "clean_type": "standard",
+                "tasks": [
+                    {
+                        "id": "b386fe2b",
+                        "name": "Deep Floor Scrubbing",
+                        "frequency_type": "every_visit"
+                    },
+                    {
+                        "id": "6d8c84c6",
+                        "name": "Clean the ceiling",
+                        "frequency_type": "weekly"
+                    },
+                    {
+                        "id": "1d3ebc64",
+                        "name": "clean the fan",
+                        "frequency_type": "monthly"
+                    }
+                ],
+                "created_at": "2026-08-17T04:33:30.656000Z",
+                "updated_at": "2026-08-17T04:33:30.656000Z"
+            }
+        }
+    }
 
 class RoomPaginatedResponse(BaseModel):
     total_count: int
@@ -789,10 +953,10 @@ class AdminRoomGridItem(BaseModel):
     room_id: str
     room_name: str
     room_type: str = "standard"
-    client_id: str = ""
-    company_name: str = ""
-    location_id: str = ""
-    location_name: str = ""
+    client_id: Optional[str] = ""
+    company_name: Optional[str] = ""
+    location_id: Optional[str] = ""
+    location_name: Optional[str] = ""
     monthly_cleaning_frequency: int = 4
     photo_number: int = 0
     task_number: int = 0
@@ -848,6 +1012,34 @@ class AdminCleaningPlanGridPaginatedResponse(BaseModel):
     limit: int
     plans: List[AdminCleaningPlanGridItem] = Field(default_factory=list)
 
+# --- Cleaning Plan Dropdown Schemas ---
+class CleaningPlanRoomDropdownItem(BaseModel):
+    room_id: str
+    room_name: str
+    room_type: str = "standard"
+    photo_number: int = 0
+    task_number: int = 0
+
+    model_config = {
+        "populate_by_name": True,
+        "from_attributes": True,
+        "json_schema_extra": {
+            "example": {
+                "room_id": "room_91eb4b2e51",
+                "room_name": "Ware House",
+                "room_type": "suite",
+                "photo_number": 4,
+                "task_number": 3
+            }
+        }
+    }
+
+class CleaningPlanRoomDropdownPaginatedResponse(BaseModel):
+    total_count: int
+    page: int
+    limit: int
+    rooms: List[CleaningPlanRoomDropdownItem] = Field(default_factory=list)
+
 # --- Manager Cleaning Plan CRUD Schemas ---
 
 class CleaningPlanRoomDetail(BaseModel):
@@ -866,39 +1058,106 @@ class CleaningPlanWorkerDetail(BaseModel):
     name: str
     email: Optional[str] = None
     role: Optional[str] = "worker"
+    worker_type: Optional[str] = "employee"
+    position: Optional[str] = "normal"  # teamleader, co_leader, normal
     phone: Optional[str] = None
-    profile_picture: Optional[str] = None
+    profile_photo: Optional[str] = None
+
+class CleaningPlanClientDetail(BaseModel):
+    client_id: str
+    company_name: str
+    primary_contact_name: Optional[str] = ""
+    email: Optional[str] = ""
+    phone: Optional[str] = ""
+    rooms_count: int = 0
+
+class CleaningPlanManagerDetail(BaseModel):
+    manager_id: str
+    name: str
+    email: str
+    role: str = "manager"
+    phone: Optional[str] = None
+    profile_photo: Optional[str] = None
 
 class ManagerCleaningPlanCreate(BaseModel):
-    title: str = Field(..., json_schema_extra={"example": "Main Floor Daily Cleaning Plan"})
-    location_id: str = Field(..., json_schema_extra={"example": "loc_12345"})
-    room_ids: List[str] = Field(default_factory=list, json_schema_extra={"example": ["room_1", "room_2"]})
-    frequency_type: str = Field(default="weekly", json_schema_extra={"example": "weekly"})
-    duration_minutes: int = Field(default=60, json_schema_extra={"example": 60})
-    description: Optional[str] = Field(default="", json_schema_extra={"example": "Comprehensive cleaning plan for main floor"})
+    title: str = Field(..., json_schema_extra={"example": "Kafa Automation Cleaning plan & Betopia Group"})
+    room_ids: List[str] = Field(default_factory=list, json_schema_extra={"example": ["room_a366ecf17c", "room_a366ecf17c", "room_848a13ff0c"]})
+    date: Optional[str] = Field(default="2026-08-17", json_schema_extra={"example": "2026-08-17"})
+    start_time: Optional[str] = Field(default="08:00 AM", json_schema_extra={"example": "08:00 AM"})
+    repeat_shift: Optional[str] = Field(default="Standard working week", json_schema_extra={"example": "Every day"})
+    repeat_until: Optional[str] = Field(default="2026-09-14", json_schema_extra={"example": "2026-12-31"})
+    working_days: Optional[List[str]] = Field(default=None, json_schema_extra={"example": ["mon", "tue", "wed", "thu", "fri"]})
+    shift_notes: Optional[str] = Field(default="", json_schema_extra={"example": "Monthly Sunday deep cleaning"})
+    description: Optional[str] = Field(default="", json_schema_extra={"example": "Love to Wash"})
     additional_tasks: Optional[List[CleaningTaskCreate]] = Field(default_factory=list)
     additional_required_photos: Optional[List[RequiredPhotoCreate]] = Field(default_factory=list)
+    duration_minutes: Optional[int] = Field(default=None, json_schema_extra={"example": 330})
+    location_id: Optional[str] = Field(default=None, json_schema_extra={"example": "loc_db28f5a3f6"})
+    frequency_type: Optional[str] = Field(default=None, json_schema_extra={"example": "monthly"})
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "title": "Kafa Automation Cleaning plan & Betopia Group",
+                "room_ids": [
+                    "room_a366ecf17c",
+                    "room_a366ecf17c",
+                    "room_848a13ff0c"
+                ],
+                "date": "2026-08-17",
+                "start_time": "08:00 AM",
+                "repeat_shift": "Monthly",
+                "repeat_until": "2026-12-31",
+                "working_days": [
+                    "sun"
+                ],
+                "shift_notes": "Monthly Sunday deep cleaning",
+                "additional_tasks": [
+                    {
+                        "name": "Deep Floor Scrubbing",
+                        "frequency_type": "every_visit"
+                    }
+                ],
+                "additional_required_photos": [
+                    {
+                        "name": "Before cleaning photo",
+                        "frequency_type": "every_visit"
+                    },
+                    {
+                        "name": "Before cleaning photo",
+                        "frequency_type": "every_visit"
+                    }
+                ]
+            }
+        }
+    }
 
 class ManagerCleaningPlanUpdate(BaseModel):
     title: Optional[str] = None
-    location_id: Optional[str] = None
     room_ids: Optional[List[str]] = None
+    date: Optional[str] = None
+    start_time: Optional[str] = None
+    repeat_shift: Optional[str] = None
+    repeat_until: Optional[str] = None
+    working_days: Optional[List[str]] = None
+    shift_notes: Optional[str] = None
     worker_ids: Optional[List[str]] = None
-    frequency_type: Optional[str] = None
     duration_minutes: Optional[int] = None
     description: Optional[str] = None
     additional_tasks: Optional[List[CleaningTaskCreate]] = None
     additional_required_photos: Optional[List[RequiredPhotoCreate]] = None
+    location_id: Optional[str] = None
+    frequency_type: Optional[str] = None
+    status: Optional[str] = None
     is_active: Optional[bool] = None
 
 class ManagerCleaningPlanDetailResponse(BaseModel):
     id: str
     title: str
-    description: Optional[str] = ""
-    client_id: str = ""
-    company_name: str = ""
-    location_id: str = ""
-    location_name: str = ""
+    shift_notes: Optional[str] = ""
+    clients_count: int = 0
+    clients: List[CleaningPlanClientDetail] = Field(default_factory=list)
+    manager: Optional[CleaningPlanManagerDetail] = None
     room_ids: List[str] = Field(default_factory=list)
     rooms: List[CleaningPlanRoomDetail] = Field(default_factory=list)
     rooms_count: int = 0
@@ -907,12 +1166,16 @@ class ManagerCleaningPlanDetailResponse(BaseModel):
     workers_count: int = 0
     additional_tasks: List[CleaningTaskResponse] = Field(default_factory=list)
     additional_required_photos: List[RequiredPhotoResponse] = Field(default_factory=list)
-    all_tasks: List[CleaningTaskResponse] = Field(default_factory=list)
-    all_required_photos: List[RequiredPhotoResponse] = Field(default_factory=list)
     total_tasks_count: int = 0
     total_photos_count: int = 0
-    frequency_type: str = "weekly"
+    date: str = "2026-08-17"
+    start_time: str = "08:00 AM"
+    end_time: str = "01:30 PM"
     duration_minutes: int = 60
+    repeat_shift: str = "Does not repeat"
+    repeat_until: Optional[str] = None
+    working_days: List[str] = Field(default_factory=list)
+    status: Optional[str] = "draft"
     is_active: bool = True
     created_at: Union[str, datetime]
     updated_at: Union[str, datetime]
@@ -920,20 +1183,22 @@ class ManagerCleaningPlanDetailResponse(BaseModel):
 class ManagerCleaningPlanListItemResponse(BaseModel):
     id: str
     title: str
-    client_id: str = ""
-    company_name: str = ""
-    location_id: str = ""
-    location_name: str = ""
-    room_ids: List[str] = Field(default_factory=list)
-    room_names: List[str] = Field(default_factory=list)
+    clients_count: int = 0
+    client_names: List[str] = Field(default_factory=list)
     rooms_count: int = 0
-    worker_ids: List[str] = Field(default_factory=list)
-    worker_names: List[str] = Field(default_factory=list)
+    room_names: List[str] = Field(default_factory=list)
     workers_count: int = 0
+    worker_names: List[str] = Field(default_factory=list)
     total_tasks_count: int = 0
     total_photos_count: int = 0
-    frequency_type: str = "weekly"
+    date: str = "2026-08-17"
+    start_time: str = "08:00 AM"
+    end_time: str = "01:30 PM"
     duration_minutes: int = 60
+    repeat_shift: str = "Does not repeat"
+    repeat_until: Optional[str] = None
+    working_days: List[str] = Field(default_factory=list)
+    status: Optional[str] = "draft"
     is_active: bool = True
     created_at: Union[str, datetime]
     updated_at: Union[str, datetime]
@@ -976,6 +1241,54 @@ class QualityControlReportResponse(BaseModel):
     photo_quality_distribution: PhotoQualityDistributionData
     pdf_download_url: str = "/admin/reports/quality-control/pdf?timeframe=month"
 
+
+class CleaningPlanWorkerDropdownItem(BaseModel):
+    worker_id: str
+    name: str
+    profile_photo: Optional[str] = None
+    worker_type: str = "employee"
+    position: Optional[str] = "Cleaner"
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    is_available: bool = True
+    unavailable_reason: Optional[str] = None
+    avg_daily_work_minutes: int = 0
+    total_shifts_this_month: int = 0
+    total_work_minutes_this_month: int = 0
+    formatted_avg_work: str = "0 mins/day"
+    last_work_end_time: Optional[str] = None
+    last_work_ended_ago: Optional[str] = None
+    minutes_since_last_work: Optional[int] = None
+
+class CleaningPlanWorkerDropdownPaginatedResponse(BaseModel):
+    total_count: int
+    page: int
+    limit: int
+    plan_id: str
+    plan_date: str
+    plan_time_window: str
+    workers: List[CleaningPlanWorkerDropdownItem] = Field(default_factory=list)
+
+class WorkerAssignmentItem(BaseModel):
+    worker_id: str = Field(..., json_schema_extra={"example": "w_101"})
+    position: Optional[str] = Field(default="normal", json_schema_extra={"example": "teamleader"})  # teamleader, co_leader, normal
+
+class AssignWorkersToCleaningPlanRequest(BaseModel):
+    workers: List[WorkerAssignmentItem] = Field(
+        ...,
+        min_length=1,
+        json_schema_extra={
+            "example": [
+                {"worker_id": "w_101", "position": "teamleader"},
+                {"worker_id": "w_102", "position": "co_leader"},
+                {"worker_id": "w_103", "position": "normal"}
+            ]
+        }
+    )
+    action: Optional[str] = Field(
+        default="append",
+        json_schema_extra={"example": "append"}
+    )  # "append" (default: merges without removing existing), or "replace"
 
 
 

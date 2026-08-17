@@ -12,7 +12,7 @@ from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
 from app.services.ai_vision_engine import update_ai_model_online_learning
 
-photo_reviews_router = APIRouter(prefix="/manager", tags=["Admin Photo Reviews & Quality Control"])
+photo_reviews_router = APIRouter(prefix="/manager", tags=["Manager Photo Reviews & Quality Control"])
 
 def _format_date_submitted(dt) -> str:
     if isinstance(dt, datetime):
@@ -157,6 +157,8 @@ async def get_photo_review_details(
         date_submitted=c_dt
     )
 
+from app.api.worker_shift_utils import resolve_shift_execution, calculate_cleaning_plan_progress
+
 async def _sync_shift_room_approval(db, r_doc: dict, is_approved: bool):
     """Helper to update shift room status and recalculate shift progress when Admin approves or rejects proof."""
     if not r_doc:
@@ -168,7 +170,7 @@ async def _sync_shift_room_approval(db, r_doc: dict, is_approved: bool):
     if not shift_id or not room_id:
         return
 
-    shift_doc = await db["shifts"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+    shift_doc, coll_name = await resolve_shift_execution(shift_id, db)
     if not shift_doc:
         return
 
@@ -187,21 +189,34 @@ async def _sync_shift_room_approval(db, r_doc: dict, is_approved: bool):
         target_room["approval_status"] = "rejected"
         target_room["is_verified"] = False
 
-    total_rooms = len(rooms)
-    completed_rooms = sum(1 for r in rooms if r.get("status") == "completed")
-    in_progress_rooms = sum(1 for r in rooms if r.get("status") in ["in_progress", "photo_submitted"])
-    pending_rooms = sum(1 for r in rooms if r.get("status") in ["pending", "pending_start"])
+    # Mark photo status inside target room's submitted_photos
+    approved_photos_count = 0
+    for r in rooms:
+        for p in r.get("submitted_photos", []):
+            if p.get("review_id") == r_doc.get("review_id") and is_approved:
+                p["status"] = "approved"
+            elif p.get("review_id") == r_doc.get("review_id") and not is_approved:
+                p["status"] = "rejected"
+            if p.get("status") == "approved":
+                approved_photos_count += 1
 
-    overall_progress = round((completed_rooms / total_rooms * 100.0), 1) if total_rooms > 0 else 0.0
+    if is_approved and approved_photos_count == 0:
+        approved_photos_count = 1
 
-    await db["shifts"].update_one(
-        {"$or": [{"_id": shift_id}, {"id": shift_id}]},
+    shift_doc["approved_photos_count"] = approved_photos_count
+    progress = calculate_cleaning_plan_progress(shift_doc, approved_photos_count=approved_photos_count)
+
+    doc_id = shift_doc.get("_id")
+    await db[coll_name].update_one(
+        {"_id": doc_id},
         {"$set": {
             "rooms": rooms,
-            "overall_progress_percentage": overall_progress,
-            "completed_rooms_count": completed_rooms,
-            "in_progress_rooms_count": in_progress_rooms,
-            "pending_rooms_count": pending_rooms,
+            "overall_progress_percentage": progress["overall_progress_percentage"],
+            "completed_rooms_count": progress["completed_rooms_count"],
+            "in_progress_rooms_count": progress["in_progress_rooms_count"],
+            "pending_rooms_count": progress["pending_rooms_count"],
+            "completed_tasks_count": progress["completed_tasks_count"],
+            "approved_photos_count": approved_photos_count,
             "updated_at": now
         }}
     )

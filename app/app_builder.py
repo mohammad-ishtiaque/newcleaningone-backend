@@ -20,32 +20,10 @@ def create_app(service_name: str = "all") -> FastAPI:
         "all": "Cleaning One Monolith API"
     }
     
-    tags_metadata = [
-        {"name": "Auth"},
-        {"name": "Profile"},
-        {"name": "Admin"},
-        {"name": "Admin Dashboard HomePage"},
-        {"name": "Admin Shift Monitoring"},
-        {"name": "Admin Shift Management"},
-        {"name": "Admin Worker Management"},
-        {"name": "Admin Roaster Management"},
-        {"name": "Admin Client Management"},
-        {"name": "Admin Location Management"},
-        {"name": "Admin Room Management"},
-        {"name": "Admin Cleaning Plan Management"},
-        {"name": "Admin Extra Service Management"},
-        {"name": "Admin Photo Reviews & Quality Control"},
-        {"name": "Admin Chat Management"},
-        {"name": "Admin Quality Control Reports"},
-        {"name": "Admin Escalation Management"},
-        {"name": "Admin Notification Center"}
-    ]
-    
     app = FastAPI(
         title=title_map.get(service_name, "Cleaning One API"),
         description=f"Production-ready FastAPI {service_name.capitalize()} System",
-        version="1.0.0",
-        openapi_tags=tags_metadata
+        version="1.0.0"
     )
     
     origins = [
@@ -55,6 +33,7 @@ def create_app(service_name: str = "all") -> FastAPI:
         "http://localhost:8081",
         "http://localhost:8082",
         "http://localhost:8083",
+        "http://localhost:8084",
         "http://localhost:3000",
         "http://localhost:5173",
         "http://127.0.0.1:8000",
@@ -62,6 +41,7 @@ def create_app(service_name: str = "all") -> FastAPI:
         "http://127.0.0.1:8081",
         "http://127.0.0.1:8082",
         "http://127.0.0.1:8083",
+        "http://127.0.0.1:8084",
     ]
     
     app.add_middleware(
@@ -122,7 +102,7 @@ def create_app(service_name: str = "all") -> FastAPI:
     os.makedirs("uploads", exist_ok=True)
     app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-    @app.get("/")
+    @app.get("/", include_in_schema=False)
     async def root():
         return {
             "message": f"Welcome to Cleaning One {service_name.capitalize()} API",

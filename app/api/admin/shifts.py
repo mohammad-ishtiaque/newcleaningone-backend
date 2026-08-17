@@ -13,7 +13,7 @@ from app.schemas.shift import (
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
 
-shift_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Shift Management"])
+shift_mgmt_router = APIRouter(prefix="/manager", tags=["Manager Shift Management"])
 
 def _format_shift_response(doc: dict) -> ShiftResponse:
     s_id = str(doc.get("_id") or doc.get("id"))

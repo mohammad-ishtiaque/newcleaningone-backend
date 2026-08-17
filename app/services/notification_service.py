@@ -16,7 +16,9 @@ class NotificationService:
         notification_type: str = "general",
         recipient_type: str = "all",
         user_id: Optional[str] = None,
-        player_ids: Optional[List[str]] = None
+        player_ids: Optional[List[str]] = None,
+        plan_id: Optional[str] = None,
+        data: Optional[dict] = None
     ) -> dict:
         db = get_database()
         notification = NotificationDB(
@@ -24,7 +26,9 @@ class NotificationService:
             recipient_type=recipient_type,
             title=title,
             message=message,
-            notification_type=notification_type
+            notification_type=notification_type,
+            plan_id=plan_id,
+            data=data or {}
         )
         doc = notification.model_dump(by_alias=True, exclude={"id"})
         res = await db["notifications"].insert_one(doc)
@@ -32,10 +36,15 @@ class NotificationService:
 
         # Trigger push notification asynchronously via OneSignal
         try:
+            push_data = dict(data or {})
+            if plan_id:
+                push_data["plan_id"] = plan_id
+            push_data["notification_type"] = notification_type
             await self.onesignal.send_notification(
                 headings=title,
                 contents=message,
-                player_ids=player_ids
+                player_ids=player_ids,
+                data=push_data
             )
         except Exception as e:
             print(f"Error sending push notification: {e}")
@@ -128,6 +137,35 @@ class NotificationService:
                 {"$addToSet": {"deleted_by": user_id}}
             )
         return True
+
+    async def get_notification_detail(self, notification_id: str, user_id: str) -> Optional[dict]:
+        db = get_database()
+        try:
+            obj_id = ObjectId(notification_id)
+            query = {"$or": [{"_id": obj_id}, {"_id": notification_id}, {"id": notification_id}]}
+        except Exception:
+            query = {"$or": [{"_id": notification_id}, {"id": notification_id}]}
+
+        doc = await db["notifications"].find_one(query)
+        if not doc:
+            return None
+
+        rec_type = doc.get("recipient_type", "all")
+        doc_user_id = doc.get("user_id")
+        if doc_user_id and doc_user_id != user_id and rec_type not in ["all", "worker"]:
+            return None
+
+        doc["_id"] = str(doc.get("_id"))
+        is_read = doc.get("is_read", False)
+        if user_id in doc.get("read_by", []):
+            is_read = True
+        doc["is_read"] = is_read
+
+        # Auto-mark as read when opened
+        await self.mark_notification_as_read(notification_id, user_id)
+        doc["is_read"] = True
+
+        return doc
 
     async def notify_legal_document_update(self, doc_type: str, title: str):
         heading = f"Legal Update: {title}"

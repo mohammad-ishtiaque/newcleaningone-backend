@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, Depends, status, HTTPException
 from app.schemas.user import ClientSignup, ClientUpdate, ClientProfileResponse
@@ -116,6 +116,10 @@ async def delete_client_notification(
     return {"message": "Notification deleted successfully"}
 
 
+from app.api.worker_shift_utils import (
+    resolve_shift_execution, calculate_cleaning_plan_progress, is_plan_active_on_date, get_or_create_shift_execution
+)
+
 @router.get("/shifts/{shift_id}/live-status", response_model=LiveStatusResponse, summary="Get Client Shift Live Status")
 async def get_client_shift_live_status(
     shift_id: str,
@@ -123,14 +127,18 @@ async def get_client_shift_live_status(
 ):
     db = get_database()
 
-    shift_doc = await db["shifts"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+    shift_doc, coll_name = await resolve_shift_execution(shift_id, db)
     if not shift_doc:
         raise HTTPException(status_code=404, detail="Shift not found")
 
     cleaner_name = "Assigned Cleaner"
-    workers = shift_doc.get("workers", [])
+    workers = shift_doc.get("assigned_workers") or shift_doc.get("workers") or []
     if workers:
-        cleaner_name = workers[0].get("name", "Assigned Cleaner")
+        cleaner_name = workers[0].get("name") or "Assigned Cleaner"
+        if not workers[0].get("name") and workers[0].get("worker_id"):
+            u_doc = await db["users"].find_one({"$or": [{"_id": workers[0]["worker_id"]}, {"id": workers[0]["worker_id"]}]})
+            if u_doc:
+                cleaner_name = u_doc.get("full_name") or u_doc.get("name") or cleaner_name
 
     rooms = shift_doc.get("rooms", [])
     live_rooms = []
@@ -223,11 +231,34 @@ async def get_client_overview(
 
     date_formatted = f"{now.strftime('%A, %d %B')} • Here's today's service at a glance."
 
-    today_shift = await db["shifts"].find_one({
-        "client_id": client_id,
+    # Look for today's shift execution or cleaning plan for this client
+    today_shift = await db["shift_executions"].find_one({
+        "$or": [{"client_id": client_id}, {"client_ids": client_id}],
         "date": today_str,
         "status": {"$ne": "cancelled"}
     })
+
+    if not today_shift:
+        # Check active cleaning plans for today
+        c_plan = await db["cleaning_plans"].find_one({
+            "$or": [{"client_id": client_id}, {"client_ids": client_id}],
+            "status": {"$ne": "cancelled"}
+        })
+        if c_plan and is_plan_active_on_date(c_plan, today_str):
+            today_shift = await get_or_create_shift_execution(c_plan, today_str, db)
+
+    if not today_shift:
+        today_shift = await db["shifts"].find_one({
+            "client_id": client_id,
+            "date": today_str,
+            "status": {"$ne": "cancelled"}
+        })
+
+    if not today_shift:
+        today_shift = await db["shift_executions"].find_one({
+            "$or": [{"client_id": client_id}, {"client_ids": client_id}],
+            "status": {"$in": ["running", "in_progress", "published", "scheduled"]}
+        }, sort=[("created_at", -1)])
 
     if not today_shift:
         today_shift = await db["shifts"].find_one({
@@ -294,11 +325,16 @@ async def get_client_overview(
         except Exception:
             hours_comp = 4.8
 
-        workers_list = today_shift.get("workers", [])
+        workers_list = today_shift.get("assigned_workers") or today_shift.get("workers", [])
         for idx, w in enumerate(workers_list):
             w_id = str(w.get("worker_id") or w.get("id"))
-            w_name = w.get("name", "Specialist")
-            w_pic = w.get("profile_picture")
+            w_name = w.get("name") or "Specialist"
+            w_pic = w.get("profile_photo") or w.get("profile_picture")
+            if (not w.get("name") or not w_pic) and w_id:
+                u_doc = await db["users"].find_one({"$or": [{"_id": w_id}, {"id": w_id}]})
+                if u_doc:
+                    w_name = u_doc.get("full_name") or u_doc.get("name") or w_name
+                    w_pic = u_doc.get("profile_photo") or u_doc.get("profile_picture") or w_pic
             
             w_comp_h = int(hours_comp)
             w_comp_m = int(round((hours_comp - w_comp_h) * 60))
@@ -327,11 +363,28 @@ async def get_client_overview(
     rem_m = int(round((rem_hours - rem_h) * 60))
     hours_remaining_str = f"{rem_h}h {rem_m:02d}m remaining"
 
-    upcoming_shift = await db["shifts"].find_one({
-        "client_id": client_id,
+    upcoming_shift = await db["shift_executions"].find_one({
+        "$or": [{"client_id": client_id}, {"client_ids": client_id}],
         "date": {"$gt": today_str},
         "status": {"$ne": "cancelled"}
     }, sort=[("date", 1), ("start_time", 1)])
+
+    if not upcoming_shift:
+        c_plan = await db["cleaning_plans"].find_one({
+            "$or": [{"client_id": client_id}, {"client_ids": client_id}],
+            "status": {"$ne": "cancelled"}
+        })
+        if c_plan:
+            tomorrow_dt = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+            if is_plan_active_on_date(c_plan, tomorrow_dt):
+                upcoming_shift = await get_or_create_shift_execution(c_plan, tomorrow_dt, db)
+
+    if not upcoming_shift:
+        upcoming_shift = await db["shifts"].find_one({
+            "client_id": client_id,
+            "date": {"$gt": today_str},
+            "status": {"$ne": "cancelled"}
+        }, sort=[("date", 1), ("start_time", 1)])
 
     next_time_str = "No upcoming visits scheduled"
     team_name = ""

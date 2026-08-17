@@ -14,7 +14,7 @@ from app.models.user import RoleEnum, UserInDB
 from app.repositories.user_repo import UserRepository
 from app.dependencies.auth import get_current_user
 
-router = APIRouter(prefix="/manager", tags=["Admin"])
+router = APIRouter(prefix="/manager", tags=["Manager Profile"])
 
 def require_manager(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
     if current_user.role not in [RoleEnum.manager, RoleEnum.admin]:

@@ -1,2 +1,97 @@
+# ==========================================
+# FastAPI / Python Project .gitignore
+# ==========================================
+
+# --- Python Bytecode & Cache ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.pyd
+
+# --- Virtual Environments ---
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+.uv/
+
+# --- Environment Variables & Secrets ---
 .env
-app/schemas/user.py
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+secrets.json
+
+# --- Uploads & Static Media ---
+uploads/*
+!uploads/.gitkeep
+media/*
+!media/.gitkeep
+static/uploads/*
+!static/uploads/.gitkeep
+
+# --- Machine Learning & Model Checkpoints ---
+*.pt
+*.pth
+*.onnx
+*.bin
+*.h5
+checkpoints/
+model_weights/
+
+# --- Temporary Files, Scratch & Test Artifacts ---
+scratch/
+tmp/
+temp/
+*.tmp
+*.temp
+
+# --- Logs & Databases ---
+*.log
+logs/
+*.sqlite3
+*.db
+mongo_dump/
+dump/
+
+# --- Testing & Code Quality Tools ---
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+
+# --- IDE & Editor Files ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# --- Operating System Files ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# --- Build & Distribution ---
+build/
+dist/
+*.egg-info/
+*.egg
+*.spec

@@ -16,7 +16,7 @@ from app.models.user import UserInDB, RoleEnum
 from app.schemas.user import UserResponse
 from app.api.admin.profile_company import require_manager
 
-client_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Client Management"])
+client_mgmt_router = APIRouter(prefix="/manager", tags=["Manager Client Management"])
 
 def _format_date_human(d_val) -> str:
     if not d_val:
@@ -82,17 +82,29 @@ async def list_clients(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
+    is_signup: Optional[bool] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"status": {"$ne": "deleted"}}
+    conditions = [{"status": {"$ne": "deleted"}}]
+    
+    if is_signup is not None:
+        if is_signup:
+            conditions.append({"is_signup": True})
+        else:
+            conditions.append({"$or": [{"is_signup": False}, {"is_signup": {"$exists": False}}]})
+
     if search:
-        query["$or"] = [
-            {"company_name": {"$regex": search, "$options": "i"}},
-            {"email": {"$regex": search, "$options": "i"}},
-            {"phone": {"$regex": search, "$options": "i"}},
-            {"industry": {"$regex": search, "$options": "i"}}
-        ]
+        conditions.append({
+            "$or": [
+                {"company_name": {"$regex": search, "$options": "i"}},
+                {"email": {"$regex": search, "$options": "i"}},
+                {"phone": {"$regex": search, "$options": "i"}},
+                {"industry": {"$regex": search, "$options": "i"}}
+            ]
+        })
+
+    query = {"$and": conditions} if len(conditions) > 1 else conditions[0]
 
     total_count = await db["client_list"].count_documents(query)
     skip = (page - 1) * limit
@@ -101,10 +113,16 @@ async def list_clients(
 
     clients = []
     for c in raw_clients:
+        client_is_signup = c.get("is_signup")
+        if client_is_signup is None:
+            user_doc = await db["users"].find_one({"email": c.get("email"), "role": "client"})
+            client_is_signup = bool(user_doc and user_doc.get("is_approved", True))
+
         clients.append(ClientGridDropdownItem(
             id=str(c.get("_id") or c.get("id")),
             primary_contact_name=c.get("primary_contact_name", ""),
-            company_name=c.get("company_name", "")
+            company_name=c.get("company_name", ""),
+            is_signup=bool(client_is_signup)
         ))
 
     return ClientGridDropdownPaginatedResponse(
@@ -155,7 +173,7 @@ async def create_client(
         "primary_contact_name": client_in.primary_contact_name,
         "email": client_in.email,
         "phone": client_in.phone,
-        "status": client_in.status or "active",
+        "status": client_in.status if client_in.status else ("active" if is_signup else "pending"),
         "is_signup": is_signup,
         "license_expiration_date": client_in.license_expiration_date,
         "is_active": True,
@@ -174,15 +192,27 @@ async def list_clients_grid(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
+    is_signup: Optional[bool] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"status": {"$ne": "deleted"}}
+    conditions = [{"status": {"$ne": "deleted"}}]
+    
+    if is_signup is not None:
+        if is_signup:
+            conditions.append({"is_signup": True})
+        else:
+            conditions.append({"$or": [{"is_signup": False}, {"is_signup": {"$exists": False}}]})
+
     if search:
-        query["$or"] = [
-            {"company_name": {"$regex": search, "$options": "i"}},
-            {"email": {"$regex": search, "$options": "i"}}
-        ]
+        conditions.append({
+            "$or": [
+                {"company_name": {"$regex": search, "$options": "i"}},
+                {"email": {"$regex": search, "$options": "i"}}
+            ]
+        })
+
+    query = {"$and": conditions} if len(conditions) > 1 else conditions[0]
 
     total_count = await db["client_list"].count_documents(query)
     skip = (page - 1) * limit
@@ -193,7 +223,24 @@ async def list_clients_grid(
     for c in raw_clients:
         cid = str(c.get("_id") or c.get("id"))
         loc_count = await db["locations"].count_documents({"client_id": cid})
-        shift_count = await db["shifts"].count_documents({"client_id": cid})
+        
+        contract_status = c.get("contract_status", "active")
+        exp_date_str = c.get("license_expiration_date")
+        if exp_date_str:
+            try:
+                exp_date = datetime.strptime(exp_date_str.replace('.', '-'), "%Y-%m-%d").date()
+                if exp_date < datetime.now(timezone.utc).date():
+                    contract_status = "expired"
+                else:
+                    contract_status = "active"
+            except Exception:
+                pass
+
+        is_signup = c.get("is_signup")
+        if is_signup is None:
+            user_doc = await db["users"].find_one({"email": c.get("email"), "role": "client"})
+            is_signup = bool(user_doc and user_doc.get("is_approved", True))
+
         items.append(ClientOverviewItemResponse(
             id=cid,
             company_name=c.get("company_name", "Client Company"),
@@ -202,8 +249,9 @@ async def list_clients_grid(
             primary_contact_name=c.get("primary_contact_name", ""),
             email=c.get("email", ""),
             phone=c.get("phone", ""),
+            is_signup=bool(is_signup),
             locations_count=loc_count,
-            contract_status=c.get("contract_status", "active"),
+            contract_status=contract_status,
             created_at=c.get("created_at") if isinstance(c.get("created_at"), datetime) else datetime.now(timezone.utc),
             updated_at=c.get("updated_at") if isinstance(c.get("updated_at"), datetime) else datetime.now(timezone.utc)
         ))
@@ -282,16 +330,26 @@ async def list_deleted_clients(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
+    is_signup: Optional[bool] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"status": "deleted"}
+    conditions = [{"status": "deleted"}]
+    if is_signup is not None:
+        if is_signup:
+            conditions.append({"is_signup": True})
+        else:
+            conditions.append({"$or": [{"is_signup": False}, {"is_signup": {"$exists": False}}]})
+
     if search:
-        query["$or"] = [
-            {"company_name": {"$regex": search, "$options": "i"}},
-            {"email": {"$regex": search, "$options": "i"}}
-        ]
+        conditions.append({
+            "$or": [
+                {"company_name": {"$regex": search, "$options": "i"}},
+                {"email": {"$regex": search, "$options": "i"}}
+            ]
+        })
         
+    query = {"$and": conditions} if len(conditions) > 1 else conditions[0]
     total_count = await db["client_list"].count_documents(query)
     skip = (page - 1) * limit
     cursor = db["client_list"].find(query).sort("updated_at", -1).skip(skip).limit(limit)
@@ -299,6 +357,11 @@ async def list_deleted_clients(
     
     clients = []
     for c in raw_clients:
+        deleted_is_signup = c.get("is_signup")
+        if deleted_is_signup is None:
+            user_doc = await db["users"].find_one({"email": c.get("email"), "role": "client"})
+            deleted_is_signup = bool(user_doc and user_doc.get("is_approved", True))
+
         clients.append(ClientOverviewItemResponse(
             id=str(c.get("_id") or c.get("id")),
             company_name=c.get("company_name", ""),
@@ -307,6 +370,7 @@ async def list_deleted_clients(
             primary_contact_name=c.get("primary_contact_name", ""),
             email=c.get("email", ""),
             phone=c.get("phone", ""),
+            is_signup=bool(is_signup),
             locations_count=c.get("total_locations_count", 0),
             contract_status=c.get("contract_status", "no_contract"),
             created_at=c.get("created_at"),

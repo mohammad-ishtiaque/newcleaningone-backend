@@ -40,7 +40,9 @@ class LiveStatusItem(BaseModel):
     worker_id: str
     worker_name: str
     worker_type: str
+    profile_photo: Optional[str] = None
     profile_picture: Optional[str] = None
+    position: Optional[str] = "normal"
     shift_id: str
     shift_name: Optional[str] = None
     location_id: str
@@ -51,6 +53,9 @@ class LiveStatusItem(BaseModel):
     shift_end_time: str
     checkin_time: Optional[datetime] = None
     checkout_time: Optional[datetime] = None
+    hours_worked_display: Optional[str] = "Not started"
+    hours_worked_numeric: float = 0.0
+    progress_percentage: float = 0.0
     status: Literal["ontime", "late", "missing", "scheduled"]
 
 class LiveStatusResponse(BaseModel):

@@ -18,7 +18,7 @@ from app.models.user import UserInDB, RoleEnum
 from app.api.admin.profile_company import require_manager
 from app.api.admin.shifts import _format_shift_response
 
-roster_mgmt_router = APIRouter(prefix="/manager/roster", tags=["Admin Roaster Management"])
+roster_mgmt_router = APIRouter(prefix="/manager/roster", tags=["Manager Roster Management"])
 
 def _calculate_hours(start_time: str, end_time: str) -> float:
     try:

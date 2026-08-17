@@ -9,6 +9,8 @@ class NotificationResponse(BaseModel):
     title: str
     message: str
     notification_type: str
+    plan_id: Optional[str] = None
+    data: Optional[dict] = None
     is_read: bool = False
     created_at: datetime
 

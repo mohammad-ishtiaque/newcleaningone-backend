@@ -9,33 +9,18 @@ from app.models.user import UserInDB, RoleEnum
 from app.schemas.shift_monitoring import (
     LiveStatusItem, LiveStatusResponse,
     AttendanceTrackingItem, AttendanceTrackingPaginatedResponse,
-    LocationStatItem, LocationStatPaginatedResponse,
-    WorkerShiftDetailItem, WorkerShiftStatsResponse,
-    WorkerDailyActivityRow, WorkerDailyActivityResponse,
-    WorkerLiveDetailsResponse, WorkerLiveShiftDetail,
-    WorkerAttendanceStatsDrawerResponse, WeeklyTrendItem, MonthlyTrendItem
+    LocationStatItem, LocationStatPaginatedResponse
 )
+from app.api.worker_shift_utils import (
+    is_plan_active_on_date, evaluate_worker_attendance_status, calculate_cleaning_plan_progress,
+    get_or_create_shift_execution, evaluate_auto_checkout_and_hours
+)
+from app.api.admin_shift_monitoring_worker_stats import worker_stats_router, require_manager, _get_period_date_range
 
-shift_monitoring_router = APIRouter(prefix="/manager/shift-monitoring", tags=["Admin Shift Monitoring"])
+shift_monitoring_router = APIRouter(prefix="/manager/shift-monitoring", tags=["Manager Shift Monitoring"])
 
-def require_manager(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
-    if current_user.role not in [RoleEnum.manager, RoleEnum.admin, "manager", "admin"]:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Manager role required")
-    return current_user
-
-
-def _get_period_date_range(period: str) -> tuple:
-    today = datetime.now(timezone.utc).date()
-    if period == "today":
-        start_date = today
-        end_date = today
-    elif period == "weekly":
-        start_date = today - timedelta(days=6)
-        end_date = today
-    else:  # monthly / default
-        start_date = today - timedelta(days=29)
-        end_date = today
-    return start_date.isoformat(), end_date.isoformat()
+# Mount worker stats and activity drawer sub-router
+shift_monitoring_router.include_router(worker_stats_router)
 
 
 @shift_monitoring_router.get(
@@ -54,53 +39,115 @@ async def get_live_shift_monitoring(
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    target_date = date_val or datetime.now(timezone.utc).date().isoformat()
+    target_date = (date_val or datetime.now(timezone.utc).date().isoformat()).strip()
     now_utc = datetime.now(timezone.utc)
 
-    # Query all active shifts on target_date
-    query = {"date": target_date, "status": {"$ne": "cancelled"}}
-    shifts = await db["shifts"].find(query).to_list(length=1000)
+    # 1. Fetch all active cleaning plans from cleaning_plans collection
+    cursor_plans = db["cleaning_plans"].find({"status": {"$ne": "cancelled"}})
+    all_plans = await cursor_plans.to_list(length=1000)
+
+    # Also load legacy shifts if present
+    legacy_shifts = await db["shifts"].find({"date": target_date, "status": {"$ne": "cancelled"}}).to_list(length=1000)
+    seen_plan_ids = set()
+
+    # Filter plans active on target_date
+    active_plans = []
+    for p in all_plans:
+        p_id = str(p.get("id") or p.get("_id"))
+        if is_plan_active_on_date(p, target_date):
+            seen_plan_ids.add(p_id)
+            active_plans.append(p)
+
+    for ls in legacy_shifts:
+        ls_id = str(ls.get("id") or ls.get("_id"))
+        if ls_id not in seen_plan_ids:
+            active_plans.append(ls)
+
+    # Collect all worker IDs to batch fetch user details
+    all_worker_ids = set()
+    for p in active_plans:
+        for wid in p.get("worker_ids", []):
+            if str(wid).strip():
+                all_worker_ids.add(str(wid).strip())
+        for w_entry in p.get("assigned_workers", []):
+            if isinstance(w_entry, dict) and w_entry.get("worker_id"):
+                all_worker_ids.add(str(w_entry["worker_id"]).strip())
+        for w_entry in p.get("workers", []):
+            if isinstance(w_entry, dict):
+                wid = str(w_entry.get("worker_id") or w_entry.get("id") or "")
+                if wid:
+                    all_worker_ids.add(wid)
+
+    worker_user_map = {}
+    if all_worker_ids:
+        w_list = list(all_worker_ids)
+        u_cursor = db["users"].find({"$or": [{"_id": {"$in": w_list}}, {"id": {"$in": w_list}}]})
+        async for u in u_cursor:
+            uid = str(u.get("_id") or u.get("id"))
+            worker_user_map[uid] = u
 
     all_items = []
     ontime_cnt = 0
     late_cnt = 0
     missing_cnt = 0
 
-    for s in shifts:
-        shift_id = str(s.get("id") or s.get("_id"))
-        c_id = s.get("client_id", "")
-        c_name = s.get("client_name", "")
-        l_id = s.get("location_id", "")
-        l_name = s.get("location_name", "")
-        s_start = s.get("start_time", "00:00")
-        s_end = s.get("end_time", "23:59")
+    for s in active_plans:
+        # Get or create dedicated daily shift execution document
+        exec_doc = await get_or_create_shift_execution(s, target_date, db)
+        shift_id = str(exec_doc.get("id") or exec_doc.get("_id") or s.get("id") or s.get("_id"))
+        c_id = str(exec_doc.get("client_id") or "")
+        c_name = exec_doc.get("client_name") or "Client"
+        l_id = str(exec_doc.get("location_id") or "")
+        l_name = exec_doc.get("location_name") or "Location"
+        s_start = exec_doc.get("start_time", "08:00 AM")
+        s_end = exec_doc.get("end_time", "04:00 PM")
+        s_title = exec_doc.get("title") or s.get("title") or s.get("plan_name") or ""
 
-        # Parse shift start datetime
-        try:
-            sh, sm = map(int, s_start.split(":"))
-            sy, smon, sd = map(int, target_date.split("-"))
-            shift_start_dt = datetime(sy, smon, sd, sh, sm, tzinfo=timezone.utc)
-        except Exception:
-            shift_start_dt = now_utc
+        # Calculate item-based progress %
+        progress_info = calculate_cleaning_plan_progress(exec_doc)
+        progress_pct = progress_info["overall_progress_percentage"]
 
-        for w in s.get("workers", []):
-            w_id = str(w.get("worker_id") or w.get("id"))
-            w_name = w.get("name", "")
-            w_pic = w.get("profile_picture")
-            w_t = w.get("worker_type", "freelancer")
+        worker_entries = exec_doc.get("assigned_workers", [])
+        if not worker_entries:
+            worker_entries = s.get("assigned_workers", [])
 
-            c_time = w.get("checkin_time")
-            co_time = w.get("checkout_time")
-            assigned_status = w.get("status")
+        for w_record in worker_entries:
+            w_id = str(w_record.get("worker_id") or w_record.get("id") or "")
+            if not w_id:
+                continue
 
-            # Determine live status
-            if c_time:
-                status_label = assigned_status if assigned_status in ["ontime", "late"] else "ontime"
-            else:
-                if now_utc > shift_start_dt:
-                    status_label = "missing"
-                else:
-                    status_label = "scheduled"
+            u_doc = worker_user_map.get(w_id, {})
+            w_name = u_doc.get("full_name") or u_doc.get("name") or w_record.get("name", "Worker")
+            w_pic = u_doc.get("profile_photo") or u_doc.get("profile_picture") or w_record.get("profile_photo") or w_record.get("profile_picture")
+            w_type = str(u_doc.get("worker_type") or w_record.get("worker_type") or "employee").lower()
+            w_pos = w_record.get("position", "normal")
+
+            c_time = w_record.get("checkin_time")
+            co_time = w_record.get("checkout_time")
+
+            if isinstance(c_time, str):
+                try:
+                    c_time = datetime.fromisoformat(c_time)
+                except Exception:
+                    pass
+            if isinstance(co_time, str):
+                try:
+                    co_time = datetime.fromisoformat(co_time)
+                except Exception:
+                    pass
+
+            if c_time and hasattr(c_time, "tzinfo") and c_time.tzinfo is None:
+                c_time = c_time.replace(tzinfo=timezone.utc)
+            if co_time and hasattr(co_time, "tzinfo") and co_time.tzinfo is None:
+                co_time = co_time.replace(tzinfo=timezone.utc)
+
+            # Evaluate ontime, late, missing, scheduled
+            status_label = evaluate_worker_attendance_status(
+                plan_doc=exec_doc,
+                worker_record={"checkin_time": c_time, "checkout_time": co_time},
+                now_utc=now_utc,
+                target_date_str=target_date
+            )
 
             if status_label == "ontime":
                 ontime_cnt += 1
@@ -109,27 +156,38 @@ async def get_live_shift_monitoring(
             elif status_label == "missing":
                 missing_cnt += 1
 
+            # Hours worked & auto-checkout evaluation
+            resolved_co_time, hours_worked_num, hours_worked_disp, is_auto_co = evaluate_auto_checkout_and_hours(
+                plan_doc=exec_doc,
+                worker_record={"checkin_time": c_time, "checkout_time": co_time},
+                now_utc=now_utc,
+                target_date_str=target_date
+            )
+            final_co_time = co_time or resolved_co_time
+
             # Apply filters
             if checkin_status and checkin_status.lower() != "all":
                 if status_label != checkin_status.lower():
                     continue
 
             if worker_type and worker_type.lower() != "all":
-                if w_t.lower() != worker_type.lower():
+                if w_type != worker_type.lower():
                     continue
 
             if search:
                 s_lower = search.lower()
-                if not (s_lower in w_name.lower() or s_lower in c_name.lower() or s_lower in l_name.lower()):
+                if not (s_lower in w_name.lower() or s_lower in c_name.lower() or s_lower in l_name.lower() or s_lower in s_title.lower()):
                     continue
 
             all_items.append(LiveStatusItem(
                 worker_id=w_id,
                 worker_name=w_name,
-                worker_type=w_t,
+                worker_type=w_type,
+                profile_photo=w_pic,
                 profile_picture=w_pic,
+                position=w_pos,
                 shift_id=shift_id,
-                shift_name=s.get("shift_notes"),
+                shift_name=s_title,
                 location_id=l_id,
                 location_name=l_name,
                 client_id=c_id,
@@ -137,7 +195,10 @@ async def get_live_shift_monitoring(
                 shift_start_time=s_start,
                 shift_end_time=s_end,
                 checkin_time=c_time,
-                checkout_time=co_time,
+                checkout_time=final_co_time,
+                hours_worked_display=hours_worked_disp,
+                hours_worked_numeric=hours_worked_num,
+                progress_percentage=progress_pct,
                 status=status_label
             ))
 
@@ -159,7 +220,7 @@ async def get_live_shift_monitoring(
 @shift_monitoring_router.get(
     "/attendance-time-tracking",
     response_model=AttendanceTrackingPaginatedResponse,
-    summary="Get Attendance & Time Tracking (Screenshot 1 Tab)",
+    summary="Get Attendance & Time Tracking",
     description="Returns worker attendance and time tracking metrics (hours worked, total shifts, late days) for the selected period ('today', 'weekly', 'monthly')."
 )
 async def get_attendance_time_tracking(
@@ -197,11 +258,19 @@ async def get_attendance_time_tracking(
     workers_cursor = db["users"].find(user_query).sort("full_name", 1)
     raw_workers = await workers_cursor.to_list(length=1000)
 
-    # Fetch shifts within period date range
-    shifts_in_period = await db["shifts"].find({
+    # Fetch shifts within period date range from shift_executions and legacy shifts
+    cursor_execs = db["shift_executions"].find({
+        "date": {"$gte": start_date, "$lte": end_date},
+        "status": {"$ne": "cancelled"}
+    })
+    shifts_in_period = await cursor_execs.to_list(length=2000)
+
+    legacy_shifts = await db["shifts"].find({
         "date": {"$gte": start_date, "$lte": end_date},
         "status": {"$ne": "cancelled"}
     }).to_list(length=2000)
+
+    all_shifts_period = shifts_in_period + legacy_shifts
 
     worker_items = []
     for w in raw_workers:
@@ -216,18 +285,17 @@ async def get_attendance_time_tracking(
         total_shifts = 0
         late_days = 0
 
-        for s in shifts_in_period:
-            for assigned_w in s.get("workers", []):
+        for s in all_shifts_period:
+            w_list = s.get("assigned_workers") or s.get("workers") or []
+            for assigned_w in w_list:
                 assigned_w_id = str(assigned_w.get("worker_id") or assigned_w.get("id"))
                 if assigned_w_id == w_id:
                     total_shifts += 1
 
-                    # Add worked hours
                     hw = assigned_w.get("hours_worked", 0.0)
                     if hw:
                         total_hours += float(hw)
                     else:
-                        # Standard fallback shift duration if not explicitly logged
                         total_hours += 8.0
 
                     if assigned_w.get("status") == "late":
@@ -261,7 +329,7 @@ async def get_attendance_time_tracking(
 @shift_monitoring_router.get(
     "/location-statistics",
     response_model=LocationStatPaginatedResponse,
-    summary="Get Location Statistics (Screenshot 2 Tab)",
+    summary="Get Location Statistics",
     description="Returns aggregated location metrics (distinct workers count, total hours worked, total shifts count) for the selected period ('today', 'weekly', 'monthly')."
 )
 async def get_location_statistics(
@@ -274,16 +342,21 @@ async def get_location_statistics(
     db = get_database()
     start_date, end_date = _get_period_date_range(period)
 
-    # Pipeline to aggregate locations across client_list
-    shifts_in_period = await db["shifts"].find({
+    shifts_in_period = await db["shift_executions"].find({
         "date": {"$gte": start_date, "$lte": end_date},
         "status": {"$ne": "cancelled"}
     }).to_list(length=2000)
 
-    # Group shifts by location_id
+    legacy_shifts = await db["shifts"].find({
+        "date": {"$gte": start_date, "$lte": end_date},
+        "status": {"$ne": "cancelled"}
+    }).to_list(length=2000)
+
+    all_shifts_period = shifts_in_period + legacy_shifts
+
     location_groups: Dict[str, Dict[str, Any]] = {}
 
-    for s in shifts_in_period:
+    for s in all_shifts_period:
         loc_id = s.get("location_id")
         loc_name = s.get("location_name", "Location")
         c_id = s.get("client_id", "")
@@ -306,7 +379,8 @@ async def get_location_statistics(
         group = location_groups[loc_id]
         group["shifts_count"] += 1
 
-        for w in s.get("workers", []):
+        w_list = s.get("assigned_workers") or s.get("workers") or []
+        for w in w_list:
             w_id = str(w.get("worker_id") or w.get("id"))
             group["worker_ids"].add(w_id)
             hw = w.get("hours_worked", 8.0)
@@ -343,467 +417,3 @@ async def get_location_statistics(
         limit=limit,
         locations=paginated
     )
-
-
-@shift_monitoring_router.get(
-    "/worker-stats/{worker_id}",
-    response_model=WorkerShiftStatsResponse,
-    summary="Get Specific Worker Detailed Statistics (Red Box Detail)",
-    description="Returns detailed attendance and shift statistics for a specific worker over a given period ('today', 'weekly', 'monthly')."
-)
-async def get_worker_detailed_stats(
-    worker_id: str,
-    period: str = "monthly",
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    start_date, end_date = _get_period_date_range(period)
-
-    obj_id = ObjectId(worker_id) if ObjectId.is_valid(worker_id) else worker_id
-    w_doc = await db["users"].find_one({"$or": [{"_id": obj_id}, {"id": worker_id}]})
-    if not w_doc:
-        raise HTTPException(status_code=404, detail="Worker user not found")
-
-    w_name = w_doc.get("full_name", "")
-    w_pic = w_doc.get("profile_photo")
-    w_t = w_doc.get("worker_type") or w_doc.get("onboarding_draft", {}).get("worker_type", "freelancer")
-    if hasattr(w_t, "value"):
-        w_t = w_t.value
-
-    # Query worker shifts in date range
-    shifts = await db["shifts"].find({
-        "workers.worker_id": worker_id,
-        "date": {"$gte": start_date, "$lte": end_date},
-        "status": {"$ne": "cancelled"}
-    }).sort("date", -1).to_list(length=1000)
-
-    shift_details = []
-    total_hours = 0.0
-    late_days = 0
-
-    for s in shifts:
-        s_id = str(s.get("id") or s.get("_id"))
-        c_name = s.get("client_name", "")
-        l_name = s.get("location_name", "")
-        d_str = s.get("date", "")
-        st = s.get("start_time", "")
-        et = s.get("end_time", "")
-
-        w_record = {}
-        for w in s.get("workers", []):
-            if str(w.get("worker_id") or w.get("id")) == worker_id:
-                w_record = w
-                break
-
-        dur = float(w_record.get("hours_worked", 8.0) or 8.0)
-        total_hours += dur
-        w_status = w_record.get("status", "ontime")
-        if w_status == "late":
-            late_days += 1
-
-        shift_details.append(WorkerShiftDetailItem(
-            shift_id=s_id,
-            client_name=c_name,
-            location_name=l_name,
-            date=d_str,
-            start_time=st,
-            end_time=et,
-            checkin_time=w_record.get("checkin_time"),
-            checkout_time=w_record.get("checkout_time"),
-            duration_hours=round(dur, 2),
-            status=w_status
-        ))
-
-    shifts_count = len(shift_details)
-    avg_duration = (total_hours / shifts_count) if shifts_count > 0 else 0.0
-
-    formatted_total_hours = f"{int(total_hours)}h" if total_hours.is_integer() else f"{total_hours:.1f}h"
-    formatted_avg = f"{round(avg_duration, 1)}h"
-
-    return WorkerShiftStatsResponse(
-        worker_id=worker_id,
-        worker_name=w_name,
-        profile_picture=w_pic,
-        worker_type=str(w_t),
-        period=period,
-        total_hours_worked=formatted_total_hours,
-        total_hours_worked_numeric=round(total_hours, 1),
-        total_shifts_count=shifts_count,
-        late_days_count=late_days,
-        avg_shift_duration=formatted_avg,
-        shifts=shift_details
-    )
-
-
-@shift_monitoring_router.get(
-    "/worker-daily-activity",
-    response_model=WorkerDailyActivityResponse,
-    summary="Get Worker Daily Activity (Lisa Visser Screenshot Detail)",
-    description="Returns a worker's daily activity breakdown for a specific month (default current month in YYYY-MM format e.g., '2026-06'). Includes total hours worked, attendance %, late days, absent days, and daily check-in/check-out logs."
-)
-async def get_worker_daily_activity(
-    worker_id: str,
-    month: Optional[str] = None,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-
-    now_utc = datetime.now(timezone.utc)
-    if not month:
-        month_iso = now_utc.strftime("%Y-%m")
-    else:
-        month_iso = month.strip()
-
-    try:
-        dt_month = datetime.strptime(month_iso, "%Y-%m")
-        month_label = dt_month.strftime("%B %Y")
-    except Exception:
-        dt_month = now_utc
-        month_iso = now_utc.strftime("%Y-%m")
-        month_label = now_utc.strftime("%B %Y")
-
-    obj_id = ObjectId(worker_id) if ObjectId.is_valid(worker_id) else worker_id
-    w_doc = await db["users"].find_one({"$or": [{"_id": obj_id}, {"id": worker_id}]})
-    if not w_doc:
-        raise HTTPException(status_code=404, detail="Worker user not found")
-
-    w_name = w_doc.get("full_name", "")
-    w_pic = w_doc.get("profile_photo")
-    w_t = w_doc.get("worker_type") or w_doc.get("onboarding_draft", {}).get("worker_type", "freelancer")
-    if hasattr(w_t, "value"):
-        w_t = w_t.value
-
-    shifts = await db["shifts"].find({
-        "workers.worker_id": worker_id,
-        "date": {"$regex": f"^{month_iso}"},
-        "status": {"$ne": "cancelled"}
-    }).sort("date", -1).to_list(length=1000)
-
-    daily_rows = []
-    total_hours_worked = 0.0
-    late_days_count = 0
-    absent_days_count = 0
-    attended_shifts_count = 0
-
-    for s in shifts:
-        s_id = str(s.get("id") or s.get("_id"))
-        d_str = s.get("date", "")
-
-        formatted_date = d_str
-        try:
-            parsed_d = datetime.strptime(d_str, "%Y-%m-%d")
-            formatted_date = f"{parsed_d.day} {parsed_d.strftime('%b %Y')}"
-        except Exception:
-            pass
-
-        w_record = {}
-        for w in s.get("workers", []):
-            if str(w.get("worker_id") or w.get("id")) == worker_id:
-                w_record = w
-                break
-
-        c_time_raw = w_record.get("checkin_time")
-        co_time_raw = w_record.get("checkout_time")
-        status_val = w_record.get("status")
-
-        c_time_str = "--:--"
-        if c_time_raw:
-            if isinstance(c_time_raw, str):
-                c_time_raw = datetime.fromisoformat(c_time_raw)
-            c_time_str = c_time_raw.strftime("%H:%M")
-
-        co_time_str = "--:--"
-        if co_time_raw:
-            if isinstance(co_time_raw, str):
-                co_time_raw = datetime.fromisoformat(co_time_raw)
-            co_time_str = co_time_raw.strftime("%H:%M")
-
-        dur = float(w_record.get("hours_worked", 0.0) or 0.0)
-        if not dur and c_time_raw:
-            dur = 8.0
-
-        total_hours_worked += dur
-
-        if status_val == "late":
-            status_badge = "Late"
-            late_days_count += 1
-            attended_shifts_count += 1
-        elif c_time_raw or status_val == "ontime":
-            status_badge = "On Time"
-            attended_shifts_count += 1
-        else:
-            status_badge = "Absent"
-            absent_days_count += 1
-
-        formatted_dur = f"{int(dur)}h" if dur.is_integer() else f"{dur:.1f}h"
-
-        daily_rows.append(WorkerDailyActivityRow(
-            shift_id=s_id,
-            date=formatted_date,
-            date_iso=d_str,
-            check_in_time=c_time_str,
-            check_out_time=co_time_str,
-            total_hours=formatted_dur,
-            total_hours_numeric=round(dur, 2),
-            status=status_badge
-        ))
-
-    total_shifts_count = len(shifts)
-    attendance_pct = (attended_shifts_count / total_shifts_count * 100.0) if total_shifts_count > 0 else 100.0
-
-    formatted_total_hours = f"{int(total_hours_worked)}h" if total_hours_worked.is_integer() else f"{total_hours_worked:.1f}h"
-    formatted_pct = f"{int(attendance_pct)}%" if attendance_pct.is_integer() else f"{attendance_pct:.1f}%"
-
-    return WorkerDailyActivityResponse(
-        worker_id=worker_id,
-        worker_name=w_name,
-        profile_picture=w_pic,
-        worker_type=str(w_t),
-        month=month_label,
-        month_iso=month_iso,
-        total_hours_worked=formatted_total_hours,
-        total_hours_worked_numeric=round(total_hours_worked, 1),
-        attendance_percentage=formatted_pct,
-        attendance_percentage_numeric=round(attendance_pct, 1),
-        late_days=late_days_count,
-        absent_days=absent_days_count,
-        total_shifts=total_shifts_count,
-        daily_activity=daily_rows
-    )
-
-
-@shift_monitoring_router.get(
-    "/live-worker-details/{worker_id}",
-    response_model=WorkerLiveDetailsResponse,
-    summary="Get Worker Live Details Drawer (Picture 4)",
-    description="Returns live worker shift status, period metrics (Today, Weekly, Monthly), and check-in/check-out details."
-)
-async def get_live_worker_details(
-    worker_id: str,
-    period: str = "today",  # today, weekly, monthly
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    today_dt = datetime.now(timezone.utc).date()
-    today_str = today_dt.isoformat()
-
-    # Calculate period date range
-    if period == "today":
-        start_date = today_str
-        end_date = today_str
-    elif period == "weekly":
-        start_date = (today_dt - timedelta(days=6)).isoformat()
-        end_date = today_str
-    else:  # monthly
-        start_date = (today_dt - timedelta(days=29)).isoformat()
-        end_date = today_str
-
-    # Fetch worker user
-    obj_id = ObjectId(worker_id) if ObjectId.is_valid(worker_id) else worker_id
-    w_doc = await db["users"].find_one({"$or": [{"_id": obj_id}, {"id": worker_id}]})
-    if not w_doc:
-        raise HTTPException(status_code=404, detail="Worker user not found")
-
-    w_name = w_doc.get("full_name", "Worker")
-    w_pic = w_doc.get("profile_photo")
-    w_t = w_doc.get("worker_type") or w_doc.get("onboarding_draft", {}).get("worker_type", "employee")
-    if hasattr(w_t, "value"):
-        w_t = w_t.value
-
-    # Query worker shifts in date range
-    period_shifts = await db["shifts"].find({
-        "workers.worker_id": worker_id,
-        "date": {"$gte": start_date, "$lte": end_date},
-        "status": {"$ne": "cancelled"}
-    }).to_list(length=1000)
-
-    total_hours = 0.0
-    shifts_count = len(period_shifts)
-
-    for s in period_shifts:
-        for w in s.get("workers", []):
-            if str(w.get("worker_id") or w.get("id")) == worker_id:
-                hw = float(w.get("hours_worked", 8.0) or 8.0)
-                total_hours += hw
-                break
-
-    avg_duration = (total_hours / shifts_count) if shifts_count > 0 else 0.0
-
-    # Fetch today's active or recent shift for Shift Details card
-    today_shift = await db["shifts"].find_one({
-        "workers.worker_id": worker_id,
-        "date": today_str,
-        "status": {"$ne": "cancelled"}
-    })
-
-    shift_id_label = None
-    shift_raw_id = None
-    current_status = "On Time"
-    check_in_str = "--:--"
-    check_out_str = "--:--"
-    duration_str = "0h"
-    shift_status = "Scheduled"
-
-    if today_shift:
-        shift_raw_id = str(today_shift.get("id") or today_shift.get("_id"))
-        shift_id_label = f"Shift #{shift_raw_id[:6]}"
-
-        for w in today_shift.get("workers", []):
-            if str(w.get("worker_id") or w.get("id")) == worker_id:
-                c_raw = w.get("checkin_time")
-                co_raw = w.get("checkout_time")
-                w_st = w.get("status", "ontime")
-
-                if c_raw:
-                    if isinstance(c_raw, str):
-                        c_raw = datetime.fromisoformat(c_raw)
-                    check_in_str = c_raw.strftime("%H:%M")
-
-                if co_raw:
-                    if isinstance(co_raw, str):
-                        co_raw = datetime.fromisoformat(co_raw)
-                    check_out_str = co_raw.strftime("%H:%M")
-
-                dur_val = float(w.get("hours_worked", 8.0) or 8.0)
-                duration_str = f"{int(dur_val)}h" if dur_val.is_integer() else f"{dur_val:.1f}h"
-
-                if w_st == "late":
-                    current_status = "Late"
-                    shift_status = "Late"
-                elif c_raw or w_st == "ontime":
-                    current_status = "On Time"
-                    shift_status = "On Time"
-                else:
-                    current_status = "Missing"
-                    shift_status = "Missing"
-                break
-    else:
-        check_in_str = "08:00"
-        check_out_str = "16:00"
-        duration_str = "8h"
-        shift_status = "On Time"
-
-    formatted_hours = f"{int(total_hours)}h" if total_hours.is_integer() else f"{total_hours:.1f}h"
-    formatted_avg = f"{round(avg_duration, 1)}h"
-
-    return WorkerLiveDetailsResponse(
-        worker_id=worker_id,
-        worker_name=w_name,
-        worker_type=str(w_t).capitalize(),
-        position=w_doc.get("position"),
-        shift_id=shift_raw_id,
-        shift_label=shift_id_label or "Shift #1041",
-        current_status=current_status,
-        profile_picture=w_pic,
-        period=period if period in ["today", "weekly", "monthly"] else "today",
-        hours_worked=formatted_hours,
-        hours_worked_numeric=round(total_hours, 1),
-        shifts_count=shifts_count,
-        avg_duration=formatted_avg,
-        avg_duration_numeric=round(avg_duration, 1),
-        shift_details=WorkerLiveShiftDetail(
-            check_in=check_in_str,
-            check_out=check_out_str,
-            duration=duration_str,
-            status=shift_status
-        ),
-        activity_history_available=True
-    )
-
-
-@shift_monitoring_router.get(
-    "/worker-attendance-stats/{worker_id}",
-    response_model=WorkerAttendanceStatsDrawerResponse,
-    summary="Get Worker Attendance Stats Drawer (Picture 5)",
-    description="Returns detailed worker metrics (hours worked, completed shifts, avg duration, late check-ins) and weekly/monthly trend series for charts."
-)
-async def get_worker_attendance_stats_drawer(
-    worker_id: str,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    today_dt = datetime.now(timezone.utc).date()
-
-    obj_id = ObjectId(worker_id) if ObjectId.is_valid(worker_id) else worker_id
-    w_doc = await db["users"].find_one({"$or": [{"_id": obj_id}, {"id": worker_id}]})
-    if not w_doc:
-        raise HTTPException(status_code=404, detail="Worker user not found")
-
-    w_name = w_doc.get("full_name", "Worker")
-    w_pic = w_doc.get("profile_photo")
-    w_t = w_doc.get("worker_type") or w_doc.get("onboarding_draft", {}).get("worker_type", "employee")
-    if hasattr(w_t, "value"):
-        w_t = w_t.value
-
-    shifts = await db["shifts"].find({
-        "workers.worker_id": worker_id,
-        "status": {"$ne": "cancelled"}
-    }).sort("date", 1).to_list(length=2000)
-
-    total_hours = 0.0
-    completed_shifts = 0
-    late_checkins = 0
-
-    weekly_buckets = [0.0, 0.0, 0.0, 0.0]
-    monthly_buckets = {}
-    for i in range(5, -1, -1):
-        m_dt = today_dt.replace(day=1) - timedelta(days=i * 28)
-        m_key = m_dt.strftime("%b")
-        monthly_buckets[m_key] = 0.0
-
-    for s in shifts:
-        s_date_str = s.get("date")
-        try:
-            s_dt = datetime.strptime(s_date_str, "%Y-%m-%d").date()
-        except Exception:
-            continue
-
-        for w in s.get("workers", []):
-            if str(w.get("worker_id") or w.get("id")) == worker_id:
-                hw = float(w.get("hours_worked", 8.0) or 8.0)
-                total_hours += hw
-                completed_shifts += 1
-                if w.get("status") == "late":
-                    late_checkins += 1
-
-                diff_days = (today_dt - s_dt).days
-                if 0 <= diff_days < 28:
-                    w_idx = 3 - (diff_days // 7)
-                    if 0 <= w_idx < 4:
-                        weekly_buckets[w_idx] += hw
-
-                m_key = s_dt.strftime("%b")
-                if m_key in monthly_buckets:
-                    monthly_buckets[m_key] += hw
-                break
-
-    avg_duration = (total_hours / completed_shifts) if completed_shifts > 0 else 0.0
-
-    weekly_trend = [
-        WeeklyTrendItem(week_label=f"W{i+1}", hours=round(weekly_buckets[i], 1))
-        for i in range(4)
-    ]
-
-    monthly_trend = [
-        MonthlyTrendItem(month_label=k, hours=round(v, 1))
-        for k, v in monthly_buckets.items()
-    ]
-
-    formatted_hours = f"{int(total_hours)}h" if total_hours.is_integer() else f"{total_hours:.1f}h"
-    formatted_avg = f"{round(avg_duration, 1)}h"
-
-    return WorkerAttendanceStatsDrawerResponse(
-        worker_id=worker_id,
-        worker_name=w_name,
-        worker_type=str(w_t).capitalize(),
-        profile_picture=w_pic,
-        hours_worked=formatted_hours,
-        hours_worked_numeric=round(total_hours, 1),
-        completed_shifts=completed_shifts,
-        avg_shift_duration=formatted_avg,
-        avg_shift_duration_numeric=round(avg_duration, 1),
-        late_checkins=late_checkins,
-        weekly_hours_trend=weekly_trend,
-        monthly_hours_trend=monthly_trend
-    )
-

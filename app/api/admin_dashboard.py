@@ -15,7 +15,7 @@ from app.schemas.admin_dashboard import (
     AdminDashboardOperationsOverviewResponse
 )
 
-admin_dashboard_router = APIRouter(prefix="/manager/dashboard", tags=["Admin Dashboard HomePage"])
+admin_dashboard_router = APIRouter(prefix="/manager/dashboard", tags=["Manager Dashboard HomePage"])
 
 def require_manager(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
     if current_user.role not in [RoleEnum.manager, RoleEnum.admin, "manager", "admin"]:

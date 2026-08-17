@@ -8,9 +8,9 @@ class OneSignalService:
         self.api_key = settings.ONESIGNAL_REST_API_KEY
         self.base_url = "https://onesignal.com/api/v1/notifications"
 
-    async def send_notification(self, headings: str, contents: str, player_ids: List[str] = None):
+    async def send_notification(self, headings: str, contents: str, player_ids: List[str] = None, data: dict = None):
         if not self.app_id or not self.api_key:
-            print(f"Mock OneSignal Notification: {headings} | {contents}")
+            print(f"Mock OneSignal Notification: {headings} | {contents} | data={data}")
             return
             
         headers = {
@@ -23,6 +23,8 @@ class OneSignalService:
             "contents": {"en": contents},
             "headings": {"en": headings},
         }
+        if data:
+            payload["data"] = data
         
         if player_ids:
             payload["include_player_ids"] = player_ids

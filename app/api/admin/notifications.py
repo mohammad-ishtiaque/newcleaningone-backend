@@ -10,7 +10,7 @@ from app.schemas.notification import (
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
 
-admin_notifications_router = APIRouter(prefix="/manager", tags=["Admin Notification Center"])
+admin_notifications_router = APIRouter(prefix="/manager", tags=["Manager Notification Center"])
 
 @admin_notifications_router.get("/notifications", response_model=AdminNotificationCenterResponse, summary="Admin Notification Center (Image Mockup)")
 async def get_admin_notification_center(

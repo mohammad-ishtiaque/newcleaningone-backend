@@ -9,7 +9,9 @@ class NotificationDB(BaseModel):
     recipient_type: str = "all" # worker, client, all, specific
     title: str
     message: str
-    notification_type: str = "general" # legal_update, support_reply, general
+    notification_type: str = "general" # legal_update, support_reply, shift_assignment, general
+    plan_id: Optional[str] = None
+    data: Optional[dict] = Field(default_factory=dict)
     is_read: bool = False
     read_by: list[str] = Field(default_factory=list) # For broadcast notifications, track user IDs who read it
     deleted_by: list[str] = Field(default_factory=list) # For broadcast notifications, track user IDs who deleted it

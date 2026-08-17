@@ -10,7 +10,7 @@ from app.schemas.escalation import (
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
 
-escalations_router = APIRouter(prefix="/manager", tags=["Admin Escalation Management"])
+escalations_router = APIRouter(prefix="/manager", tags=["Manager Escalation Management"])
 
 @escalations_router.get("/escalations", response_model=EscalationPaginatedResponse, summary="Admin Escalations Grid (Image 1 Mockup)")
 async def get_admin_escalations(

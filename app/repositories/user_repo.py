@@ -21,7 +21,10 @@ class UserRepository:
 
     async def get_by_id(self, user_id: str) -> Optional[UserInDB]:
         try:
-            user_doc = await self.collection.find_one({"_id": ObjectId(user_id)})
+            if ObjectId.is_valid(user_id):
+                user_doc = await self.collection.find_one({"$or": [{"_id": ObjectId(user_id)}, {"_id": user_id}, {"id": user_id}]})
+            else:
+                user_doc = await self.collection.find_one({"$or": [{"_id": user_id}, {"id": user_id}]})
             if user_doc:
                 user_doc["_id"] = str(user_doc["_id"])
                 return UserInDB(**user_doc)
@@ -37,10 +40,12 @@ class UserRepository:
     
     async def update(self, user: UserInDB) -> UserInDB:
         user_dict = user.model_dump(by_alias=True, exclude={"id"})
-        await self.collection.update_one(
-            {"_id": ObjectId(user.id)},
-            {"$set": user_dict}
-        )
+        uid = str(user.id)
+        if ObjectId.is_valid(uid):
+            query = {"$or": [{"_id": ObjectId(uid)}, {"_id": uid}, {"id": uid}]}
+        else:
+            query = {"$or": [{"_id": uid}, {"id": uid}]}
+        await self.collection.update_one(query, {"$set": user_dict})
         return user
 
     async def get_next_employee_sequence(self) -> int:

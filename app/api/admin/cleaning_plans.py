@@ -4,364 +4,243 @@ from fastapi import APIRouter, Depends, status, HTTPException
 from typing import List, Optional, Union
 from app.core.database import get_database
 from app.schemas.client_list import (
-    CleaningPlanCreate, CleaningPlanUpdate, CleaningPlanResponse, CleaningPlanPaginatedResponse,
-    GlobalCleaningPlanCreate, GlobalCleaningPlanUpdate, GlobalCleaningPlanResponse,
-    GlobalCleaningPlanPaginatedResponse, GlobalCleaningPlanListItemResponse,
     CleaningPlanRoomDetail, CleaningPlanWorkerDetail,
+    CleaningPlanClientDetail, CleaningPlanManagerDetail,
     ManagerCleaningPlanCreate, ManagerCleaningPlanUpdate,
     ManagerCleaningPlanDetailResponse, ManagerCleaningPlanListItemResponse,
     ManagerCleaningPlanPaginatedResponse,
+    CleaningPlanRoomDropdownItem, CleaningPlanRoomDropdownPaginatedResponse,
+    CleaningPlanWorkerDropdownItem, CleaningPlanWorkerDropdownPaginatedResponse,
+    AssignWorkersToCleaningPlanRequest,
     CleaningTaskCreate, CleaningTaskResponse,
     RequiredPhotoCreate, RequiredPhotoResponse
 )
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
+from app.api.admin.cleaning_plan_worker_utils import (
+    parse_time_to_minutes, calculate_worker_month_stats, check_worker_time_availability,
+    normalize_worker_position, resolve_plan_working_days, calculate_worker_last_work_ended,
+    sort_workers_by_suitability, send_cleaning_plan_assignment_notifications
+)
+from app.api.admin.cleaning_plan_formatters import (
+    _format_tasks_list, _format_photos_list, _resolve_rooms_data,
+    _resolve_clients_data, _resolve_manager_data, _resolve_workers_data,
+    _calculate_end_time, _format_manager_cleaning_plan_detail,
+    _format_manager_cleaning_plan_list_item
+)
 
-cleaning_plan_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Cleaning Plan Management"])
+cleaning_plan_mgmt_router = APIRouter(prefix="/manager", tags=["Manager Cleaning Plan Management"])
 
 
-# ==========================================
-# Helpers for Dynamic Aggregations
-# ==========================================
+# ============================================================================
+# 1. Room Dropdown for Cleaning Plan Creation (Paginated + Filter)
+# ============================================================================
 
-async def _resolve_rooms_data(room_ids: List[str], db) -> List[CleaningPlanRoomDetail]:
-    if not room_ids:
-        return []
-    cursor = db["rooms"].find({"$or": [{"_id": {"$in": room_ids}}, {"id": {"$in": room_ids}}, {"room_id": {"$in": room_ids}}]})
-    raw_rooms = await cursor.to_list(length=len(room_ids) * 2)
+@cleaning_plan_mgmt_router.get(
+    "/dropdowns/rooms",
+    response_model=CleaningPlanRoomDropdownPaginatedResponse,
+    summary="Get Room Dropdowns for Cleaning Plan"
+)
+async def get_cleaning_plan_room_dropdowns(
+    client_id: Optional[str] = None,
+    location_id: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    limit: int = 10,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {}
 
-    room_details = []
+    if location_id:
+        query["location_id"] = location_id
+    elif client_id:
+        loc_cursor = db["locations"].find({"$or": [{"client_id": client_id}, {"id": client_id}]})
+        loc_docs = await loc_cursor.to_list(length=1000)
+        loc_ids = [str(l.get("_id") or l.get("id")) for l in loc_docs]
+        query["$or"] = [
+            {"client_id": client_id},
+            {"location_id": {"$in": loc_ids}}
+        ]
+
+    if search:
+        search_filter = [
+            {"room_name": {"$regex": search, "$options": "i"}},
+            {"name": {"$regex": search, "$options": "i"}},
+            {"room_type": {"$regex": search, "$options": "i"}}
+        ]
+        if "$or" in query:
+            query = {"$and": [query, {"$or": search_filter}]}
+        else:
+            query["$or"] = search_filter
+
+    total_count = await db["rooms"].count_documents(query)
+    skip = (page - 1) * limit
+    cursor = db["rooms"].find(query).sort("created_at", -1).skip(skip).limit(limit)
+    raw_rooms = await cursor.to_list(length=limit)
+
+    rooms_list = []
     for r in raw_rooms:
-        rid = str(r.get("_id") or r.get("id") or r.get("room_id"))
-        r_name = r.get("room_name") or r.get("name", "Room")
-        r_type = r.get("room_type") or r.get("type", "standard")
-        flr = r.get("floor", 1)
-        dur = r.get("duration") or r.get("est_cleaning_duration_minutes", 30)
-        freq = r.get("monthly_cleaning_frequency", 4)
-        c_type = r.get("clean_type") or r.get("cleaning_type", "standard")
+        rid = str(r.get("_id") or r.get("id") or r.get("room_id") or "")
+        rname = r.get("room_name") or r.get("name") or "Room"
+        rtype = r.get("room_type") or r.get("type") or "standard"
+        photo_num = len(r.get("required_photos", [])) if r.get("required_photos") else (r.get("photo_number") or r.get("required_photos_count", 0))
+        task_num = len(r.get("tasks", [])) if r.get("tasks") else (r.get("task_number") or r.get("tasks_count", 0))
 
-        # Format tasks
-        raw_tasks = r.get("tasks", [])
-        tasks = []
-        for t in raw_tasks:
-            if isinstance(t, dict):
-                t_id = str(t.get("id") or t.get("_id") or uuid.uuid4().hex[:8])
-                tasks.append(CleaningTaskResponse(
-                    id=t_id,
-                    name=t.get("name", "Task"),
-                    frequency_type=t.get("frequency_type", "every_visit")
-                ))
-            elif isinstance(t, str):
-                tasks.append(CleaningTaskResponse(
-                    id=uuid.uuid4().hex[:8],
-                    name=t,
-                    frequency_type="every_visit"
-                ))
-
-        # Format photos
-        raw_photos = r.get("required_photos", [])
-        photos = []
-        for p in raw_photos:
-            if isinstance(p, dict):
-                p_id = str(p.get("id") or p.get("_id") or uuid.uuid4().hex[:8])
-                photos.append(RequiredPhotoResponse(
-                    id=p_id,
-                    name=p.get("name", "Photo"),
-                    frequency_type=p.get("frequency_type", "every_visit")
-                ))
-            elif isinstance(p, str):
-                photos.append(RequiredPhotoResponse(
-                    id=uuid.uuid4().hex[:8],
-                    name=p,
-                    frequency_type="every_visit"
-                ))
-
-        room_details.append(CleaningPlanRoomDetail(
+        rooms_list.append(CleaningPlanRoomDropdownItem(
             room_id=rid,
-            room_name=r_name,
-            room_type=r_type,
-            floor=flr,
-            duration=dur,
-            monthly_cleaning_frequency=freq,
-            clean_type=c_type,
-            tasks=tasks,
-            required_photos=photos
+            room_name=rname,
+            room_type=rtype,
+            photo_number=photo_num,
+            task_number=task_num
         ))
 
-    return room_details
-
-
-async def _resolve_workers_data(worker_ids: List[str], db) -> List[CleaningPlanWorkerDetail]:
-    if not worker_ids:
-        return []
-    cursor = db["users"].find({"$or": [{"_id": {"$in": worker_ids}}, {"id": {"$in": worker_ids}}]})
-    raw_workers = await cursor.to_list(length=len(worker_ids) * 2)
-
-    workers = []
-    for w in raw_workers:
-        wid = str(w.get("_id") or w.get("id"))
-        w_name = w.get("full_name") or w.get("name") or "Worker"
-        workers.append(CleaningPlanWorkerDetail(
-            worker_id=wid,
-            name=w_name,
-            email=w.get("email"),
-            role=w.get("role", "worker"),
-            phone=w.get("phone"),
-            profile_picture=w.get("profile_picture")
-        ))
-    return workers
-
-
-async def _format_manager_cleaning_plan_detail(doc: dict, db) -> ManagerCleaningPlanDetailResponse:
-    pid = str(doc.get("_id") or doc.get("id"))
-    title = doc.get("title") or doc.get("plan_name", "Cleaning Plan")
-    desc = doc.get("description", "")
-    cid = doc.get("client_id", "")
-    cname = doc.get("company_name") or doc.get("client_name", "")
-    lid = doc.get("location_id", "")
-    lname = doc.get("location_name", "")
-
-    # Backfill client & location names if missing
-    if not cname and cid:
-        cdoc = await db["client_list"].find_one({"$or": [{"_id": cid}, {"id": cid}]})
-        if cdoc:
-            cname = cdoc.get("company_name", "")
-    if not lname and lid:
-        ldoc = await db["locations"].find_one({"$or": [{"_id": lid}, {"id": lid}]})
-        if ldoc:
-            lname = ldoc.get("name", "")
-            if not cname:
-                cname = ldoc.get("company_name", "")
-
-    room_ids = doc.get("room_ids", [])
-    worker_ids = doc.get("worker_ids", [])
-
-    # Fetch room and worker details
-    rooms_data = await _resolve_rooms_data(room_ids, db)
-    workers_data = await _resolve_workers_data(worker_ids, db)
-
-    # Format additional tasks & photos
-    add_tasks_raw = doc.get("additional_tasks", [])
-    add_tasks = []
-    for t in add_tasks_raw:
-        if isinstance(t, dict):
-            t_id = str(t.get("id") or t.get("_id") or uuid.uuid4().hex[:8])
-            add_tasks.append(CleaningTaskResponse(
-                id=t_id,
-                name=t.get("name", "Task"),
-                frequency_type=t.get("frequency_type", "every_visit")
-            ))
-        elif isinstance(t, str):
-            add_tasks.append(CleaningTaskResponse(
-                id=uuid.uuid4().hex[:8],
-                name=t,
-                frequency_type="every_visit"
-            ))
-
-    add_photos_raw = doc.get("additional_required_photos", [])
-    add_photos = []
-    for p in add_photos_raw:
-        if isinstance(p, dict):
-            p_id = str(p.get("id") or p.get("_id") or uuid.uuid4().hex[:8])
-            add_photos.append(RequiredPhotoResponse(
-                id=p_id,
-                name=p.get("name", "Photo"),
-                frequency_type=p.get("frequency_type", "every_visit")
-            ))
-        elif isinstance(p, str):
-            add_photos.append(RequiredPhotoResponse(
-                id=uuid.uuid4().hex[:8],
-                name=p,
-                frequency_type="every_visit"
-            ))
-
-    # Aggregated tasks and photos
-    all_tasks = []
-    for r in rooms_data:
-        all_tasks.extend(r.tasks)
-    all_tasks.extend(add_tasks)
-
-    all_photos = []
-    for r in rooms_data:
-        all_photos.extend(r.required_photos)
-    all_photos.extend(add_photos)
-
-    c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
-    u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)
-
-    return ManagerCleaningPlanDetailResponse(
-        id=pid,
-        title=title,
-        description=desc,
-        client_id=cid,
-        company_name=cname or "Client Company",
-        location_id=lid,
-        location_name=lname or "Location Name",
-        room_ids=room_ids,
-        rooms=rooms_data,
-        rooms_count=len(rooms_data),
-        worker_ids=worker_ids,
-        workers=workers_data,
-        workers_count=len(workers_data),
-        additional_tasks=add_tasks,
-        additional_required_photos=add_photos,
-        all_tasks=all_tasks,
-        all_required_photos=all_photos,
-        total_tasks_count=len(all_tasks),
-        total_photos_count=len(all_photos),
-        frequency_type=doc.get("frequency_type") or doc.get("period", "weekly"),
-        duration_minutes=doc.get("duration_minutes", 60),
-        is_active=doc.get("is_active", True),
-        created_at=c_at,
-        updated_at=u_at
+    return CleaningPlanRoomDropdownPaginatedResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        rooms=rooms_list
     )
 
-
-async def _format_manager_cleaning_plan_list_item(doc: dict, db) -> ManagerCleaningPlanListItemResponse:
-    pid = str(doc.get("_id") or doc.get("id"))
-    title = doc.get("title") or doc.get("plan_name", "Cleaning Plan")
-    cid = doc.get("client_id", "")
-    cname = doc.get("company_name") or doc.get("client_name", "")
-    lid = doc.get("location_id", "")
-    lname = doc.get("location_name", "")
-
-    # Backfill client & location names if missing
-    if not cname and cid:
-        cdoc = await db["client_list"].find_one({"$or": [{"_id": cid}, {"id": cid}]})
-        if cdoc:
-            cname = cdoc.get("company_name", "")
-    if not lname and lid:
-        ldoc = await db["locations"].find_one({"$or": [{"_id": lid}, {"id": lid}]})
-        if ldoc:
-            lname = ldoc.get("name", "")
-            if not cname:
-                cname = ldoc.get("company_name", "")
-
-    room_ids = doc.get("room_ids", [])
-    worker_ids = doc.get("worker_ids", [])
-
-    # Fetch room names
-    room_names = []
-    if room_ids:
-        cursor_r = db["rooms"].find({"$or": [{"_id": {"$in": room_ids}}, {"id": {"$in": room_ids}}, {"room_id": {"$in": room_ids}}]})
-        rooms_found = await cursor_r.to_list(length=len(room_ids) * 2)
-        room_names = [r.get("room_name") or r.get("name", "Room") for r in rooms_found]
-
-    # Fetch worker names
-    worker_names = []
-    if worker_ids:
-        cursor_w = db["users"].find({"$or": [{"_id": {"$in": worker_ids}}, {"id": {"$in": worker_ids}}]})
-        workers_found = await cursor_w.to_list(length=len(worker_ids) * 2)
-        worker_names = [w.get("full_name") or w.get("name", "Worker") for w in workers_found]
-
-    t_cnt = doc.get("total_tasks_count", 0)
-    p_cnt = doc.get("total_photos_count", 0)
-
-    # If count not stored in doc, calculate from room_ids + additional
-    if t_cnt == 0 or p_cnt == 0:
-        rooms_data = await _resolve_rooms_data(room_ids, db)
-        add_t = doc.get("additional_tasks", [])
-        add_p = doc.get("additional_required_photos", [])
-        t_cnt = sum(len(r.tasks) for r in rooms_data) + len(add_t)
-        p_cnt = sum(len(r.required_photos) for r in rooms_data) + len(add_p)
-
-    c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
-    u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)
-
-    return ManagerCleaningPlanListItemResponse(
-        id=pid,
-        title=title,
-        client_id=cid,
-        company_name=cname or "Client Company",
-        location_id=lid,
-        location_name=lname or "Location Name",
-        room_ids=room_ids,
-        room_names=room_names,
-        rooms_count=len(room_ids),
-        worker_ids=worker_ids,
-        worker_names=worker_names,
-        workers_count=len(worker_ids),
-        total_tasks_count=t_cnt,
-        total_photos_count=p_cnt,
-        frequency_type=doc.get("frequency_type") or doc.get("period", "weekly"),
-        duration_minutes=doc.get("duration_minutes", 60),
-        is_active=doc.get("is_active", True),
-        created_at=c_at,
-        updated_at=u_at
-    )
-
-
-# ==========================================
-# New Manager Cleaning Plan CRUD Endpoints
-# ==========================================
 
 @cleaning_plan_mgmt_router.post(
     "/cleaning-plans",
     response_model=ManagerCleaningPlanDetailResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Create Cleaning Plan"
+    summary="Create Cleaning Plan",
+    description="""
+### Create Cleaning Plan / Recurring Shift (Draft)
+Creates a cleaning plan / shift draft with automated duration calculation, multi-client aggregation, and auto-computed end time.
+
+**Key Parameters**:
+- `title`: Plan title
+- `room_ids`: List of room IDs across multiple clients
+- `date`: Base shift date (`MM/DD/YYYY` or `YYYY-MM-DD`)
+- `start_time`: e.g. `08:00 AM` (auto-computes `end_time`)
+- `repeat_shift`: `Does not repeat`, `Every day`, `Standard working week`, `Weekly`, `Monthly`
+- `repeat_until`: Optional recurrence end date
+- `working_days`: Active shift days (e.g. `["sun"]` for Monthly Sunday cleaning)
+- `shift_notes`: Shift notes and instructions
+- `additional_tasks`, `additional_required_photos`: Extra tasks and photos outside room defaults
+"""
 )
 async def create_manager_cleaning_plan(
     plan_in: ManagerCleaningPlanCreate,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    l_doc = await db["locations"].find_one({"$or": [{"_id": plan_in.location_id}, {"id": plan_in.location_id}]})
-    if not l_doc:
-        raise HTTPException(status_code=404, detail="Location not found")
 
-    client_id = l_doc.get("client_id", "")
-    company_name = l_doc.get("company_name", "")
-    location_name = l_doc.get("name", "")
+    # 1. Resolve room details
+    rooms_data = await _resolve_rooms_data(plan_in.room_ids, db)
 
-    if not company_name and client_id:
-        c_doc = await db["client_list"].find_one({"$or": [{"_id": client_id}, {"id": client_id}]})
-        if c_doc:
-            company_name = c_doc.get("company_name", "Client Company")
+    # 2. Resolve client information from rooms
+    clients_data = await _resolve_clients_data(rooms_data, db)
+    client_ids = [c.client_id for c in clients_data]
+    client_names = [c.company_name for c in clients_data]
+
+    location_id = plan_in.location_id
+    location_name = ""
+    if location_id:
+        l_doc = await db["locations"].find_one({"$or": [{"_id": location_id}, {"id": location_id}]})
+        if l_doc:
+            location_name = l_doc.get("name", "")
+    elif plan_in.room_ids:
+        raw_r = await db["rooms"].find_one({"$or": [{"_id": {"$in": plan_in.room_ids}}, {"id": {"$in": plan_in.room_ids}}, {"room_id": {"$in": plan_in.room_ids}}]})
+        if raw_r:
+            location_id = str(raw_r.get("location_id") or "")
+            location_name = raw_r.get("location_name", "")
+            if location_id and not location_name:
+                l_doc = await db["locations"].find_one({"$or": [{"_id": location_id}, {"id": location_id}]})
+                if l_doc:
+                    location_name = l_doc.get("name", "")
+
+    # 3. Calculate duration (sum from rooms if not supplied)
+    if plan_in.duration_minutes is not None:
+        duration_minutes = plan_in.duration_minutes
+    else:
+        duration_minutes = sum(r.duration for r in rooms_data)
+        if duration_minutes == 0:
+            duration_minutes = 60
+
+    # 4. Process additional tasks and photos with assigned IDs
+    add_tasks_dicts = []
+    for t in (plan_in.additional_tasks or []):
+        t_dict = t.model_dump()
+        if not t_dict.get("id"):
+            t_dict["id"] = uuid.uuid4().hex[:8]
+        add_tasks_dicts.append(t_dict)
+
+    add_photos_dicts = []
+    for p in (plan_in.additional_required_photos or []):
+        p_dict = p.model_dump()
+        if not p_dict.get("id"):
+            p_dict["id"] = uuid.uuid4().hex[:8]
+        add_photos_dicts.append(p_dict)
+
+    # 5. Calculate total tasks and photos
+    total_tasks_count = sum(len(r.tasks) for r in rooms_data) + len(add_tasks_dicts)
+    total_photos_count = sum(len(r.required_photos) for r in rooms_data) + len(add_photos_dicts)
+
+    # 6. Frequency days & Repeat shift
+    date_val = plan_in.date or "2026-08-17"
+    repeat_shift_val = plan_in.repeat_shift or "Standard working week"
+    working_days = resolve_plan_working_days(
+        repeat_shift=repeat_shift_val,
+        working_days=plan_in.working_days,
+        frequency=None,
+        date_str=date_val
+    )
+
+    start_time_val = plan_in.start_time or "08:00 AM"
+    end_time_val = _calculate_end_time(start_time_val, duration_minutes)
+    repeat_until_val = plan_in.repeat_until
+    shift_notes_val = plan_in.shift_notes or plan_in.description or ""
+
+    manager_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", ""))
 
     now = datetime.now(timezone.utc)
     plan_id = f"plan_{uuid.uuid4().hex[:10]}"
-
-    # Resolve room details
-    rooms_data = await _resolve_rooms_data(plan_in.room_ids, db)
-
-    add_tasks_dicts = [t.model_dump() for t in (plan_in.additional_tasks or [])]
-    add_photos_dicts = [p.model_dump() for p in (plan_in.additional_required_photos or [])]
-
-    total_tasks_count = sum(len(r.tasks) for r in rooms_data) + len(add_tasks_dicts)
-    total_photos_count = sum(len(r.required_photos) for r in rooms_data) + len(add_photos_dicts)
 
     doc = {
         "_id": plan_id,
         "id": plan_id,
         "title": plan_in.title,
         "plan_name": plan_in.title,
-        "description": plan_in.description or "",
-        "client_id": client_id,
-        "company_name": company_name,
-        "location_id": plan_in.location_id,
-        "location_name": location_name,
+        "shift_notes": shift_notes_val,
+        "manager_id": manager_id,
+        "client_ids": client_ids,
+        "client_names": client_names,
+        "client_id": client_ids[0] if client_ids else "",
+        "company_name": client_names[0] if client_names else "",
+        "location_id": location_id or "",
+        "location_name": location_name or "",
         "room_ids": plan_in.room_ids,
         "worker_ids": [],
-        "frequency_type": plan_in.frequency_type,
-        "period": plan_in.frequency_type,
-        "duration_minutes": plan_in.duration_minutes,
+        "date": date_val,
+        "start_time": start_time_val,
+        "end_time": end_time_val,
+        "repeat_shift": repeat_shift_val,
+        "repeat_until": repeat_until_val,
+        "working_days": working_days,
+        "duration_minutes": duration_minutes,
         "additional_tasks": add_tasks_dicts,
         "additional_required_photos": add_photos_dicts,
         "total_tasks_count": total_tasks_count,
         "total_photos_count": total_photos_count,
+        "status": "draft",
         "is_active": True,
         "created_at": now,
         "updated_at": now
     }
 
     await db["cleaning_plans"].insert_one(doc)
-    await db["locations"].update_one(
-        {"$or": [{"_id": plan_in.location_id}, {"id": plan_in.location_id}]},
-        {"$inc": {"cleaning_plans_count": 1}}
-    )
+    if location_id:
+        await db["locations"].update_one(
+            {"$or": [{"_id": location_id}, {"id": location_id}]},
+            {"$inc": {"cleaning_plans_count": 1}}
+        )
 
-    return await _format_manager_cleaning_plan_detail(doc, db)
+    return await _format_manager_cleaning_plan_detail(doc, db, current_user=current_user)
 
 
 @cleaning_plan_mgmt_router.get(
@@ -382,7 +261,10 @@ async def list_manager_cleaning_plans(
     db = get_database()
     query = {}
     if client_id:
-        query["client_id"] = client_id
+        query["$or"] = [
+            {"client_id": client_id},
+            {"client_ids": client_id}
+        ]
     if location_id:
         query["location_id"] = location_id
     if room_id:
@@ -395,7 +277,8 @@ async def list_manager_cleaning_plans(
             {"plan_name": {"$regex": search, "$options": "i"}},
             {"location_name": {"$regex": search, "$options": "i"}},
             {"company_name": {"$regex": search, "$options": "i"}},
-            {"client_name": {"$regex": search, "$options": "i"}}
+            {"client_name": {"$regex": search, "$options": "i"}},
+            {"client_names": {"$regex": search, "$options": "i"}}
         ]
         if "$or" in query:
             query = {"$and": [query, {"$or": search_filter}]}
@@ -431,7 +314,7 @@ async def get_manager_cleaning_plan_detail(
     if not plan_doc:
         raise HTTPException(status_code=404, detail="Cleaning plan not found")
 
-    return await _format_manager_cleaning_plan_detail(plan_doc, db)
+    return await _format_manager_cleaning_plan_detail(plan_doc, db, current_user=current_user)
 
 
 @cleaning_plan_mgmt_router.patch(
@@ -455,8 +338,21 @@ async def update_manager_cleaning_plan(
 
     if "title" in update_fields:
         update_fields["plan_name"] = update_fields["title"]
-    if "frequency_type" in update_fields:
-        update_fields["period"] = update_fields["frequency_type"]
+    if "working_days" in update_fields and isinstance(update_fields["working_days"], list):
+        update_fields["working_days"] = [str(d).strip().lower() for d in update_fields["working_days"] if str(d).strip()]
+    elif "repeat_shift" in update_fields:
+        r_days = resolve_plan_working_days(
+            repeat_shift=update_fields["repeat_shift"],
+            working_days=None,
+            frequency=None,
+            date_str=update_fields.get("date", plan_doc.get("date"))
+        )
+        update_fields["working_days"] = r_days
+    if "description" in update_fields:
+        if "shift_notes" not in update_fields:
+            update_fields["shift_notes"] = update_fields.pop("description")
+        else:
+            update_fields.pop("description", None)
 
     # Re-calculate counts if room_ids or additional tasks/photos changed
     merged_room_ids = update_fields.get("room_ids", plan_doc.get("room_ids", []))
@@ -467,10 +363,20 @@ async def update_manager_cleaning_plan(
     update_fields["total_tasks_count"] = sum(len(r.tasks) for r in rooms_data) + len(merged_add_tasks)
     update_fields["total_photos_count"] = sum(len(r.required_photos) for r in rooms_data) + len(merged_add_photos)
 
+    # Recalculate duration and end_time
+    if "duration_minutes" not in update_fields:
+        new_dur = sum(r.duration for r in rooms_data) if rooms_data else plan_doc.get("duration_minutes", 60)
+        update_fields["duration_minutes"] = new_dur
+    else:
+        new_dur = update_fields["duration_minutes"]
+
+    st_time = update_fields.get("start_time", plan_doc.get("start_time", "08:00 AM"))
+    update_fields["end_time"] = _calculate_end_time(st_time, new_dur)
+
     await db["cleaning_plans"].update_one(query, {"$set": update_fields})
     updated_doc = await db["cleaning_plans"].find_one(query)
 
-    return await _format_manager_cleaning_plan_detail(updated_doc, db)
+    return await _format_manager_cleaning_plan_detail(updated_doc, db, current_user=current_user)
 
 
 @cleaning_plan_mgmt_router.delete(
@@ -500,205 +406,292 @@ async def delete_manager_cleaning_plan(
     return {"message": "Cleaning plan deleted successfully"}
 
 
-# ==========================================
-# Legacy Endpoints (Hidden from OpenAPI Schema)
-# ==========================================
-
-def _format_legacy_cleaning_plan_response(doc: dict) -> CleaningPlanResponse:
-    cp_id = str(doc.get("_id") or doc.get("id"))
-    return CleaningPlanResponse(
-        id=cp_id,
-        plan_name=doc.get("title") or doc.get("plan_name", "Cleaning Plan"),
-        task_count=doc.get("total_tasks_count", 0),
-        tasks=[]
-    )
-
-@cleaning_plan_mgmt_router.post(
-    "/locations/{location_id}/cleaning-plans",
-    response_model=CleaningPlanResponse,
-    status_code=status.HTTP_201_CREATED,
-    include_in_schema=False
-)
-async def create_cleaning_plan(
-    location_id: str,
-    plan_in: CleaningPlanCreate,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    l_doc = await db["locations"].find_one({"$or": [{"_id": location_id}, {"id": location_id}]})
-    if not l_doc:
-        raise HTTPException(status_code=404, detail="Location not found")
-
-    now = datetime.now(timezone.utc)
-    plan_id = f"plan_{uuid.uuid4().hex[:10]}"
-    client_id = l_doc.get("client_id", "")
-
-    doc = {
-        "_id": plan_id,
-        "id": plan_id,
-        "location_id": location_id,
-        "client_id": client_id,
-        **plan_in.model_dump(),
-        "is_active": True,
-        "created_at": now,
-        "updated_at": now
-    }
-
-    await db["cleaning_plans"].insert_one(doc)
-    await db["locations"].update_one(
-        {"$or": [{"_id": location_id}, {"id": location_id}]},
-        {"$inc": {"cleaning_plans_count": 1}}
-    )
-
-    return _format_legacy_cleaning_plan_response(doc)
-
+# ============================================================================
+# Worker Dropdown & Worker Assignment for Cleaning Plans
+# ============================================================================
 
 @cleaning_plan_mgmt_router.get(
-    "/locations/{location_id}/cleaning-plans",
-    response_model=CleaningPlanPaginatedResponse,
-    include_in_schema=False
+    "/cleaning-plans/{plan_id}/workers-dropdown",
+    response_model=CleaningPlanWorkerDropdownPaginatedResponse,
+    summary="Get Worker Dropdown for Cleaning Plan Assignment",
+    description="""
+### Worker Dropdown List for Draft Cleaning Plan
+
+Retrieves a paginated list of workers with real-time availability and monthly average work metrics for the target cleaning plan / shift.
+
+#### Path Parameter:
+- **`plan_id`** (`str`, **Required**): The ID of the cleaning plan to assign workers to.
+
+#### Query Parameters:
+- **`search`** (`str`, *Optional*): Filter by worker full name, email, phone, or position.
+- **`worker_type`** (`str`, *Optional*): Filter by `all`, `employee`, or `freelancer`.
+- **`page`** (`int`, *Optional*, default: `1`): Page number.
+- **`limit`** (`int`, *Optional*, default: `10`): Items per page.
+
+#### Returned Worker Metrics:
+- **`is_available`** (`bool`): `true` if the worker has no conflicting shift/cleaning plan on the plan's date and time window.
+- **`unavailable_reason`** (`str` | `null`): Reason if unavailable (e.g. `"Assigned to 'Shift A' (08:00 AM - 12:00 PM)"`).
+- **`avg_daily_work_minutes`** (`int`): Daily average minutes worked in the current month (`total_work_minutes / current_day_of_month`).
+- **`total_shifts_this_month`** (`int`): Total shifts/plans worked in the current calendar month.
+- **`total_work_minutes_this_month`** (`int`): Total work duration in minutes across all shifts this month.
+- **`formatted_avg_work`** (`str`): Human-readable string (e.g. `"231 mins/day"`).
+"""
 )
-async def list_cleaning_plans_for_location(
-    location_id: str,
+async def get_cleaning_plan_worker_dropdown(
+    plan_id: str,
+    search: Optional[str] = None,
+    worker_type: Optional[str] = None,
+    sort_by: Optional[str] = "smart",
     page: int = 1,
     limit: int = 10,
-    search: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"location_id": location_id}
+    plan_doc = await db["cleaning_plans"].find_one({"$or": [{"_id": plan_id}, {"id": plan_id}]})
+    if not plan_doc:
+        raise HTTPException(status_code=404, detail="Cleaning plan not found")
+
+    plan_date = plan_doc.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    plan_start = plan_doc.get("start_time", "08:00 AM")
+    plan_dur = plan_doc.get("duration_minutes", 60)
+    plan_start_mins = parse_time_to_minutes(plan_start)
+    plan_end_mins = (plan_start_mins + plan_dur) % 1440
+    plan_end = plan_doc.get("end_time") or _calculate_end_time(plan_start, plan_dur)
+    plan_time_window = f"{plan_start} - {plan_end}"
+
+    # Build query for workers
+    query = {"role": "worker", "account_status": {"$ne": "deleted"}}
+    if worker_type and worker_type.lower() != "all":
+        query["worker_type"] = worker_type.lower()
+
     if search:
-        query["title"] = {"$regex": search, "$options": "i"}
+        search_filter = [
+            {"full_name": {"$regex": search, "$options": "i"}},
+            {"name": {"$regex": search, "$options": "i"}},
+            {"email": {"$regex": search, "$options": "i"}},
+            {"phone": {"$regex": search, "$options": "i"}},
+            {"position": {"$regex": search, "$options": "i"}}
+        ]
+        query["$or"] = search_filter
 
-    total_count = await db["cleaning_plans"].count_documents(query)
-    skip = (page - 1) * limit
-    cursor = db["cleaning_plans"].find(query).sort("created_at", -1).skip(skip).limit(limit)
-    raw_plans = await cursor.to_list(length=limit)
+    cursor = db["users"].find(query)
+    raw_workers = await cursor.to_list(length=500)
 
-    return CleaningPlanPaginatedResponse(
-        total_count=total_count,
-        page=page,
-        limit=limit,
-        cleaning_plans=[_format_legacy_cleaning_plan_response(p) for p in raw_plans]
-    )
+    now_utc = datetime.now(timezone.utc)
+    all_worker_items = []
 
+    for w in raw_workers:
+        wid = str(w.get("_id") or w.get("id"))
+        w_name = w.get("full_name") or w.get("name") or "Worker"
+        w_type = str(w.get("worker_type") or "employee")
+        w_pos = w.get("position") or "Cleaner"
+        w_pic = w.get("profile_photo") or w.get("profile_picture")
+        w_email = w.get("email")
+        w_phone = w.get("phone")
 
-@cleaning_plan_mgmt_router.get(
-    "/global-cleaning-plans",
-    response_model=GlobalCleaningPlanPaginatedResponse,
-    include_in_schema=False
-)
-async def list_global_cleaning_plans(
-    page: int = 1,
-    limit: int = 10,
-    search: Optional[str] = None,
-    client_id: Optional[str] = None,
-    location_id: Optional[str] = None,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    query = {}
-    if client_id:
-        query["client_id"] = client_id
-    if location_id:
-        query["location_id"] = location_id
-    if search:
-        query["title"] = {"$regex": search, "$options": "i"}
+        # 1. Monthly stats
+        stats = await calculate_worker_month_stats(wid, db, current_dt=now_utc)
 
-    total_count = await db["global_cleaning_plans"].count_documents(query)
-    skip = (page - 1) * limit
-    cursor = db["global_cleaning_plans"].find(query).sort("created_at", -1).skip(skip).limit(limit)
-    raw_plans = await cursor.to_list(length=limit)
+        # 2. Availability check
+        is_avail, unavail_reason = await check_worker_time_availability(
+            worker_id=wid,
+            plan_date=plan_date,
+            plan_start_mins=plan_start_mins,
+            plan_end_mins=plan_end_mins,
+            exclude_plan_id=plan_id,
+            db=db
+        )
 
-    items = []
-    for p in raw_plans:
-        cid = p.get("client_id", "")
-        cdoc = await db["client_list"].find_one({"$or": [{"_id": cid}, {"id": cid}]})
-        cname = cdoc.get("company_name", "Client") if cdoc else "Client"
+        # 3. Last assigned work end time & relative duration
+        last_work_info = await calculate_worker_last_work_ended(
+            worker_id=wid,
+            target_date_str=plan_date,
+            target_start_mins=plan_start_mins,
+            exclude_plan_id=plan_id,
+            db=db
+        )
 
-        lid = p.get("location_id", "")
-        ldoc = await db["locations"].find_one({"$or": [{"_id": lid}, {"id": lid}]})
-        lname = ldoc.get("name", "Location") if ldoc else "Location"
-
-        pid = str(p.get("_id") or p.get("id"))
-        cat = p.get("created_at") if isinstance(p.get("created_at"), datetime) else datetime.now(timezone.utc)
-
-        items.append(GlobalCleaningPlanListItemResponse(
-            plan_id=pid,
-            title=p.get("title", ""),
-            client_id=cid,
-            client_name=cname,
-            location_id=lid,
-            location_name=lname,
-            rooms_count=p.get("rooms_count", 0),
-            total_tasks_count=p.get("total_tasks_count", 0),
-            total_photo_requirements=p.get("total_photo_requirements", 0),
-            estimated_duration_hours=p.get("estimated_duration_hours", 1.0),
-            created_at=cat
+        all_worker_items.append(CleaningPlanWorkerDropdownItem(
+            worker_id=wid,
+            name=w_name,
+            profile_photo=w_pic,
+            worker_type=w_type,
+            position=w_pos,
+            email=w_email,
+            phone=w_phone,
+            is_available=is_avail,
+            unavailable_reason=unavail_reason,
+            avg_daily_work_minutes=stats["avg_daily_work_minutes"],
+            total_shifts_this_month=stats["total_shifts_this_month"],
+            total_work_minutes_this_month=stats["total_work_minutes_this_month"],
+            formatted_avg_work=stats["formatted_avg_work"],
+            last_work_end_time=last_work_info["last_work_end_time"],
+            last_work_ended_ago=last_work_info["last_work_ended_ago"],
+            minutes_since_last_work=last_work_info["minutes_since_last_work"]
         ))
 
-    return GlobalCleaningPlanPaginatedResponse(
+    # Apply smart suitability sorting across all worker candidates
+    sorted_workers = sort_workers_by_suitability(all_worker_items, sort_by=sort_by or "smart")
+
+    # Apply pagination on the ranked worker list
+    total_count = len(sorted_workers)
+    skip = (page - 1) * limit
+    paginated_workers = sorted_workers[skip: skip + limit]
+
+    return CleaningPlanWorkerDropdownPaginatedResponse(
         total_count=total_count,
         page=page,
         limit=limit,
-        plans=items
+        plan_id=plan_id,
+        plan_date=plan_date,
+        plan_time_window=plan_time_window,
+        workers=paginated_workers
     )
 
 
 @cleaning_plan_mgmt_router.post(
-    "/global-cleaning-plans",
-    response_model=GlobalCleaningPlanResponse,
-    status_code=status.HTTP_201_CREATED,
-    include_in_schema=False
+    "/cleaning-plans/{plan_id}/assign-workers",
+    response_model=ManagerCleaningPlanDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Assign Workers to Cleaning Plan",
+    description="""
+### Assign Workers to Draft Cleaning Plan
+
+Assigns one or more workers to a cleaning plan with assigned positions (`teamleader`, `co_leader`, `normal`).
+
+#### Behavior When Plan Already Has Workers:
+- **`action: "append"`** (*Default*): Merges newly assigned workers with previously assigned workers without removing existing ones. If an already assigned worker is provided again, their position is updated.
+- **`action: "replace"`**: Replaces the existing assigned workers with the newly provided list.
+
+#### Supported Worker Positions:
+- **`"teamleader"`**: Primary shift/team leader
+- **`"co_leader"`**: Co-leader / assistant leader
+- **`"normal"`**: Standard cleaner/worker
+
+#### Path Parameter:
+- **`plan_id`** (`str`, **Required**): Target cleaning plan ID.
+
+#### Request Body:
+```json
+{
+  "workers": [
+    {"worker_id": "w_101", "position": "teamleader"},
+    {"worker_id": "w_102", "position": "co_leader"},
+    {"worker_id": "w_103", "position": "normal"}
+  ],
+  "action": "append"
+}
+```
+
+#### Query Parameter:
+- **`force`** (`bool`, *Optional*, default: `true`): If `false`, strictly prevents assignment if any selected worker has a time conflict.
+"""
 )
-async def create_global_cleaning_plan(
-    plan_in: GlobalCleaningPlanCreate,
+async def assign_workers_to_cleaning_plan(
+    plan_id: str,
+    assign_in: AssignWorkersToCleaningPlanRequest,
+    force: bool = True,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    cdoc = await db["client_list"].find_one({"$or": [{"_id": plan_in.client_id}, {"id": plan_in.client_id}]})
-    if not cdoc:
-        raise HTTPException(status_code=404, detail="Client not found")
+    query = {"$or": [{"_id": plan_id}, {"id": plan_id}]}
+    plan_doc = await db["cleaning_plans"].find_one(query)
+    if not plan_doc:
+        raise HTTPException(status_code=404, detail="Cleaning plan not found")
 
-    ldoc = await db["locations"].find_one({"$or": [{"_id": plan_in.location_id}, {"id": plan_in.location_id}]})
-    if not ldoc:
-        raise HTTPException(status_code=404, detail="Location not found")
+    # 1. Parse incoming worker items and positions
+    new_worker_map = {}  # worker_id -> position
+    for w_item in assign_in.workers:
+        wid = str(w_item.worker_id).strip()
+        if wid:
+            new_worker_map[wid] = normalize_worker_position(w_item.position)
 
-    now = datetime.now(timezone.utc)
-    pid = f"gplan_{uuid.uuid4().hex[:10]}"
+    if not new_worker_map:
+        raise HTTPException(status_code=400, detail="At least one worker must be provided in 'workers'")
 
-    doc = {
-        "_id": pid,
-        "id": pid,
-        "title": plan_in.title,
-        "description": plan_in.description,
-        "client_id": plan_in.client_id,
-        "location_id": plan_in.location_id,
-        "rooms_count": len(plan_in.rooms or []),
-        "total_tasks_count": 0,
-        "total_photo_requirements": 0,
-        "estimated_duration_hours": plan_in.estimated_duration_hours or 1.0,
-        "rooms": [r.model_dump() for r in (plan_in.rooms or [])],
-        "is_active": True,
-        "created_at": now,
-        "updated_at": now
+    # Validate that incoming worker IDs exist in users collection
+    incoming_ids = list(new_worker_map.keys())
+    cursor_w = db["users"].find({"$or": [{"_id": {"$in": incoming_ids}}, {"id": {"$in": incoming_ids}}]})
+    valid_workers = await cursor_w.to_list(length=len(incoming_ids) * 2)
+    valid_id_map = {str(w.get("_id") or w.get("id")): w for w in valid_workers}
+
+    filtered_new_map = {wid: pos for wid, pos in new_worker_map.items() if wid in valid_id_map}
+    if not filtered_new_map:
+        raise HTTPException(status_code=400, detail="None of the provided worker IDs exist in the system")
+
+    # 2. Check for time conflicts if force is False
+    if not force:
+        plan_date = plan_doc.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        plan_start = plan_doc.get("start_time", "08:00 AM")
+        plan_dur = plan_doc.get("duration_minutes", 60)
+        plan_start_mins = parse_time_to_minutes(plan_start)
+        plan_end_mins = (plan_start_mins + plan_dur) % 1440
+
+        conflicts = []
+        for wid in filtered_new_map.keys():
+            is_avail, unavail_reason = await check_worker_time_availability(
+                worker_id=wid,
+                plan_date=plan_date,
+                plan_start_mins=plan_start_mins,
+                plan_end_mins=plan_end_mins,
+                exclude_plan_id=plan_id,
+                db=db
+            )
+            if not is_avail:
+                conflicts.append(f"Worker {wid}: {unavail_reason}")
+        if conflicts:
+            raise HTTPException(status_code=400, detail=f"Time conflicts detected: {'; '.join(conflicts)}")
+
+    # 3. Merge or replace with existing assigned workers
+    action = (assign_in.action or "append").strip().lower()
+    final_assigned_map = {}  # worker_id -> position
+
+    if action == "append":
+        # Keep existing workers and their positions
+        existing_assigned = plan_doc.get("assigned_workers", [])
+        if isinstance(existing_assigned, list) and existing_assigned:
+            for ew in existing_assigned:
+                if isinstance(ew, dict):
+                    ew_id = str(ew.get("worker_id") or "")
+                    if ew_id:
+                        final_assigned_map[ew_id] = ew.get("position", "normal")
+        else:
+            # Fallback to existing worker_ids
+            for ew_id in plan_doc.get("worker_ids", []):
+                if str(ew_id).strip():
+                    final_assigned_map[str(ew_id).strip()] = "normal"
+
+    # Apply/overwrite with new worker assignments
+    final_assigned_map.update(filtered_new_map)
+
+    final_worker_ids = list(final_assigned_map.keys())
+    final_assigned_workers = [
+        {"worker_id": wid, "position": pos}
+        for wid, pos in final_assigned_map.items()
+    ]
+
+    # 4. Automatically update cleaning plan status to "assigned"
+    update_data = {
+        "worker_ids": final_worker_ids,
+        "assigned_workers": final_assigned_workers,
+        "status": "assigned",
+        "updated_at": datetime.now(timezone.utc)
     }
 
-    await db["global_cleaning_plans"].insert_one(doc)
+    await db["cleaning_plans"].update_one(query, {"$set": update_data})
+    updated_doc = await db["cleaning_plans"].find_one(query)
 
-    return GlobalCleaningPlanResponse(
-        id=pid,
-        title=plan_in.title,
-        description=plan_in.description,
-        client_id=plan_in.client_id,
-        client_name=cdoc.get("company_name", "Client"),
-        location_id=plan_in.location_id,
-        location_name=ldoc.get("name", "Location"),
-        rooms_count=len(plan_in.rooms or []),
-        total_tasks_count=0,
-        total_photo_requirements=0,
-        estimated_duration_hours=plan_in.estimated_duration_hours or 1.0,
-        rooms=[],
-        created_at=now,
-        updated_at=now
-    )
+    # 5. Fire rich push & in-app notifications to all newly assigned workers
+    try:
+        newly_assigned_items = [{"worker_id": wid, "position": pos} for wid, pos in filtered_new_map.items()]
+        await send_cleaning_plan_assignment_notifications(
+            plan_doc=updated_doc,
+            assigned_workers=newly_assigned_items,
+            db=db
+        )
+    except Exception as e:
+        print(f"Error sending assignment notifications: {e}")
+
+    return await _format_manager_cleaning_plan_detail(updated_doc, db, current_user=current_user)
+
+

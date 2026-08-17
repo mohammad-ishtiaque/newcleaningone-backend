@@ -23,8 +23,8 @@ from app.api.admin.location_csv_utils import (
     export_locations_to_csv
 )
 
-location_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Location Management"])
-room_mgmt_router = APIRouter(prefix="/manager", tags=["Admin Room Management"])
+location_mgmt_router = APIRouter(prefix="/manager", tags=["Manager Location Management"])
+room_mgmt_router = APIRouter(prefix="/manager", tags=["Manager Room Management"])
 
 def _format_location_response(doc: dict, rooms_count: Optional[int] = None) -> LocationResponse:
     loc_id = str(doc.get("_id") or doc.get("id"))
@@ -60,17 +60,29 @@ async def list_clients_for_locations(
     page: int = 1,
     limit: int = 10,
     search: Optional[str] = None,
+    is_signup: Optional[bool] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"status": {"$ne": "deleted"}}
+    conditions = [{"status": {"$ne": "deleted"}}]
+    
+    if is_signup is not None:
+        if is_signup:
+            conditions.append({"is_signup": True})
+        else:
+            conditions.append({"$or": [{"is_signup": False}, {"is_signup": {"$exists": False}}]})
+
     if search:
-        query["$or"] = [
-            {"company_name": {"$regex": search, "$options": "i"}},
-            {"email": {"$regex": search, "$options": "i"}},
-            {"phone": {"$regex": search, "$options": "i"}},
-            {"industry": {"$regex": search, "$options": "i"}}
-        ]
+        conditions.append({
+            "$or": [
+                {"company_name": {"$regex": search, "$options": "i"}},
+                {"email": {"$regex": search, "$options": "i"}},
+                {"phone": {"$regex": search, "$options": "i"}},
+                {"industry": {"$regex": search, "$options": "i"}}
+            ]
+        })
+
+    query = {"$and": conditions} if len(conditions) > 1 else conditions[0]
 
     total_count = await db["client_list"].count_documents(query)
     skip = (page - 1) * limit
@@ -79,10 +91,16 @@ async def list_clients_for_locations(
 
     clients = []
     for c in raw_clients:
+        client_is_signup = c.get("is_signup")
+        if client_is_signup is None:
+            user_doc = await db["users"].find_one({"email": c.get("email"), "role": "client"})
+            client_is_signup = bool(user_doc and user_doc.get("is_approved", True))
+
         clients.append(ClientGridDropdownItem(
             id=str(c.get("_id") or c.get("id")),
             primary_contact_name=c.get("primary_contact_name", ""),
-            company_name=c.get("company_name", "")
+            company_name=c.get("company_name", ""),
+            is_signup=bool(client_is_signup)
         ))
 
     return ClientGridDropdownPaginatedResponse(
@@ -395,14 +413,14 @@ async def get_location_dropdowns(
 # Room Management Handlers
 
 async def _format_room_response(doc: dict, db) -> RoomResponse:
-    r_id = str(doc.get("_id") or doc.get("id") or doc.get("room_id"))
+    r_id = str(doc.get("_id") or doc.get("id") or doc.get("room_id") or "")
     c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
     u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)
 
-    lid = doc.get("location_id", "")
-    lname = doc.get("location_name", "")
-    cid = doc.get("client_id", "")
-    cname = doc.get("company_name", "")
+    lid = str(doc.get("location_id") or "")
+    lname = str(doc.get("location_name") or "")
+    cid = str(doc.get("client_id") or "")
+    cname = str(doc.get("company_name") or "")
 
     if lid and (not lname or not cid or not cname):
         ldoc = await db["locations"].find_one({"$or": [{"_id": lid}, {"id": lid}]})
@@ -436,6 +454,12 @@ async def _format_room_response(doc: dict, db) -> RoomResponse:
                     name=p,
                     frequency_type="every_visit"
                 ))
+            elif hasattr(p, "name"):
+                req_photos.append(RequiredPhotoResponse(
+                    id=str(getattr(p, "id", None) or uuid.uuid4().hex[:8]),
+                    name=getattr(p, "name", "Photo"),
+                    frequency_type=getattr(p, "frequency_type", "every_visit")
+                ))
 
     tasks_raw = doc.get("tasks", [])
     tasks = []
@@ -453,6 +477,12 @@ async def _format_room_response(doc: dict, db) -> RoomResponse:
                     id=uuid.uuid4().hex[:8],
                     name=t,
                     frequency_type="every_visit"
+                ))
+            elif hasattr(t, "name"):
+                tasks.append(CleaningTaskResponse(
+                    id=str(getattr(t, "id", None) or uuid.uuid4().hex[:8]),
+                    name=getattr(t, "name", "Task"),
+                    frequency_type=getattr(t, "frequency_type", "every_visit")
                 ))
 
     photo_num = len(req_photos) if req_photos else (doc.get("photo_number") or doc.get("required_photos_count", 0))
@@ -495,6 +525,9 @@ async def create_room(
     company_name = l_doc.get("company_name", "")
     location_name = l_doc.get("name", "")
 
+    room_data = room_in.model_dump(exclude_unset=True)
+    room_data.pop("location_id", None)
+
     doc = {
         "_id": room_id,
         "id": room_id,
@@ -502,7 +535,7 @@ async def create_room(
         "location_name": location_name,
         "client_id": client_id,
         "company_name": company_name,
-        **room_in.model_dump(),
+        **room_data,
         "is_active": True,
         "created_at": now,
         "updated_at": now
@@ -574,6 +607,15 @@ async def update_room(
         return await _format_room_response(r_doc, db)
         
     update_data["updated_at"] = datetime.now(timezone.utc)
+
+    if "required_photos" in update_data and isinstance(update_data["required_photos"], list):
+        for p in update_data["required_photos"]:
+            if isinstance(p, dict) and not p.get("id"):
+                p["id"] = uuid.uuid4().hex[:8]
+    if "tasks" in update_data and isinstance(update_data["tasks"], list):
+        for t in update_data["tasks"]:
+            if isinstance(t, dict) and not t.get("id"):
+                t["id"] = uuid.uuid4().hex[:8]
     
     await db["rooms"].update_one(
         {"_id": r_doc["_id"]},
@@ -602,50 +644,3 @@ async def delete_room(
         )
     
     return {"message": "Room deleted successfully"}
-
-@room_mgmt_router.get("/dropdowns/rooms", response_model=RoomDropdownPaginatedResponse, include_in_schema=False, summary="Get Room Dropdowns")
-async def get_room_dropdowns(
-    location_id: Optional[str] = None,
-    search: Optional[str] = None,
-    page: int = 1,
-    limit: int = 50,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    query = {}
-    if location_id:
-        query["location_id"] = location_id
-    if search:
-        query["$or"] = [
-            {"name": {"$regex": search, "$options": "i"}},
-            {"room_name": {"$regex": search, "$options": "i"}}
-        ]
-
-    total_count = await db["rooms"].count_documents(query)
-    skip = (page - 1) * limit
-    cursor = db["rooms"].find(query).sort("name", 1).skip(skip).limit(limit)
-    raw_rooms = await cursor.to_list(length=limit)
-
-    dropdowns = []
-    for r in raw_rooms:
-        lid = r.get("location_id", "")
-        ldoc = await db["locations"].find_one({"$or": [{"_id": lid}, {"id": lid}]})
-        lname = ldoc.get("name", "Location") if ldoc else "Location"
-        rid = str(r.get("_id") or r.get("id"))
-
-        dropdowns.append(RoomDropdownItemResponse(
-            room_id=rid,
-            room_name=r.get("room_name") or r.get("name", ""),
-            location_id=lid,
-            location_name=lname,
-            floor=r.get("floor", 1),
-            cleaning_type=r.get("clean_type") or r.get("cleaning_type", "standard"),
-            duration=r.get("duration") or r.get("est_cleaning_duration_minutes", 30)
-        ))
-
-    return RoomDropdownPaginatedResponse(
-        total_count=total_count,
-        page=page,
-        limit=limit,
-        rooms=dropdowns
-    )

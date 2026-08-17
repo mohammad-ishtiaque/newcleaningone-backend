@@ -22,7 +22,7 @@ class UserInDB(BaseModel):
     full_name: str
     email: EmailStr
     phone: Optional[str] = None
-    hashed_password: str
+    hashed_password: Optional[str] = None
     role: RoleEnum
     is_active: bool = True
     is_verified: bool = False

@@ -10,7 +10,7 @@ from app.schemas.client_list import (
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
 
-qc_reports_router = APIRouter(prefix="/manager", tags=["Admin Quality Control Reports"])
+qc_reports_router = APIRouter(prefix="/manager", tags=["Manager Quality Control Reports"])
 
 @qc_reports_router.get("/reports/quality-control", response_model=QualityControlReportResponse, summary="Global Quality Control Reports Dashboard (Image Mockup)")
 async def get_quality_control_report(

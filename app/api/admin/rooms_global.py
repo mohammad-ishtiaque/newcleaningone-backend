@@ -10,7 +10,7 @@ from app.schemas.client_list import (
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
 
-rooms_global_router = APIRouter(prefix="/manager", tags=["Admin Room Management"])
+rooms_global_router = APIRouter(prefix="/manager", tags=["Manager Room Management"])
 
 @rooms_global_router.get("/dropdowns/locations", response_model=AdminRoomLocationDropdownResponse, summary="Get Room Locations Dropdown")
 async def get_room_locations_dropdown(
@@ -90,13 +90,13 @@ async def get_global_rooms_grid(
 
     items = []
     for r in raw_rooms:
-        rid = str(r.get("_id") or r.get("id") or r.get("room_id"))
+        rid = str(r.get("_id") or r.get("id") or r.get("room_id") or "")
         rname = r.get("room_name") or r.get("name") or "Room"
         rtype = r.get("room_type") or r.get("type") or "standard"
-        lid = r.get("location_id", "")
-        lname = r.get("location_name", "")
-        cid = r.get("client_id", "")
-        cname = r.get("company_name", "")
+        lid = str(r.get("location_id") or "")
+        lname = str(r.get("location_name") or "")
+        cid = str(r.get("client_id") or "")
+        cname = str(r.get("company_name") or "")
 
         if lid and (not lname or not cid or not cname):
             ldoc = await db["locations"].find_one({"$or": [{"_id": lid}, {"id": lid}]})

@@ -16,7 +16,7 @@ from app.schemas.chat import (
     AttachmentUploadResponse, PaginatedConversationsResponse
 )
 
-router = APIRouter(prefix="/manager/chat", tags=["Admin Chat Management"])
+router = APIRouter(prefix="/manager/chat", tags=["Manager Chat Management"])
 
 
 def require_manager(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:

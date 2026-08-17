@@ -11,7 +11,7 @@ from app.dependencies.auth import get_current_user
 from app.models.user import UserInDB, RoleEnum, WorkerTypeEnum
 from app.services.s3_service import S3Service
 from app.api.profile import process_image
-from app.schemas.notification import NotificationListResponse
+from app.schemas.notification import NotificationListResponse, NotificationResponse
 from app.services.notification_service import NotificationService
 from app.services.faq_service import FAQService
 
@@ -429,6 +429,18 @@ async def get_worker_notifications(
 ):
     service = NotificationService()
     return await service.get_user_notifications(user_id=current_user.id, recipient_type="worker", page=page, limit=limit)
+
+
+@router.get("/notifications/{notification_id}", response_model=NotificationResponse, summary="Get Single Notification Details")
+async def get_worker_notification_detail(
+    notification_id: str,
+    current_user: UserInDB = Depends(require_worker)
+):
+    service = NotificationService()
+    doc = await service.get_notification_detail(notification_id=notification_id, user_id=current_user.id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return doc
 
 @router.patch("/notifications/{notification_id}/read")
 async def mark_worker_notification_read(

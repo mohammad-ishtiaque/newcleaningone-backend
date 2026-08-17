@@ -16,7 +16,7 @@ from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
 from app.api.admin.client_reports_plans import get_default_cleaning_plan_tasks, get_default_reports, generate_report_pdf_bytes
 
-client_details_tabs_router = APIRouter(prefix="/manager", tags=["Admin Client Management"])
+client_details_tabs_router = APIRouter(prefix="/manager", tags=["Manager Client Management"])
 
 def _format_date_human(d_val) -> str:
     if not d_val:
