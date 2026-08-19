@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime
+from app.schemas.common import BasePaginatedResponse
 
 class MinimalItem(BaseModel):
     id: str
@@ -40,10 +41,7 @@ class InProgressShiftItem(BaseModel):
     progress_percentage: str  # e.g. "20%"
     checkin_status: str  # "on_time", "late", "missing"
 
-class InProgressShiftPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class InProgressShiftPaginatedResponse(BasePaginatedResponse):
     shifts: List[InProgressShiftItem] = Field(default_factory=list)
 
 class WorkerAttendanceDetailItem(BaseModel):

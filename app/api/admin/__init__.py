@@ -2,7 +2,8 @@ from app.api.admin.profile_company import router, require_manager
 from app.api.admin.overview_users import get_user_service
 from app.api.admin.clients import client_mgmt_router
 from app.api.admin.client_details_tabs import client_details_tabs_router
-from app.api.admin.locations_rooms import location_mgmt_router, room_mgmt_router
+from app.api.admin.locations_rooms import location_mgmt_router
+from app.api.admin.rooms import room_mgmt_router
 from app.api.admin.location_drawer_endpoints import location_drawer_router
 from app.api.admin.rooms_global import rooms_global_router
 from app.api.admin.cleaning_plans import cleaning_plan_mgmt_router

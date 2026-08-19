@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List, Literal
 from datetime import datetime
+from app.schemas.common import BasePaginatedResponse
 
 class WorkerCheckInResponse(BaseModel):
     shift_id: str
@@ -65,7 +66,16 @@ class LiveStatusResponse(BaseModel):
     missing_count: int
     page: int
     limit: int
+    has_more: bool = False
     items: List[LiveStatusItem] = Field(default_factory=list)
+
+    def __init__(self, **data):
+        if "has_more" not in data or data.get("has_more") is None:
+            tsc = data.get("total_shifts_count", 0)
+            p = data.get("page", 1)
+            lim = data.get("limit", 10)
+            data["has_more"] = bool((p * lim) < tsc)
+        super().__init__(**data)
 
 class AttendanceTrackingItem(BaseModel):
     worker_id: str
@@ -77,10 +87,7 @@ class AttendanceTrackingItem(BaseModel):
     total_shifts: int
     late_days: int
 
-class AttendanceTrackingPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class AttendanceTrackingPaginatedResponse(BasePaginatedResponse):
     workers: List[AttendanceTrackingItem] = Field(default_factory=list)
 
 class LocationStatItem(BaseModel):
@@ -93,10 +100,7 @@ class LocationStatItem(BaseModel):
     hours_worked_numeric: float
     shifts_count: int
 
-class LocationStatPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class LocationStatPaginatedResponse(BasePaginatedResponse):
     locations: List[LocationStatItem] = Field(default_factory=list)
 
 class WorkerShiftDetailItem(BaseModel):

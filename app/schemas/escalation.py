@@ -1,6 +1,7 @@
 from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import Optional, List, Literal
+from app.schemas.common import BasePaginatedResponse
 
 class EscalationCreate(BaseModel):
     title: str = Field(..., json_schema_extra={"example": "Broken mirror in Room 305"})
@@ -37,13 +38,10 @@ class EscalationItem(BaseModel):
     photo_url: Optional[str] = None
     created_at: datetime
 
-class EscalationPaginatedResponse(BaseModel):
-    total_count: int
-    open_count: int
-    in_progress_count: int
-    resolved_count: int
-    page: int
-    limit: int
+class EscalationPaginatedResponse(BasePaginatedResponse):
+    open_count: int = 0
+    in_progress_count: int = 0
+    resolved_count: int = 0
     escalations: List[EscalationItem] = Field(default_factory=list)
 
 class EscalationDrawerResponse(BaseModel):

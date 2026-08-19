@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime
+from app.schemas.common import BasePaginatedResponse
 
 class NotificationResponse(BaseModel):
     id: Optional[str] = Field(default=None, alias="_id")
@@ -18,12 +19,9 @@ class NotificationResponse(BaseModel):
         populate_by_name = True
         from_attributes = True
 
-class NotificationListResponse(BaseModel):
-    total_count: int
-    unread_count: int
-    page: int
-    limit: int
-    notifications: List[NotificationResponse]
+class NotificationListResponse(BasePaginatedResponse):
+    unread_count: int = 0
+    notifications: List[NotificationResponse] = Field(default_factory=list)
 
 class AdminNotificationItem(BaseModel):
     id: str
@@ -34,10 +32,7 @@ class AdminNotificationItem(BaseModel):
     is_read: bool = False
     created_at: datetime
 
-class AdminNotificationCenterResponse(BaseModel):
-    total_count: int
-    unread_count: int
-    page: int
-    limit: int
+class AdminNotificationCenterResponse(BasePaginatedResponse):
+    unread_count: int = 0
     notifications: List[AdminNotificationItem] = Field(default_factory=list)
 

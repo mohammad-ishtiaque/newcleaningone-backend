@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field
 from typing import List, Optional
 from datetime import datetime
+from app.schemas.common import BasePaginatedResponse
 
 # ---- FAQ Schemas ----
 class FAQListItem(BaseModel):
@@ -18,11 +19,8 @@ class FAQDetailResponse(BaseModel):
     class Config:
         populate_by_name = True
 
-class FAQListResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
-    faqs: List[FAQListItem]
+class FAQListResponse(BasePaginatedResponse):
+    faqs: List[FAQListItem] = Field(default_factory=list)
 
 class FAQCreate(BaseModel):
     question: str = Field(..., json_schema_extra={"example": "How do I request time off?"})

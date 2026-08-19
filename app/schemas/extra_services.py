@@ -1,6 +1,7 @@
 from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import Optional, List, Literal
+from app.schemas.common import BasePaginatedResponse
 
 class ExtraServiceTaskItem(BaseModel):
     id: str
@@ -87,9 +88,6 @@ class ExtraServiceResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-class ExtraServicePaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ExtraServicePaginatedResponse(BasePaginatedResponse):
     requests: List[ExtraServiceResponse] = Field(default_factory=list)
 

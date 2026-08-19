@@ -2,6 +2,7 @@ from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List
 from datetime import datetime, date
 from app.models.user import RoleEnum, WorkerTypeEnum
+from app.schemas.common import BasePaginatedResponse
 
 # ---- Auth Requests ----
 class LoginRequest(BaseModel):
@@ -202,10 +203,7 @@ class AdminWorkerResponse(BaseModel):
         populate_by_name = True
         from_attributes = True
 
-class AdminWorkerPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class AdminWorkerPaginatedResponse(BasePaginatedResponse):
     workers: List[AdminWorkerResponse]
 
 from typing import Optional, List, Literal
@@ -239,10 +237,7 @@ class WorkerApprovalResponse(BaseModel):
         populate_by_name = True
         from_attributes = True
 
-class WorkerApprovalPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class WorkerApprovalPaginatedResponse(BasePaginatedResponse):
     pending_approvals: List[WorkerApprovalResponse]
 
 class WorkerCountResponse(BaseModel):
@@ -260,10 +255,7 @@ class WorkerListItem(BaseModel):
     status: Optional[str] = "active"
     is_signup: bool = True
 
-class WorkerListPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class WorkerListPaginatedResponse(BasePaginatedResponse):
     workers: List[WorkerListItem] = Field(default_factory=list)
 
 
@@ -305,7 +297,16 @@ class AdminWorkerTablePaginatedResponse(BaseModel):
     freelancers_count: int
     page: int
     limit: int
+    has_more: bool = False
     workers: List[AdminWorkerTableItem] = Field(default_factory=list)
+
+    def __init__(self, **data):
+        if "has_more" not in data or data.get("has_more") is None:
+            tw = data.get("total_workers", 0)
+            p = data.get("page", 1)
+            lim = data.get("limit", 10)
+            data["has_more"] = bool((p * lim) < tw)
+        super().__init__(**data)
 
 class WorkerBulkImportResult(BaseModel):
     total_rows: int

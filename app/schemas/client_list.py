@@ -2,6 +2,7 @@ from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List, Dict, Any, Union, Literal
 from datetime import datetime, date, timezone
 from enum import Enum
+from app.schemas.common import BasePaginatedResponse
 
 # --- Enums ---
 class ContactRoleEnum(str, Enum):
@@ -99,18 +100,35 @@ class ContractResponse(BaseModel):
     updated_at: str
 
 # --- Cleaning Plans & Tasks ---
+class TaskPhotoCreate(BaseModel):
+    id: Optional[str] = None
+    name: str = Field(..., json_schema_extra={"example": "After Deep Floor scrubbing"})
+
+class TaskPhotoResponse(BaseModel):
+    id: str
+    name: str
+
 class CleaningTaskCreate(BaseModel):
+    id: Optional[str] = None
     name: str = Field(..., json_schema_extra={"example": "Deep Floor Scrubbing"})
     frequency_type: Optional[str] = Field(default="every_visit", json_schema_extra={"example": "every_visit"}) # every_visit, weekly, monthly, yearly
+    is_photo_req: Optional[bool] = Field(default=False, json_schema_extra={"example": True})
+    photo: Optional[List[TaskPhotoCreate]] = Field(default_factory=list)
 
 class CleaningTaskUpdate(BaseModel):
+    id: Optional[str] = None
     name: Optional[str] = None
     frequency_type: Optional[str] = None
+    is_photo_req: Optional[bool] = None
+    photo: Optional[List[TaskPhotoCreate]] = None
 
 class CleaningTaskResponse(BaseModel):
     id: str
     name: str
     frequency_type: Optional[str] = "every_visit"
+    is_photo_req: bool = False
+    photo: List[TaskPhotoResponse] = Field(default_factory=list)
+    total_photos_required: int = 0
 
 class CleaningPlanCreate(BaseModel):
     plan_name: str = Field(..., json_schema_extra={"example": "Daily Office Hygiene"})
@@ -125,28 +143,16 @@ class CleaningPlanResponse(BaseModel):
     task_count: int
     tasks: List[CleaningTaskResponse] = Field(default_factory=list)
 
-class ContactPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ContactPaginatedResponse(BasePaginatedResponse):
     contacts: List[ContactResponse]
 
-class LocationPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class LocationPaginatedResponse(BasePaginatedResponse):
     locations: List[LocationResponse]
 
-class ContractPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ContractPaginatedResponse(BasePaginatedResponse):
     contracts: List[ContractResponse]
 
-class CleaningPlanPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class CleaningPlanPaginatedResponse(BasePaginatedResponse):
     cleaning_plans: List[CleaningPlanResponse]
 
 # --- Reports ---
@@ -157,10 +163,7 @@ class ReportResponse(BaseModel):
     summary: Dict[str, Any]
     pdf_url: Optional[str] = None
 
-class ReportPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ReportPaginatedResponse(BasePaginatedResponse):
     reports: List[ReportResponse]
 
 # --- Overview Summary ---
@@ -237,10 +240,7 @@ class ClientListResponse(BaseModel):
         populate_by_name = True
         from_attributes = True
 
-class ClientListPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ClientListPaginatedResponse(BasePaginatedResponse):
     clients: List[ClientListResponse]
 
 class ClientGridDropdownItem(BaseModel):
@@ -249,10 +249,7 @@ class ClientGridDropdownItem(BaseModel):
     company_name: str
     is_signup: bool = False
 
-class ClientGridDropdownPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ClientGridDropdownPaginatedResponse(BasePaginatedResponse):
     clients: List[ClientGridDropdownItem]
 
 class ClientOverviewItemResponse(BaseModel):
@@ -273,10 +270,7 @@ class ClientOverviewItemResponse(BaseModel):
         populate_by_name = True
         from_attributes = True
 
-class ClientOverviewListPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ClientOverviewListPaginatedResponse(BasePaginatedResponse):
     clients: List[ClientOverviewItemResponse]
 
 class ClientOverviewDetailResponse(BaseModel):
@@ -335,10 +329,7 @@ class GlobalLocationResponse(BaseModel):
         populate_by_name = True
         extra = "allow"
 
-class GlobalLocationPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class GlobalLocationPaginatedResponse(BasePaginatedResponse):
     locations: List[GlobalLocationResponse]
 
 class LocationDropdownItemResponse(BaseModel):
@@ -363,10 +354,7 @@ class LocationDropdownItemResponse(BaseModel):
         populate_by_name = True
         extra = "allow"
 
-class LocationDropdownPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class LocationDropdownPaginatedResponse(BasePaginatedResponse):
     locations: List[LocationDropdownItemResponse]
 
 class RoomDropdownItemResponse(BaseModel):
@@ -391,10 +379,7 @@ class RoomDropdownItemResponse(BaseModel):
         populate_by_name = True
         extra = "allow"
 
-class RoomDropdownPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class RoomDropdownPaginatedResponse(BasePaginatedResponse):
     rooms: List[RoomDropdownItemResponse]
 
 # --- Required Photo Schemas ---
@@ -416,48 +401,44 @@ class RoomCreate(BaseModel):
     floor: int = Field(default=1, json_schema_extra={"example": 1})
     duration: int = Field(default=90, json_schema_extra={"example": 90})  # minutes
     monthly_cleaning_frequency: int = Field(default=4, json_schema_extra={"example": 4})
-    required_photos: Optional[List[RequiredPhotoCreate]] = Field(default_factory=list)
     clean_type: str = Field(default="standard", json_schema_extra={"example": "standard"})  # standard, premium
     tasks: Optional[List[CleaningTaskCreate]] = Field(default_factory=list)
+    required_photos: Optional[List[RequiredPhotoCreate]] = Field(default_factory=list)
 
     model_config = {
         "json_schema_extra": {
             "example": {
-                "room_name": "Ware House",
-                "room_type": "suite",
+                "clean_type": "standard",
                 "duration": 90,
                 "monthly_cleaning_frequency": 4,
-                "required_photos": [
-                    {
-                        "name": "Before cleaning photo",
-                        "frequency_type": "every_visit"
-                    },
-                    {
-                        "name": "After cleaning photo",
-                        "frequency_type": "every_visit"
-                    }, 
-                    {
-                        "name": "Clean the ceiling",
-                        "frequency_type": "weekly"
-                    },
-                    {
-                        "name": "clean the fan",
-                        "frequency_type": "monthly"
-                    }
-                ],
-                "clean_type": "standard",
+                "room_name": "Ware House",
+                "room_type": "suite",
                 "tasks": [
                     {
+                        "frequency_type": "every_visit",
                         "name": "Deep Floor Scrubbing",
-                        "frequency_type": "every_visit"
+                        "is_photo_req": True,
+                        "photo": [
+                            {
+                                "name": "after Deep Floor scrubbing"
+                            },
+                            {
+                                "name": "Before Deep Floor scrubbing"
+                            }
+                        ]
                     },
                     {
+                        "frequency_type": "weekly",
                         "name": "Clean the ceiling",
-                        "frequency_type": "weekly"
-                    },
-                    {
-                        "name": "clean the fan",
-                        "frequency_type": "monthly"
+                        "is_photo_req": True,
+                        "photo": [
+                            {
+                                "name": "after Clean the ceiling"
+                            },
+                            {
+                                "name": "Clean the ceiling"
+                            }
+                        ]
                     }
                 ]
             }
@@ -484,36 +465,21 @@ class RoomUpdate(BaseModel):
                 "floor": 1,
                 "monthly_cleaning_frequency": 4,
                 "clean_type": "standard",
-                "required_photos": [
-                    {
-                        "name": "Before cleaning photo",
-                        "frequency_type": "every_visit"
-                    },
-                    {
-                        "name": "After cleaning photo",
-                        "frequency_type": "every_visit"
-                    },
-                    {
-                        "name": "Clean the ceiling",
-                        "frequency_type": "weekly"
-                    },
-                    {
-                        "name": "clean the fan",
-                        "frequency_type": "monthly"
-                    }
-                ],
                 "tasks": [
                     {
+                        "id": "b386fe2b",
                         "name": "Deep Floor Scrubbing",
-                        "frequency_type": "every_visit"
-                    },
-                    {
-                        "name": "Clean the ceiling",
-                        "frequency_type": "weekly"
-                    },
-                    {
-                        "name": "clean the fan",
-                        "frequency_type": "monthly"
+                        "frequency_type": "every_visit",
+                        "is_photo_req": True,
+                        "photo": [
+                            {
+                                "id": "9ad40712",
+                                "name": "after Deep Floor scrubbing"
+                            },
+                            {
+                                "name": "Before Deep Floor scrubbing"
+                            }
+                        ]
                     }
                 ]
             }
@@ -533,6 +499,7 @@ class RoomResponse(BaseModel):
     monthly_cleaning_frequency: int = 4
     required_photos: List[RequiredPhotoResponse] = Field(default_factory=list)
     photo_number: int = 0
+    total_photos_required: int = 0
     task_number: int = 0
     clean_type: str = "standard"
     tasks: List[CleaningTaskResponse] = Field(default_factory=list)
@@ -554,46 +521,66 @@ class RoomResponse(BaseModel):
                 "floor": 1,
                 "duration": 90,
                 "monthly_cleaning_frequency": 4,
-                "required_photos": [
-                    {
-                        "id": "9ad40712",
-                        "name": "Before cleaning photo",
-                        "frequency_type": "every_visit"
-                    },
-                    {
-                        "id": "00176973",
-                        "name": "After cleaning photo",
-                        "frequency_type": "every_visit"
-                    },
-                    {
-                        "id": "f8f37b0d",
-                        "name": "Clean the ceiling",
-                        "frequency_type": "weekly"
-                    },
-                    {
-                        "id": "788a3b20",
-                        "name": "clean the fan",
-                        "frequency_type": "monthly"
-                    }
-                ],
                 "photo_number": 4,
-                "task_number": 3,
+                "total_photos_required": 4,
+                "task_number": 2,
                 "clean_type": "standard",
                 "tasks": [
                     {
                         "id": "b386fe2b",
                         "name": "Deep Floor Scrubbing",
-                        "frequency_type": "every_visit"
+                        "frequency_type": "every_visit",
+                        "is_photo_req": True,
+                        "total_photos_required": 2,
+                        "photo": [
+                            {
+                                "id": "9ad40712",
+                                "name": "after Deep Floor scrubbing"
+                            },
+                            {
+                                "id": "00176973",
+                                "name": "Before Deep Floor scrubbing"
+                            }
+                        ]
                     },
                     {
                         "id": "6d8c84c6",
                         "name": "Clean the ceiling",
+                        "frequency_type": "weekly",
+                        "is_photo_req": True,
+                        "total_photos_required": 2,
+                        "photo": [
+                            {
+                                "id": "f8f37b0d",
+                                "name": "after Clean the ceiling"
+                            },
+                            {
+                                "id": "788a3b20",
+                                "name": "Clean the ceiling"
+                            }
+                        ]
+                    }
+                ],
+                "required_photos": [
+                    {
+                        "id": "9ad40712",
+                        "name": "after Deep Floor scrubbing",
+                        "frequency_type": "every_visit"
+                    },
+                    {
+                        "id": "00176973",
+                        "name": "Before Deep Floor scrubbing",
+                        "frequency_type": "every_visit"
+                    },
+                    {
+                        "id": "f8f37b0d",
+                        "name": "after Clean the ceiling",
                         "frequency_type": "weekly"
                     },
                     {
-                        "id": "1d3ebc64",
-                        "name": "clean the fan",
-                        "frequency_type": "monthly"
+                        "id": "788a3b20",
+                        "name": "Clean the ceiling",
+                        "frequency_type": "weekly"
                     }
                 ],
                 "created_at": "2026-08-17T04:33:30.656000Z",
@@ -602,10 +589,7 @@ class RoomResponse(BaseModel):
         }
     }
 
-class RoomPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class RoomPaginatedResponse(BasePaginatedResponse):
     rooms: List[RoomResponse]
 
 class AdminRoomLocationDropdownItem(BaseModel):
@@ -767,10 +751,7 @@ class GlobalCleaningPlanListItemResponse(BaseModel):
         populate_by_name = True
         extra = "allow"
 
-class GlobalCleaningPlanPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class GlobalCleaningPlanPaginatedResponse(BasePaginatedResponse):
     cleaning_plans: List[GlobalCleaningPlanListItemResponse] = Field(default_factory=list)
     plans: Optional[List[GlobalCleaningPlanListItemResponse]] = None
 
@@ -805,10 +786,7 @@ class ClientContactItem(BaseModel):
     email: EmailStr
     phone: str
 
-class ClientContactPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ClientContactPaginatedResponse(BasePaginatedResponse):
     contacts: List[ClientContactItem] = Field(default_factory=list)
 
 class ClientLocationItem(BaseModel):
@@ -816,10 +794,7 @@ class ClientLocationItem(BaseModel):
     name: str
     address: str
 
-class ClientLocationPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ClientLocationPaginatedResponse(BasePaginatedResponse):
     locations: List[ClientLocationItem] = Field(default_factory=list)
 
 class ClientContractDetailsResponse(BaseModel):
@@ -891,10 +866,7 @@ class AdminLocationGridItem(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-class AdminLocationGridPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class AdminLocationGridPaginatedResponse(BasePaginatedResponse):
     locations: List[AdminLocationGridItem] = Field(default_factory=list)
 
 class AssignedEmployeeItem(BaseModel):
@@ -959,6 +931,7 @@ class AdminRoomGridItem(BaseModel):
     location_name: Optional[str] = ""
     monthly_cleaning_frequency: int = 4
     photo_number: int = 0
+    total_photos_required: int = 0
     task_number: int = 0
     clean_type: str = "standard"
     updated_at: Union[str, datetime]
@@ -967,10 +940,7 @@ class AdminRoomGridItem(BaseModel):
         populate_by_name = True
         from_attributes = True
 
-class AdminRoomGridPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class AdminRoomGridPaginatedResponse(BasePaginatedResponse):
     rooms: List[AdminRoomGridItem] = Field(default_factory=list)
 
 class RoomDrawerDetailResponse(BaseModel):
@@ -1006,10 +976,7 @@ class AdminCleaningPlanGridItem(BaseModel):
     required_photos_count: int = 4
     tasks_count: int = 12
 
-class AdminCleaningPlanGridPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class AdminCleaningPlanGridPaginatedResponse(BasePaginatedResponse):
     plans: List[AdminCleaningPlanGridItem] = Field(default_factory=list)
 
 # --- Cleaning Plan Dropdown Schemas ---
@@ -1034,10 +1001,7 @@ class CleaningPlanRoomDropdownItem(BaseModel):
         }
     }
 
-class CleaningPlanRoomDropdownPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class CleaningPlanRoomDropdownPaginatedResponse(BasePaginatedResponse):
     rooms: List[CleaningPlanRoomDropdownItem] = Field(default_factory=list)
 
 # --- Manager Cleaning Plan CRUD Schemas ---
@@ -1052,6 +1016,9 @@ class CleaningPlanRoomDetail(BaseModel):
     clean_type: str = "standard"
     tasks: List[CleaningTaskResponse] = Field(default_factory=list)
     required_photos: List[RequiredPhotoResponse] = Field(default_factory=list)
+    photo_number: int = 0
+    total_photos_required: int = 0
+    task_number: int = 0
 
 class CleaningPlanWorkerDetail(BaseModel):
     worker_id: str
@@ -1203,10 +1170,7 @@ class ManagerCleaningPlanListItemResponse(BaseModel):
     created_at: Union[str, datetime]
     updated_at: Union[str, datetime]
 
-class ManagerCleaningPlanPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ManagerCleaningPlanPaginatedResponse(BasePaginatedResponse):
     plans: List[ManagerCleaningPlanListItemResponse] = Field(default_factory=list)
 
 class LocationDrawerCleaningPlanItem(BaseModel):
@@ -1260,10 +1224,7 @@ class CleaningPlanWorkerDropdownItem(BaseModel):
     last_work_ended_ago: Optional[str] = None
     minutes_since_last_work: Optional[int] = None
 
-class CleaningPlanWorkerDropdownPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class CleaningPlanWorkerDropdownPaginatedResponse(BasePaginatedResponse):
     plan_id: str
     plan_date: str
     plan_time_window: str

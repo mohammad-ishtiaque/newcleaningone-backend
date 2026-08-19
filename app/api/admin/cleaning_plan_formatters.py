@@ -5,7 +5,7 @@ from app.schemas.client_list import (
     CleaningPlanRoomDetail, CleaningPlanWorkerDetail,
     CleaningPlanClientDetail, CleaningPlanManagerDetail,
     ManagerCleaningPlanDetailResponse, ManagerCleaningPlanListItemResponse,
-    CleaningTaskResponse, RequiredPhotoResponse
+    CleaningTaskResponse, RequiredPhotoResponse, TaskPhotoResponse
 )
 from app.models.user import UserInDB
 
@@ -15,11 +15,64 @@ def _format_tasks_list(raw_tasks: list) -> List[CleaningTaskResponse]:
     for t in (raw_tasks or []):
         if isinstance(t, dict):
             t_id = str(t.get("id") or t.get("_id") or uuid.uuid4().hex[:8])
-            tasks.append(CleaningTaskResponse(id=t_id, name=t.get("name", "Task"), frequency_type=t.get("frequency_type", "every_visit")))
+            t_name = t.get("name", "Task")
+            t_freq = t.get("frequency_type", "every_visit")
+            is_req = bool(t.get("is_photo_req", False))
+            
+            raw_photos = t.get("photo") or t.get("photos") or []
+            task_photos = []
+            if isinstance(raw_photos, list):
+                for p in raw_photos:
+                    if isinstance(p, dict):
+                        p_id = str(p.get("id") or p.get("_id") or uuid.uuid4().hex[:8])
+                        task_photos.append(TaskPhotoResponse(id=p_id, name=p.get("name", "Photo")))
+                    elif isinstance(p, str):
+                        task_photos.append(TaskPhotoResponse(id=uuid.uuid4().hex[:8], name=p))
+                    elif hasattr(p, "name"):
+                        p_id = str(getattr(p, "id", None) or uuid.uuid4().hex[:8])
+                        task_photos.append(TaskPhotoResponse(id=p_id, name=getattr(p, "name", "Photo")))
+            
+            if task_photos and not is_req:
+                is_req = True
+
+            tasks.append(CleaningTaskResponse(
+                id=t_id,
+                name=t_name,
+                frequency_type=t_freq,
+                is_photo_req=is_req,
+                photo=task_photos,
+                total_photos_required=len(task_photos)
+            ))
         elif isinstance(t, str):
-            tasks.append(CleaningTaskResponse(id=uuid.uuid4().hex[:8], name=t, frequency_type="every_visit"))
+            tasks.append(CleaningTaskResponse(
+                id=uuid.uuid4().hex[:8],
+                name=t,
+                frequency_type="every_visit",
+                is_photo_req=False,
+                photo=[],
+                total_photos_required=0
+            ))
         elif hasattr(t, "name"):
-            tasks.append(CleaningTaskResponse(id=str(getattr(t, "id", None) or uuid.uuid4().hex[:8]), name=getattr(t, "name", "Task"), frequency_type=getattr(t, "frequency_type", "every_visit")))
+            t_id = str(getattr(t, "id", None) or uuid.uuid4().hex[:8])
+            t_name = getattr(t, "name", "Task")
+            t_freq = getattr(t, "frequency_type", "every_visit")
+            is_req = bool(getattr(t, "is_photo_req", False))
+            raw_photos = getattr(t, "photo", []) or []
+            task_photos = []
+            for p in raw_photos:
+                p_id = str(getattr(p, "id", None) or uuid.uuid4().hex[:8]) if not isinstance(p, dict) else str(p.get("id") or uuid.uuid4().hex[:8])
+                p_name = getattr(p, "name", "Photo") if not isinstance(p, dict) else p.get("name", "Photo")
+                task_photos.append(TaskPhotoResponse(id=p_id, name=p_name))
+            if task_photos and not is_req:
+                is_req = True
+            tasks.append(CleaningTaskResponse(
+                id=t_id,
+                name=t_name,
+                frequency_type=t_freq,
+                is_photo_req=is_req,
+                photo=task_photos,
+                total_photos_required=len(task_photos)
+            ))
     return tasks
 
 

@@ -1,6 +1,7 @@
 from datetime import datetime
 from pydantic import BaseModel, Field
 from typing import Optional, List, Literal
+from app.schemas.common import BasePaginatedResponse
 
 class ParticipantInfo(BaseModel):
     user_id: str
@@ -60,10 +61,7 @@ class MessageResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-class PaginatedMessagesResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class PaginatedMessagesResponse(BasePaginatedResponse):
     messages: List[MessageResponse] = Field(default_factory=list)
 
 class ParticipantProfileResponse(BaseModel):
@@ -84,10 +82,7 @@ class AttachmentUploadResponse(BaseModel):
     attachment_type: str = "image"
     filename: str
 
-class PaginatedConversationsResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class PaginatedConversationsResponse(BasePaginatedResponse):
     conversations: List[ConversationResponse] = Field(default_factory=list)
 
 

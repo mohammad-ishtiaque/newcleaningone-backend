@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List, Literal, Dict, Any
 from datetime import datetime, timezone
+from app.schemas.common import BasePaginatedResponse
 from app.schemas.client_list import (
     CleaningTaskCreate, CleaningTaskResponse,
     RequiredPhotoCreate, RequiredPhotoResponse
@@ -133,10 +134,7 @@ class ShiftDraftUpdate(BaseModel):
     room_ids: Optional[List[str]] = None
     rooms: Optional[List[ShiftRoomInput]] = None
 
-class ShiftDraftPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ShiftDraftPaginatedResponse(BasePaginatedResponse):
     drafts: List[ShiftDraftResponse]
 
 class WorkerDropdownItem(BaseModel):
@@ -147,10 +145,7 @@ class WorkerDropdownItem(BaseModel):
     worker_type: str = "employee"
     position: Optional[str] = None
 
-class WorkerDropdownPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class WorkerDropdownPaginatedResponse(BasePaginatedResponse):
     workers: List[WorkerDropdownItem]
 
 class WorkerShiftAssignmentItem(BaseModel):
@@ -201,10 +196,7 @@ class ShiftResponse(BaseModel):
         populate_by_name = True
         from_attributes = True
 
-class ShiftPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ShiftPaginatedResponse(BasePaginatedResponse):
     shifts: List[ShiftResponse]
 
 class ShiftUpdate(BaseModel):
@@ -314,11 +306,8 @@ class PhotoReviewItem(BaseModel):
     rejection_reason: Optional[str] = None
     date_submitted: datetime
 
-class PhotoReviewPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
-    pending_reviews_count: int
+class PhotoReviewPaginatedResponse(BasePaginatedResponse):
+    pending_reviews_count: int = 0
     reviews: List[PhotoReviewItem] = Field(default_factory=list)
 
 class PhotoReviewDetailModalResponse(BaseModel):
@@ -469,11 +458,8 @@ class ClientCleaningVisitItem(BaseModel):
     location_id: Optional[str] = None
     date_raw: str
 
-class ClientScheduleResponse(BaseModel):
+class ClientScheduleResponse(BasePaginatedResponse):
     summary: ScheduleSummaryCounters
-    total_count: int
-    page: int
-    limit: int
     visits: List[ClientCleaningVisitItem] = Field(default_factory=list)
 
 
@@ -610,10 +596,7 @@ class RosterShiftCreateRequest(BaseModel):
     cleaning_plan_id: Optional[str] = Field(default=None)
     room_ids: Optional[List[str]] = Field(default=None)
 
-class ClientLiveShiftPaginatedResponse(BaseModel):
-    total_count: int
-    page: int
-    limit: int
+class ClientLiveShiftPaginatedResponse(BasePaginatedResponse):
     shifts: List[ShiftResponse] = Field(default_factory=list)
 
 

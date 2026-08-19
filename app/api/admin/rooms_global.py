@@ -114,8 +114,16 @@ async def get_global_rooms_grid(
                 cname = cdoc.get("company_name", "")
 
         freq = r.get("monthly_cleaning_frequency", 4)
-        req_p = len(r.get("required_photos", [])) if r.get("required_photos") else (r.get("photo_number") or r.get("required_photos_count", 0))
-        t_cnt = len(r.get("tasks", [])) if r.get("tasks") else (r.get("task_number") or r.get("tasks_count", 0))
+        tasks_raw = r.get("tasks", [])
+        photo_cnt = 0
+        if isinstance(tasks_raw, list) and tasks_raw:
+            for t in tasks_raw:
+                if isinstance(t, dict):
+                    photo_cnt += len(t.get("photo", []))
+        if photo_cnt == 0:
+            photo_cnt = len(r.get("required_photos", [])) if r.get("required_photos") else (r.get("photo_number") or r.get("required_photos_count", 0))
+
+        t_cnt = len(tasks_raw) if tasks_raw else (r.get("task_number") or r.get("tasks_count", 0))
         ctype = r.get("clean_type") or r.get("cleaning_type") or "standard"
         u_at = r.get("updated_at") if isinstance(r.get("updated_at"), datetime) else (r.get("created_at") if isinstance(r.get("created_at"), datetime) else datetime.now(timezone.utc))
 
@@ -128,7 +136,8 @@ async def get_global_rooms_grid(
             location_id=lid,
             location_name=lname or "Location Name",
             monthly_cleaning_frequency=freq,
-            photo_number=req_p,
+            photo_number=photo_cnt,
+            total_photos_required=photo_cnt,
             task_number=t_cnt,
             clean_type=ctype,
             updated_at=u_at
@@ -219,9 +228,16 @@ async def get_room_drawer_details(
     lname = ldoc.get("name", "NH Hotel Amsterdam Centrum") if ldoc else "NH Hotel Amsterdam Centrum"
 
     fl = rdoc.get("floor", 2)
-    dur = rdoc.get("est_cleaning_duration_minutes", 60)
-    req_p = len(rdoc.get("required_photos", [])) or rdoc.get("required_photos_count", 6)
-    t_cnt = len(rdoc.get("tasks", [])) or rdoc.get("tasks_count", 15)
+    dur = rdoc.get("est_cleaning_duration_minutes") or rdoc.get("duration", 60)
+    tasks_raw = rdoc.get("tasks", [])
+    photo_cnt = 0
+    if isinstance(tasks_raw, list) and tasks_raw:
+        for t in tasks_raw:
+            if isinstance(t, dict):
+                photo_cnt += len(t.get("photo", []))
+    if photo_cnt == 0:
+        photo_cnt = len(rdoc.get("required_photos", [])) or rdoc.get("required_photos_count", 6)
+    t_cnt = len(tasks_raw) or rdoc.get("tasks_count", 15)
     cp_name = rdoc.get("cleaning_plan_name", "Deluxe Clean")
 
     code = f"R{rid[-3:].upper()}" if len(rid) >= 3 else "R002"
@@ -235,6 +251,6 @@ async def get_room_drawer_details(
         location_name=lname,
         cleaning_plan_name=cp_name,
         duration_minutes=dur,
-        required_photos_count=req_p,
+        required_photos_count=photo_cnt,
         tasks_count=t_cnt
     )
