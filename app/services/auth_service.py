@@ -71,12 +71,14 @@ class AuthService:
         refresh_token = create_refresh_token(subject=user.id, expires_delta=refresh_expires)
         
         user_role = user.role.value if hasattr(user.role, "value") else str(user.role)
+        is_temp = getattr(user, "is_temporary_password", False) or False
         return Token(
             access_token=access_token,
             refresh_token=refresh_token,
             token_type="bearer",
             name=user.full_name,
-            role=user_role
+            role=user_role,
+            is_temporary_password=is_temp
         )
         
     async def refresh_token(self, request: RefreshTokenRequest) -> Token:
@@ -92,18 +94,20 @@ class AuthService:
         refresh_token = create_refresh_token(subject=user.id)
         
         user_role = user.role.value if hasattr(user.role, "value") else str(user.role)
+        is_temp = getattr(user, "is_temporary_password", False) or False
         return Token(
             access_token=access_token,
             refresh_token=refresh_token,
             token_type="bearer",
             name=user.full_name,
-            role=user_role
+            role=user_role,
+            is_temporary_password=is_temp
         )
 
     async def logout(self):
         return {"message": "Successfully logged out"}
 
-    async def generate_and_send_otp(self, email: str, subject: str = "Your Verification OTP"):
+    async def generate_and_send_otp(self, email: str, subject: str = "Your Verification OTP", purpose: str = "verification"):
         user = await self.user_repo.get_by_email(email)
         if not user:
             # Silently return to prevent email enumeration, or raise error. 
@@ -115,7 +119,12 @@ class AuthService:
         user.otp_expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
         await self.user_repo.update(user)
         
-        await EmailService.send_email(user.email, subject, f"Your OTP code is {otp}. It expires in 15 minutes.")
+        await EmailService.send_otp_email(
+            to_email=user.email,
+            full_name=user.full_name,
+            otp=otp,
+            purpose=purpose
+        )
         return {"message": "OTP sent to email"}
 
     async def verify_email(self, request: VerifyEmailRequest) -> Token:
@@ -197,10 +206,10 @@ class AuthService:
         )
 
     async def resend_otp(self, request: ResendOTPRequest):
-        return await self.generate_and_send_otp(request.email, "Resend: Your Verification OTP")
+        return await self.generate_and_send_otp(request.email, "Resend: Your Verification OTP", purpose="resend")
 
     async def forgot_password(self, request: ForgotPasswordRequest):
-        return await self.generate_and_send_otp(request.email, "Password Reset OTP")
+        return await self.generate_and_send_otp(request.email, "Password Reset OTP", purpose="forgot_password")
 
     async def reset_password(self, request: ResetPasswordRequest):
         user = await self.user_repo.get_by_email(request.email)
@@ -215,9 +224,14 @@ class AuthService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired OTP")
             
         user.hashed_password = get_password_hash(request.new_password)
+        user.is_temporary_password = False
+        user.last_password_changed_at = datetime.now(timezone.utc)
         user.otp_code = None
         user.otp_expires_at = None
         await self.user_repo.update(user)
+        
+        # Send security notification email
+        await EmailService.send_password_changed_email(user.email, user.full_name)
         
         return {"message": "Password reset successfully"}
 
@@ -230,6 +244,11 @@ class AuthService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect old password")
             
         user.hashed_password = get_password_hash(request.new_password)
+        user.is_temporary_password = False
+        user.last_password_changed_at = datetime.now(timezone.utc)
         await self.user_repo.update(user)
+        
+        # Send security notification email
+        await EmailService.send_password_changed_email(user.email, user.full_name)
         
         return {"message": "Password changed successfully"}

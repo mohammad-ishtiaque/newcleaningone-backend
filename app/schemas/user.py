@@ -35,6 +35,7 @@ class ChangePasswordRequest(BaseModel):
 class UserResponse(BaseModel):
     id: str = Field(alias="id", default=None)
     full_name: str
+    name: Optional[str] = None
     email: EmailStr
     phone: Optional[str] = None
     role: RoleEnum
@@ -44,10 +45,21 @@ class UserResponse(BaseModel):
     updated_at: datetime
     profile_photo: Optional[str] = None
     push_notifications_enabled: bool = True
+    temporary_password: Optional[str] = None
+
+    def __init__(self, **data):
+        if "name" not in data and "full_name" in data:
+            data["name"] = data["full_name"]
+        elif "full_name" not in data and "name" in data:
+            data["full_name"] = data["name"]
+        super().__init__(**data)
 
     class Config:
         populate_by_name = True
         from_attributes = True
+
+class ManagerCreateResponse(UserResponse):
+    pass
 
 class SignupResponse(BaseModel):
     message: str = "Signup successful. Please verify your email via OTP."
@@ -279,17 +291,27 @@ class AdminWorkerStatusUpdate(BaseModel):
 class AdminWorkerTableItem(BaseModel):
     worker_id: str
     full_name: str
+    name: Optional[str] = None
+    email: Optional[str] = None
+    temporary_password: Optional[str] = None
     profile_photo: Optional[str] = None
     worker_type: str
     position: Optional[str] = None
     location: Optional[str] = None
     languages: List[str] = Field(default_factory=list)
-    hours_worked: str
-    hours_worked_numeric: float
-    status: str
-    account_status: str
-    approval_status: str
-    is_active: bool
+    hours_worked: str = "0h"
+    hours_worked_numeric: float = 0.0
+    status: str = "Active"
+    account_status: str = "active"
+    approval_status: str = "approved"
+    is_active: bool = True
+
+    def __init__(self, **data):
+        if "name" not in data and "full_name" in data:
+            data["name"] = data["full_name"]
+        elif "full_name" not in data and "name" in data:
+            data["full_name"] = data["name"]
+        super().__init__(**data)
 
 class AdminWorkerTablePaginatedResponse(BaseModel):
     total_workers: int

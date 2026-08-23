@@ -9,6 +9,7 @@ from app.models.user import UserInDB, RoleEnum
 from app.schemas.worker_roster import (
     DateStripItem, RosterCardItem, WorkerRosterScreenResponse, WorkerRosterDetailResponse
 )
+from app.api.worker_shift_utils import resolve_shift_execution, is_plan_active_on_date, get_or_create_shift_execution
 
 router = APIRouter(prefix="/worker/roster", tags=["Worker Roaster Management"])
 
@@ -21,21 +22,24 @@ def require_worker(current_user: UserInDB = Depends(get_current_user)) -> UserIn
 
 async def _get_admin_contact(db) -> tuple[str, str]:
     """Helper to fetch primary Admin name and phone from MongoDB users collection."""
-    admin_user = await db["users"].find_one({"role": "admin"})
+    admin_user = await db["users"].find_one({"role": {"$in": ["admin", "manager"]}})
     if admin_user:
-        name = admin_user.get("full_name") or admin_user.get("name") or "John Smith"
-        phone = admin_user.get("phone") or admin_user.get("phone_number") or "+31 20 555 7200"
+        name = admin_user.get("full_name") or admin_user.get("name") or "Support Admin"
+        phone = admin_user.get("phone") or admin_user.get("phone_number") or "+1555000000"
         return name, phone
-    return "John Smith", "+31 20 555 7200"
+    company_doc = await db["company_profile"].find_one({"type": "main"})
+    if company_doc:
+        return company_doc.get("company_name", "CleanOnes Support"), company_doc.get("phone", "+1555000000")
+    return "CleanOnes Support", "+1555000000"
 
 
 def _format_time_12h(time_str: str) -> str:
     """Formats '14:00' to '2:00 PM'."""
     try:
-        dt = datetime.strptime(time_str, "%H:%M")
+        dt = datetime.strptime(str(time_str).strip(), "%H:%M")
         return dt.strftime("%I:%M %p").lstrip("0")
     except Exception:
-        return time_str
+        return str(time_str)
 
 
 @router.get(
@@ -95,60 +99,72 @@ async def get_worker_roster_screen(
     month_year_lbl = target_date.strftime("%B %Y")
     week_lbl = f"Week {curr_week}"
 
-    # Query worker shifts in MongoDB
-    cursor = db["shifts"].find({
+    # 1. Fetch direct shifts for worker
+    raw_shifts = await db["shifts"].find({
         "workers.worker_id": worker_id,
+        "date": selected_date_str,
         "status": {"$ne": "cancelled"}
-    }).sort("date", 1)
+    }).sort("start_time", 1).to_list(length=100)
 
-    raw_shifts = await cursor.to_list(length=100)
-
-    # Filter for selected date if shifts exist
-    selected_shifts = [s for s in raw_shifts if s.get("date") == selected_date_str]
-    if not selected_shifts and raw_shifts:
-        selected_shifts = raw_shifts[:5]
+    # 2. Fetch active cleaning plans on selected date
+    cursor_p = db["cleaning_plans"].find({
+        "$or": [
+            {"worker_ids": worker_id},
+            {"assigned_workers.worker_id": worker_id}
+        ],
+        "status": {"$ne": "cancelled"}
+    })
+    plans = await cursor_p.to_list(length=100)
+    for p in plans:
+        if is_plan_active_on_date(p, selected_date_str):
+            exec_doc = await get_or_create_shift_execution(p, selected_date_str, db)
+            raw_shifts.append(exec_doc)
 
     cards = []
-    if selected_shifts:
-        for s in selected_shifts:
-            s_id = str(s.get("_id") or s.get("id"))
-            loc_name = s.get("location_name") or s.get("client_name") or "Hilton Hotel"
-            st_time = _format_time_12h(s.get("start_time", "14:00"))
-            end_time = _format_time_12h(s.get("end_time", "18:00"))
-            t_range = f"{st_time} - {end_time}"
-            addr = s.get("location_address") or s.get("address") or "Downtown Business District"
+    seen_ids = set()
+    for s in raw_shifts:
+        s_id = str(s.get("_id") or s.get("id"))
+        if s_id in seen_ids:
+            continue
+        seen_ids.add(s_id)
 
-            r_list = s.get("rooms", [])
-            r_count = len(r_list) if r_list else 20
-            r_count_str = f"{r_count} rooms"
+        loc_name = s.get("location_name") or s.get("client_name") or "Location"
+        st_time = _format_time_12h(s.get("start_time", "08:00"))
+        end_time = _format_time_12h(s.get("end_time", "16:00"))
+        t_range = f"{st_time} - {end_time}"
+        addr = s.get("location_address") or s.get("address") or ""
 
-            s_status = s.get("status", "published").lower()
-            if s_status == "completed":
-                st_badge = "completed"
-                st_label = "Completed"
-                can_start = False
-            elif s_status in ["running", "in_progress"]:
-                st_badge = "running"
-                st_label = "In Progress"
-                can_start = False
-            else:
-                st_badge = "upcoming"
-                st_label = "Upcoming"
-                can_start = True
+        r_list = s.get("rooms", [])
+        r_count = len(r_list)
+        r_count_str = f"{r_count} rooms" if r_count != 1 else "1 room"
 
-            cards.append(RosterCardItem(
-                shift_id=s_id,
-                location_name=loc_name,
-                status=st_badge,
-                status_label=st_label,
-                time_range=t_range,
-                address_district=addr,
-                rooms_count=r_count,
-                rooms_count_str=r_count_str,
-                admin_contact_name=admin_name,
-                admin_contact_phone=admin_phone,
-                can_start_shift=can_start
-            ))
+        s_status = str(s.get("status", "published")).lower()
+        if s_status == "completed":
+            st_badge = "completed"
+            st_label = "Completed"
+            can_start = False
+        elif s_status in ["running", "in_progress"]:
+            st_badge = "running"
+            st_label = "In Progress"
+            can_start = False
+        else:
+            st_badge = "upcoming"
+            st_label = "Upcoming"
+            can_start = True
+
+        cards.append(RosterCardItem(
+            shift_id=s_id,
+            location_name=loc_name,
+            status=st_badge,
+            status_label=st_label,
+            time_range=t_range,
+            address_district=addr,
+            rooms_count=r_count,
+            rooms_count_str=r_count_str,
+            admin_contact_name=admin_name,
+            admin_contact_phone=admin_phone,
+            can_start_shift=can_start
+        ))
 
     return WorkerRosterScreenResponse(
         screen_title="My Roster",
@@ -176,35 +192,25 @@ async def get_worker_roster_shift_detail(
     db = get_database()
     admin_name, admin_phone = await _get_admin_contact(db)
 
-    s_doc = await db["shifts"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+    s_doc, _ = await resolve_shift_execution(shift_id, db)
     if not s_doc:
-        return WorkerRosterDetailResponse(
-            shift_id=shift_id,
-            location_name="Hilton Hotel",
-            address_district="Downtown Business District",
-            date_str=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-            time_range="2:00 PM - 6:00 PM",
-            status="completed",
-            status_label="Completed",
-            total_rooms=20,
-            admin_contact_name=admin_name,
-            admin_contact_phone=admin_phone,
-            assigned_workers_count=3
-        )
+        raise HTTPException(status_code=404, detail="Roster shift not found")
 
-    st_time = _format_time_12h(s_doc.get("start_time", "14:00"))
-    end_time = _format_time_12h(s_doc.get("end_time", "18:00"))
+    st_time = _format_time_12h(s_doc.get("start_time", "08:00"))
+    end_time = _format_time_12h(s_doc.get("end_time", "16:00"))
+
+    workers = s_doc.get("assigned_workers", []) or s_doc.get("workers", [])
 
     return WorkerRosterDetailResponse(
         shift_id=str(s_doc.get("_id") or s_doc.get("id")),
-        location_name=s_doc.get("location_name", "Main Location"),
-        address_district=s_doc.get("location_address", "Downtown Business District"),
-        date_str=s_doc.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d")),
+        location_name=s_doc.get("location_name") or "Main Location",
+        address_district=s_doc.get("location_address") or "",
+        date_str=str(s_doc.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")),
         time_range=f"{st_time} - {end_time}",
-        status=s_doc.get("status", "published"),
-        status_label=s_doc.get("status", "published").capitalize(),
+        status=str(s_doc.get("status", "published")),
+        status_label=str(s_doc.get("status", "published")).capitalize(),
         total_rooms=len(s_doc.get("rooms", [])),
         admin_contact_name=admin_name,
         admin_contact_phone=admin_phone,
-        assigned_workers_count=len(s_doc.get("workers", []))
+        assigned_workers_count=len(workers) if isinstance(workers, list) else 1
     )

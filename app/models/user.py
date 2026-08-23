@@ -33,6 +33,10 @@ class UserInDB(BaseModel):
     approval_status: str = "approved"  # approved, pending, rejected
     rejection_reason: Optional[str] = None
 
+    # Temporary Password Flags
+    is_temporary_password: bool = False
+    temporary_password_created_at: Optional[datetime] = None
+
     # OTP fields
     otp_code: Optional[str] = None
     otp_expires_at: Optional[datetime] = None

@@ -2,16 +2,16 @@ from fastapi import HTTPException, status
 from app.repositories.user_repo import UserRepository
 from app.schemas.user import UserCreate, AdminCreate, UserResponse, WorkerSignup, ClientSignup, ClientProfileResponse
 from app.models.user import UserInDB, RoleEnum
-from app.security.password import get_password_hash
 from datetime import datetime, timezone
 from app.services.auth_service import AuthService
+from app.security.password import get_password_hash, generate_temporary_password
 
 class UserService:
     def __init__(self, user_repo: UserRepository):
         self.user_repo = user_repo
         self.auth_service = AuthService(user_repo)
 
-    async def _create_user(self, user_in: UserCreate | AdminCreate, role: RoleEnum) -> UserResponse:
+    async def _create_user(self, user_in: UserCreate | AdminCreate, role: RoleEnum, is_temporary: bool = True) -> UserResponse:
         existing_user = await self.user_repo.get_by_email(user_in.email)
         if existing_user:
             raise HTTPException(
@@ -19,7 +19,12 @@ class UserService:
                 detail="Email already registered"
             )
         
-        hashed_password = get_password_hash(user_in.password)
+        raw_password = getattr(user_in, "password", None)
+        if not raw_password:
+            raw_password = generate_temporary_password()
+            
+        hashed_password = get_password_hash(raw_password)
+        now = datetime.now(timezone.utc)
         new_user = UserInDB(
             full_name=user_in.full_name,
             email=user_in.email,
@@ -28,12 +33,27 @@ class UserService:
             role=role,
             is_active=True,
             is_verified=True,
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc)
+            is_temporary_password=is_temporary,
+            temporary_password_created_at=now if is_temporary else None,
+            created_at=now,
+            updated_at=now
         )
         
         created_user = await self.user_repo.create(new_user)
-        return UserResponse(**created_user.model_dump())
+        
+        # Send credentials email via SMTP
+        from app.services.email_service import EmailService
+        await EmailService.send_credentials_email(
+            to_email=new_user.email,
+            full_name=new_user.full_name,
+            role=role.value if hasattr(role, "value") else str(role),
+            password=raw_password
+        )
+
+        res_dict = created_user.model_dump()
+        if is_temporary:
+            res_dict["temporary_password"] = raw_password
+        return UserResponse(**res_dict)
 
     async def signup_worker(self, user_in: WorkerSignup) -> UserResponse:
         from app.core.database import get_database
@@ -132,7 +152,7 @@ class UserService:
         created_user = await self.user_repo.create(new_user)
         
         # Automatically send verification OTP after worker signup
-        await self.auth_service.generate_and_send_otp(created_user.email, subject="Welcome! Verify your email")
+        await self.auth_service.generate_and_send_otp(created_user.email, subject="Welcome! Verify your email", purpose="verification")
         
         return UserResponse(**created_user.model_dump())
 
@@ -213,7 +233,7 @@ class UserService:
             )
 
         # Automatically send verification OTP after client signup
-        await self.auth_service.generate_and_send_otp(created_user.email, subject="Welcome! Verify your email")
+        await self.auth_service.generate_and_send_otp(created_user.email, subject="Welcome! Verify your email", purpose="verification")
 
         return ClientProfileResponse(**created_user.model_dump())
 

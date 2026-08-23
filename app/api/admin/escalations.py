@@ -108,20 +108,24 @@ async def get_escalation_drawer_details(
     c_dt = e.get("created_at") if isinstance(e.get("created_at"), datetime) else now
 
     assignee = EscalationAssigneeDetail(
-        admin_id=ass_d.get("admin_id", "adm_1"),
-        name=ass_d.get("name", "Kaz Putters")
+        admin_id=str(ass_d.get("admin_id") or ass_d.get("id") or ""),
+        name=ass_d.get("name") or ass_d.get("full_name") or "Admin"
     ) if ass_d else None
+
+    loc_name = e.get("location_name") or e.get("location", {}).get("name") or "Location"
+    room_name = e.get("room_name") or e.get("room", {}).get("name") or ""
+    sub_title = e.get("subtitle") or (f"{loc_name} - {room_name}" if room_name else loc_name)
 
     return EscalationDrawerResponse(
         escalation_id=e.get("escalation_id", escalation_id),
         shift_id=e.get("shift_id"),
-        title=e.get("title", "Broken mirror in Room 305"),
-        subtitle=e.get("subtitle", "NH Hotel Amsterdam - Kamer 305"),
+        title=e.get("title") or "Escalation Incident",
+        subtitle=sub_title,
         description=e.get("description", ""),
-        severity=e.get("severity", "high"),
+        severity=e.get("severity", "medium"),
         reporter=EscalationReporterDetail(
-            worker_id=rep_d.get("worker_id", "w_1"),
-            name=rep_d.get("name", "Lisa Visser"),
+            worker_id=str(rep_d.get("worker_id") or rep_d.get("id") or ""),
+            name=rep_d.get("name") or rep_d.get("full_name") or "Worker",
             profile_picture=rep_d.get("profile_picture")
         ),
         assigned_to=assignee,

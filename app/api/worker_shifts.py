@@ -14,8 +14,15 @@ from app.schemas.shift import (
 )
 from app.api.worker_shift_utils import (
     resolve_shift_execution, calculate_cleaning_plan_progress,
-    is_plan_active_on_date, get_or_create_shift_execution
+    is_plan_active_on_date, get_or_create_shift_execution,
+    parse_plan_start_datetime
 )
+from app.core.timezone_utils import (
+    now_in_tz, get_today_str, parse_plan_start_datetime,
+    get_timezone, human_time_until
+)
+from app.dependencies.timezone import get_request_timezone
+from zoneinfo import ZoneInfo
 from app.api.worker_shifts_attendance import attendance_router, require_worker
 from app.api.worker_shifts_execution import execution_router
 
@@ -36,6 +43,8 @@ def _human_time_ago(dt_val, now):
             return "Just now"
     if dt_val.tzinfo is None:
         dt_val = dt_val.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     diff = int((now - dt_val).total_seconds())
     if diff < 60:
         return "Just now"
@@ -63,17 +72,18 @@ def _get_time_greeting(now: datetime) -> str:
     "/home",
     response_model=WorkerHomeResponse,
     summary="Get Worker Home Screen Dashboard Data",
-    description="Returns greeting, worker profile, active running shift card, stats counters (Today's Shifts, Completed, Pending), next upcoming shift card, and recent activity feed."
+    description="Returns worker profile, active running shift card, stats counters (Today's Shifts, Completed, Pending), next upcoming shift card, and recent activity feed with professional timezone handling."
 )
 async def get_worker_home_dashboard(
+    client_tz: ZoneInfo = Depends(get_request_timezone),
     current_user: UserInDB = Depends(require_worker)
 ):
     db = get_database()
     worker_id = str(current_user.id or getattr(current_user, "_id", None))
-    now = datetime.now(timezone.utc)
-    today_str = now.strftime("%Y-%m-%d")
+    tz_str = str(client_tz)
+    now = now_in_tz(client_tz)
+    today_str = get_today_str(client_tz)
 
-    greeting_str = _get_time_greeting(now)
     worker_name = getattr(current_user, "full_name", "Worker")
     profile_photo = getattr(current_user, "profile_photo", None)
 
@@ -81,7 +91,8 @@ async def get_worker_home_dashboard(
     cursor_plans = db["cleaning_plans"].find({"status": {"$ne": "cancelled"}})
     all_plans = await cursor_plans.to_list(length=200)
 
-    active_card = None
+    active_candidates = []
+    upcoming_candidates = []
     todays_shifts_count = 0
     completed_count = 0
     pending_count = 0
@@ -89,34 +100,70 @@ async def get_worker_home_dashboard(
     for p in all_plans:
         w_ids = [str(w) for w in p.get("worker_ids", [])]
         w_assigned = [str(w.get("worker_id")) for w in p.get("assigned_workers", []) if isinstance(w, dict)]
-        if worker_id not in w_ids and worker_id not in w_assigned:
+        w_workers = [str(w.get("worker_id")) for w in p.get("workers", []) if isinstance(w, dict)]
+        if worker_id not in w_ids and worker_id not in w_assigned and worker_id not in w_workers:
             continue
 
         if is_plan_active_on_date(p, today_str):
             todays_shifts_count += 1
             exec_doc = await get_or_create_shift_execution(p, today_str, db)
-            w_list = exec_doc.get("assigned_workers", [])
+            w_list = exec_doc.get("assigned_workers") or exec_doc.get("workers") or []
             w_rec = next((w for w in w_list if str(w.get("worker_id")) == worker_id), None)
+
+            plan_title = exec_doc.get("title") or p.get("title") or p.get("plan_name", "Cleaning Shift")
+            location_name = exec_doc.get("location_name") or p.get("location_name") or "Location"
+            client_name = exec_doc.get("client_name") or p.get("company_name") or p.get("client_name") or "Client"
+
+            shift_tz_str = exec_doc.get("timezone") or p.get("timezone") or tz_str
+            shift_tz = get_timezone(shift_tz_str)
+
+            start_time_str = exec_doc.get("start_time", "08:00 AM")
+            end_time_str = exec_doc.get("end_time", "04:00 PM")
+            start_dt = parse_plan_start_datetime(today_str, start_time_str, shift_tz)
 
             if w_rec and w_rec.get("checkout_time"):
                 completed_count += 1
-            elif w_rec and w_rec.get("checkin_time"):
+            else:
+                pending_count += 1
                 progress = calculate_cleaning_plan_progress(exec_doc)
-                if not active_card:
-                    active_card = ActiveShiftHomeCard(
+
+                is_checked_in = bool(w_rec and w_rec.get("checkin_time"))
+                is_in_time_window = (now >= (start_dt - timedelta(minutes=30)))
+
+                if is_checked_in:
+                    # Checked in shift has top priority (rank 0)
+                    active_candidates.append((0, start_dt, ActiveShiftHomeCard(
                         shift_id=str(exec_doc.get("id") or exec_doc.get("_id")),
-                        client_name=exec_doc.get("client_name", "Client"),
-                        location_name=exec_doc.get("location_name", "Location"),
+                        title=plan_title,
+                        client_name=client_name,
+                        location_name=location_name,
                         location_address=None,
-                        start_time=exec_doc.get("start_time", "08:00 AM"),
-                        end_time=exec_doc.get("end_time", "04:00 PM"),
+                        start_time=start_time_str,
+                        end_time=end_time_str,
+                        timezone=shift_tz_str,
                         completed_rooms=progress["completed_rooms_count"],
                         total_rooms=progress["total_rooms_count"],
                         overall_progress_percentage=progress["overall_progress_percentage"],
                         status="in_progress"
-                    )
-            else:
-                pending_count += 1
+                    )))
+                elif is_in_time_window:
+                    card_status = "late" if now > (start_dt + timedelta(minutes=15)) else "scheduled"
+                    active_candidates.append((1, start_dt, ActiveShiftHomeCard(
+                        shift_id=str(exec_doc.get("id") or exec_doc.get("_id")),
+                        title=plan_title,
+                        client_name=client_name,
+                        location_name=location_name,
+                        location_address=None,
+                        start_time=start_time_str,
+                        end_time=end_time_str,
+                        timezone=shift_tz_str,
+                        completed_rooms=progress["completed_rooms_count"],
+                        total_rooms=progress["total_rooms_count"],
+                        overall_progress_percentage=progress["overall_progress_percentage"],
+                        status=card_status
+                    )))
+                else:
+                    upcoming_candidates.append((start_dt, exec_doc, p, shift_tz_str))
 
     stats = HomeStatsCounters(
         todays_shifts=todays_shifts_count,
@@ -124,23 +171,30 @@ async def get_worker_home_dashboard(
         pending=pending_count
     )
 
-    # Next Shift Card (if no active card, show next upcoming shift)
+    active_card = None
+    if active_candidates:
+        active_candidates.sort(key=lambda x: (x[0], x[1]))
+        active_card = active_candidates[0][2]
+
+    # Next Shift Card (if upcoming shifts exist)
     next_card = None
-    if not active_card and todays_shifts_count > 0:
-        for p in all_plans:
-            if is_plan_active_on_date(p, today_str):
-                exec_doc = await get_or_create_shift_execution(p, today_str, db)
-                next_card = NextShiftHomeCard(
-                    shift_id=str(exec_doc.get("id") or exec_doc.get("_id")),
-                    client_name=exec_doc.get("client_name", "Client"),
-                    location_name=exec_doc.get("location_name", "Location"),
-                    location_address=None,
-                    start_time=exec_doc.get("start_time", "08:00 AM"),
-                    end_time=exec_doc.get("end_time", "04:00 PM"),
-                    time_until_start="Starting today",
-                    date=today_str
-                )
-                break
+    if upcoming_candidates:
+        upcoming_candidates.sort(key=lambda x: x[0])
+        earliest_start_dt, next_exec, next_p, next_tz_str = upcoming_candidates[0]
+        time_until_str = human_time_until(earliest_start_dt, now)
+
+        next_card = NextShiftHomeCard(
+            shift_id=str(next_exec.get("id") or next_exec.get("_id")),
+            title=next_exec.get("title") or next_p.get("title") or next_p.get("plan_name", "Cleaning Shift"),
+            client_name=next_exec.get("client_name") or next_p.get("company_name") or "Client",
+            location_name=next_exec.get("location_name") or next_p.get("location_name") or "Location",
+            location_address=None,
+            start_time=next_exec.get("start_time", "08:00 AM"),
+            end_time=next_exec.get("end_time", "04:00 PM"),
+            timezone=next_tz_str,
+            time_until_start=time_until_str,
+            date=today_str
+        )
 
     # Activity feed
     activity_items = []
@@ -160,12 +214,12 @@ async def get_worker_home_dashboard(
         ))
 
     return WorkerHomeResponse(
-        greeting=greeting_str,
         worker_name=worker_name,
         profile_photo=profile_photo,
         active_shift=active_card,
         stats=stats,
         next_shift=next_card,
+        timezone=tz_str,
         recent_activity=activity_items
     )
 
@@ -178,25 +232,33 @@ async def get_worker_home_dashboard(
 )
 async def get_my_assigned_shifts(
     status_val: Optional[str] = None,
+    client_tz: ZoneInfo = Depends(get_request_timezone),
     current_user: UserInDB = Depends(require_worker)
 ):
     db = get_database()
     worker_id = str(current_user.id or getattr(current_user, "_id", None))
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today_str = get_today_str(client_tz)
 
+    seen_ids = set()
+    shifts_res = []
+
+    # 1. Fetch active cleaning plans for this worker
     cursor = db["cleaning_plans"].find({"status": {"$ne": "cancelled"}})
     all_plans = await cursor.to_list(length=200)
 
-    shifts_res = []
     for p in all_plans:
         w_ids = [str(w) for w in p.get("worker_ids", [])]
         w_assigned = [str(w.get("worker_id")) for w in p.get("assigned_workers", []) if isinstance(w, dict)]
-        if worker_id not in w_ids and worker_id not in w_assigned:
+        w_workers = [str(w.get("worker_id")) for w in p.get("workers", []) if isinstance(w, dict)]
+        if worker_id not in w_ids and worker_id not in w_assigned and worker_id not in w_workers:
             continue
 
-        if is_plan_active_on_date(p, today_str):
-            exec_doc = await get_or_create_shift_execution(p, today_str, db)
-            exec_doc["id"] = str(exec_doc.get("id") or exec_doc.get("_id"))
+        target_date = today_str if is_plan_active_on_date(p, today_str) else str(p.get("date") or today_str)
+        exec_doc = await get_or_create_shift_execution(p, target_date, db)
+        s_id = str(exec_doc.get("id") or exec_doc.get("_id"))
+        if s_id not in seen_ids:
+            seen_ids.add(s_id)
+            exec_doc["id"] = s_id
             progress = calculate_cleaning_plan_progress(exec_doc)
             exec_doc["overall_progress_percentage"] = progress["overall_progress_percentage"]
             exec_doc["completed_rooms_count"] = progress["completed_rooms_count"]
@@ -206,7 +268,63 @@ async def get_my_assigned_shifts(
             if status_val and exec_doc.get("status") != status_val:
                 continue
 
-            shifts_res.append(ShiftResponse(**exec_doc))
+            try:
+                shifts_res.append(ShiftResponse(**exec_doc))
+            except Exception:
+                pass
+
+    # 2. Fetch from shift_executions
+    exec_cursor = db["shift_executions"].find({
+        "$or": [
+            {"assigned_workers.worker_id": worker_id},
+            {"workers.worker_id": worker_id},
+            {"worker_ids": worker_id}
+        ]
+    }).sort("date", -1)
+    past_execs = await exec_cursor.to_list(length=100)
+    for ex in past_execs:
+        s_id = str(ex.get("id") or ex.get("_id"))
+        if s_id not in seen_ids:
+            seen_ids.add(s_id)
+            ex["id"] = s_id
+            progress = calculate_cleaning_plan_progress(ex)
+            ex["overall_progress_percentage"] = progress["overall_progress_percentage"]
+            ex["completed_rooms_count"] = progress["completed_rooms_count"]
+            ex["in_progress_rooms_count"] = progress["in_progress_rooms_count"]
+            ex["pending_rooms_count"] = progress["pending_rooms_count"]
+
+            if status_val and ex.get("status") != status_val:
+                continue
+
+            try:
+                shifts_res.append(ShiftResponse(**ex))
+            except Exception:
+                pass
+
+    # 3. Fetch from direct shifts collection
+    shift_cursor = db["shifts"].find({
+        "workers.worker_id": worker_id,
+        "status": {"$ne": "cancelled"}
+    }).sort("date", -1)
+    direct_shifts = await shift_cursor.to_list(length=100)
+    for ds in direct_shifts:
+        s_id = str(ds.get("id") or ds.get("_id"))
+        if s_id not in seen_ids:
+            seen_ids.add(s_id)
+            ds["id"] = s_id
+            progress = calculate_cleaning_plan_progress(ds)
+            ds["overall_progress_percentage"] = progress["overall_progress_percentage"]
+            ds["completed_rooms_count"] = progress["completed_rooms_count"]
+            ds["in_progress_rooms_count"] = progress["in_progress_rooms_count"]
+            ds["pending_rooms_count"] = progress["pending_rooms_count"]
+
+            if status_val and ds.get("status") != status_val:
+                continue
+
+            try:
+                shifts_res.append(ShiftResponse(**ds))
+            except Exception:
+                pass
 
     return shifts_res
 

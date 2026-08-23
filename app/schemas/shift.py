@@ -170,6 +170,7 @@ class ShiftWorkerDetail(BaseModel):
 
 class ShiftResponse(BaseModel):
     id: str
+    title: Optional[str] = None
     draft_id: Optional[str] = None
     client_id: str
     client_name: str
@@ -178,6 +179,7 @@ class ShiftResponse(BaseModel):
     date: str
     start_time: str
     end_time: str
+    timezone: Optional[str] = "Europe/Amsterdam"
     shift_notes: Optional[str] = None
     cleaning_plan_id: Optional[str] = None
     rooms: List[ShiftRoomDetail] = Field(default_factory=list)
@@ -203,6 +205,7 @@ class ShiftUpdate(BaseModel):
     date: Optional[str] = Field(default=None, json_schema_extra={"example": "2026-07-26"})
     start_time: Optional[str] = Field(default=None, json_schema_extra={"example": "09:00"})
     end_time: Optional[str] = Field(default=None, json_schema_extra={"example": "17:00"})
+    timezone: Optional[str] = Field(default=None, json_schema_extra={"example": "Europe/Amsterdam"})
     shift_notes: Optional[str] = Field(default=None, json_schema_extra={"example": "Updated shift notes"})
     status: Optional[str] = Field(default=None, json_schema_extra={"example": "published"})
     worker_ids: Optional[List[str]] = Field(default=None, json_schema_extra={"example": ["worker_id_1"]})
@@ -354,11 +357,13 @@ class LiveStatusResponse(BaseModel):
 # --- Worker Home Schemas ---
 class ActiveShiftHomeCard(BaseModel):
     shift_id: str
+    title: Optional[str] = None
     client_name: str
     location_name: str
     location_address: Optional[str] = None
     start_time: str
     end_time: str
+    timezone: Optional[str] = "Europe/Amsterdam"
     completed_rooms: int = 0
     total_rooms: int = 0
     overall_progress_percentage: float = 0.0
@@ -366,11 +371,13 @@ class ActiveShiftHomeCard(BaseModel):
 
 class NextShiftHomeCard(BaseModel):
     shift_id: str
+    title: Optional[str] = None
     client_name: str
     location_name: str
     location_address: Optional[str] = None
     start_time: str
     end_time: str
+    timezone: Optional[str] = "Europe/Amsterdam"
     time_until_start: Optional[str] = None
     date: str
 
@@ -387,12 +394,12 @@ class ActivityFeedItem(BaseModel):
     created_at: datetime
 
 class WorkerHomeResponse(BaseModel):
-    greeting: str
     worker_name: str
     profile_photo: Optional[str] = None
     active_shift: Optional[ActiveShiftHomeCard] = None
     stats: HomeStatsCounters
     next_shift: Optional[NextShiftHomeCard] = None
+    timezone: Optional[str] = "Europe/Amsterdam"
     recent_activity: List[ActivityFeedItem] = Field(default_factory=list)
 
 # --- Client Live Status Schemas ---
@@ -427,6 +434,15 @@ class ClientLiveRoomProgress(BaseModel):
     total_tasks_count: int
     tasks: List[ClientLiveTaskItem] = Field(default_factory=list)
 
+class ClientLiveStatusSessionSummary(BaseModel):
+    shift_id: str
+    location_name: str
+    room_name: Optional[str] = None
+    status: str
+    overall_progress_percentage: float
+    start_time: str
+    end_time: str
+
 class ClientLiveStatusResponse(BaseModel):
     shift_id: str
     status_label: str = "CLEANING IN PROGRESS"
@@ -438,6 +454,7 @@ class ClientLiveStatusResponse(BaseModel):
     arrival_time_info: ArrivalTimeCard
     current_active_room: ClientLiveRoomProgress
     all_rooms_progress: List[ClientLiveRoomProgress] = Field(default_factory=list)
+    active_sessions: List[ClientLiveStatusSessionSummary] = Field(default_factory=list)
 
 # --- Clients Schedule Schemas ---
 class ScheduleSummaryCounters(BaseModel):

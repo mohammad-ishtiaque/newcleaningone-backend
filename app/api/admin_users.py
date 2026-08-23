@@ -44,6 +44,16 @@ async def create_admin(
 
     user_in_db = UserInDB(**user_dict, hashed_password=get_password_hash(user_in.password))
     created_user = await user_service.user_repo.create(user_in_db)
+
+    # Send credentials email via SMTP
+    from app.services.email_service import EmailService
+    await EmailService.send_credentials_email(
+        to_email=user_in.email,
+        full_name=user_in.full_name,
+        role="Admin",
+        password=user_in.password
+    )
+
     return UserResponse(**created_user.model_dump())
 
 @router.post("/create-manager", response_model=UserResponse, status_code=status.HTTP_201_CREATED)

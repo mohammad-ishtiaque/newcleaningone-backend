@@ -20,10 +20,16 @@ def create_app(service_name: str = "all") -> FastAPI:
         "all": "Cleaning One Monolith API"
     }
     
+    def custom_unique_id(route):
+        tag = route.tags[0].lower().replace(" ", "_") if route.tags else "api"
+        clean_path = route.path_format.replace("/", "_").replace("{", "").replace("}", "").strip("_")
+        return f"{tag}_{clean_path}_{route.name}"
+
     app = FastAPI(
         title=title_map.get(service_name, "Cleaning One API"),
         description=f"Production-ready FastAPI {service_name.capitalize()} System",
-        version="1.0.0"
+        version="1.0.0",
+        generate_unique_id_function=custom_unique_id
     )
     
     origins = [
@@ -66,6 +72,7 @@ def create_app(service_name: str = "all") -> FastAPI:
         app.include_router(admin.room_mgmt_router)
         app.include_router(admin.rooms_global_router)
         app.include_router(admin.cleaning_plan_mgmt_router)
+        app.include_router(admin.cleaning_plan_dropdowns_router)
         app.include_router(admin.worker_mgmt_router)
         app.include_router(admin.shift_mgmt_router)
         app.include_router(admin.roster_mgmt_router)
@@ -74,7 +81,7 @@ def create_app(service_name: str = "all") -> FastAPI:
         app.include_router(admin.qc_reports_router)
         app.include_router(admin.admin_notifications_router)
         app.include_router(admin_extra_services.router)
-        app.include_router(admin_chat.router)
+        app.include_router(admin_chat.manager_chat_router)
         app.include_router(admin_shift_monitoring.shift_monitoring_router)
         app.include_router(admin_dashboard.admin_dashboard_router)
 
@@ -82,10 +89,11 @@ def create_app(service_name: str = "all") -> FastAPI:
         from app.api import admin_users, admin_client_approvals
         app.include_router(admin_users.router)
         app.include_router(admin_client_approvals.router)
+        app.include_router(admin_chat.admin_chat_router)
 
     if service_name in ("client", "all"):
-        app.include_router(client.router)
         app.include_router(client_live_status.router)
+        app.include_router(client.router)
         app.include_router(client_schedule.router)
         app.include_router(client_extra_services.router)
         app.include_router(client_chat.router)

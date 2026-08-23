@@ -185,53 +185,51 @@ async def get_client_visit_details(
     Returns single visit item information including date badge, time interval, assigned team, service type, and status.
     """
     db = get_database()
-    s = await db["shifts"].find_one({"$or": [{"_id": visit_id}, {"id": visit_id}]})
     now = datetime.now(timezone.utc)
 
+    # 1. Search shifts collection
+    s = await db["shifts"].find_one({"$or": [{"_id": visit_id}, {"id": visit_id}]})
+
+    # 2. Fallback to shift_executions or cleaning_plans
     if not s:
-        return ClientCleaningVisitItem(
-            id=visit_id,
-            date_badge_month="JULY",
-            date_badge_day="1",
-            formatted_date="Tuesday, July 1, 2026",
-            time_interval="08:55 AM - 12:00 PM",
-            assigned_team="Team Alpha",
-            service_type="Regular Cleaning",
-            status="In Progress",
-            location_name="Floor 3 - Main Office",
-            location_id="loc_floor3",
-            date_raw="2026-07-01"
-        )
+        s = await db["shift_executions"].find_one({"$or": [{"_id": visit_id}, {"id": visit_id}, {"cleaning_plan_id": visit_id}]})
+
+    if not s:
+        s = await db["cleaning_plans"].find_one({"$or": [{"_id": visit_id}, {"id": visit_id}]})
+
+    if not s:
+        raise HTTPException(status_code=404, detail="Visit schedule not found")
 
     d_str = s.get("date", now.strftime("%Y-%m-%d"))
     try:
-        y, m, d = map(int, d_str.split("-"))
+        y, m, d = map(int, str(d_str).split("-"))
         dt_obj = datetime(y, m, d)
         badge_month = dt_obj.strftime("%B").upper()
         badge_day = str(dt_obj.day)
         formatted_date = dt_obj.strftime("%A, %B %d, %Y")
     except Exception:
-        badge_month = "JULY"
-        badge_day = "1"
-        formatted_date = d_str
+        badge_month = now.strftime("%B").upper()
+        badge_day = str(now.day)
+        formatted_date = str(d_str)
 
     s_time = s.get("start_time", "09:00 AM")
     e_time = s.get("end_time", "12:00 PM")
     time_interval = f"{s_time} - {e_time}"
 
-    team_name = "Team Alpha"
-    workers = s.get("workers", [])
-    if workers:
+    team_name = "Assigned Team"
+    workers = s.get("assigned_workers", []) or s.get("workers", [])
+    if workers and isinstance(workers, list):
         w0 = workers[0]
-        w_team = w0.get("team_name") or w0.get("worker_type") or w0.get("name")
-        if w_team:
-            team_name = str(w_team)
+        if isinstance(w0, dict):
+            w_team = w0.get("team_name") or w0.get("name") or w0.get("worker_type")
+            if w_team:
+                team_name = str(w_team)
 
-    service_type = s.get("clean_type") or s.get("service_name") or "Regular Cleaning"
+    service_type = s.get("clean_type") or s.get("service_name") or s.get("plan_name") or s.get("title") or "Regular Cleaning"
     if isinstance(service_type, str):
         service_type = service_type.replace("_", " ").title()
 
-    raw_st = s.get("status", "published")
+    raw_st = str(s.get("status", "published")).lower()
     if raw_st in ["running", "in_progress"]:
         status_display = "In Progress"
     elif raw_st == "completed":
@@ -248,8 +246,8 @@ async def get_client_visit_details(
         assigned_team=team_name,
         service_type=service_type,
         status=status_display,
-        location_name=s.get("location_name", "Main Location"),
+        location_name=s.get("location_name") or "Main Location",
         location_id=str(s.get("location_id", "")),
-        date_raw=d_str
+        date_raw=str(d_str)
     )
 

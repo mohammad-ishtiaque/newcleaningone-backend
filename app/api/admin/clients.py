@@ -15,6 +15,7 @@ from app.schemas.client_approvals import (
 from app.models.user import UserInDB, RoleEnum
 from app.schemas.user import UserResponse
 from app.api.admin.profile_company import require_manager
+from app.security.password import get_password_hash, generate_temporary_password
 
 client_mgmt_router = APIRouter(prefix="/manager", tags=["Manager Client Management"])
 
@@ -34,7 +35,7 @@ def _format_date_human(d_val) -> str:
     except Exception:
         return "31 Dec 2026"
 
-def _format_client_response(doc: dict) -> ClientListResponse:
+def _format_client_response(doc: dict, temporary_password: Optional[str] = None) -> ClientListResponse:
     c_id = str(doc.get("_id") or doc.get("id"))
     c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
     u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)
@@ -63,9 +64,11 @@ def _format_client_response(doc: dict) -> ClientListResponse:
         industry=doc.get("industry", "Corporate"),
         status=doc.get("status", "active"),
         primary_contact_name=doc.get("primary_contact_name", ""),
+        name=doc.get("primary_contact_name", ""),
         email=doc.get("email", ""),
         phone=doc.get("phone", ""),
         is_signup=doc.get("is_signup", False),
+        temporary_password=temporary_password,
         locations_count=doc.get("total_locations_count", 0),
         contract_status=contract_status,
         license_expiration_date=doc.get("license_expiration_date"),
@@ -138,14 +141,16 @@ async def create_client(
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    existing = await db["client_list"].find_one({"email": client_in.email})
+    email_clean = client_in.email.lower().strip()
+    existing = await db["client_list"].find_one({"email": email_clean})
     if existing:
         raise HTTPException(status_code=400, detail="Client with this email already exists")
 
-    user_existing = await db["users"].find_one({"email": client_in.email})
+    user_existing = await db["users"].find_one({"email": email_clean})
     is_signup = bool(user_existing)
     
     now = datetime.now(timezone.utc)
+    temp_pwd = None
     
     # Auto-approve existing user if they are pending to avoid identity split / lockout
     if user_existing and user_existing.get("role") == "client" and user_existing.get("approval_status") != "approved":
@@ -158,6 +163,28 @@ async def create_client(
                 "updated_at": now
             }}
         )
+    elif not user_existing:
+        # Create client user login credentials in users collection
+        temp_pwd = generate_temporary_password()
+        hashed_pwd = get_password_hash(temp_pwd)
+        client_user_doc = {
+            "full_name": client_in.primary_contact_name,
+            "email": email_clean,
+            "phone": client_in.phone,
+            "company_name": client_in.company_name,
+            "hashed_password": hashed_pwd,
+            "role": "client",
+            "is_active": True,
+            "is_verified": True,
+            "is_approved": True,
+            "approval_status": "approved",
+            "is_admin_created": True,
+            "is_temporary_password": True,
+            "temporary_password_created_at": now,
+            "created_at": now,
+            "updated_at": now
+        }
+        await db["users"].insert_one(client_user_doc)
 
     client_id = f"cli_{uuid.uuid4().hex[:10]}"
     doc = {
@@ -171,7 +198,7 @@ async def create_client(
         "company_name": client_in.company_name,
         "industry": client_in.industry or "Corporate",
         "primary_contact_name": client_in.primary_contact_name,
-        "email": client_in.email,
+        "email": email_clean,
         "phone": client_in.phone,
         "status": client_in.status if client_in.status else ("active" if is_signup else "pending"),
         "is_signup": is_signup,
@@ -184,7 +211,18 @@ async def create_client(
     }
 
     await db["client_list"].insert_one(doc)
-    return _format_client_response(doc)
+
+    # Send credentials email via SMTP if temporary password was generated
+    if temp_pwd:
+        from app.services.email_service import EmailService
+        await EmailService.send_credentials_email(
+            to_email=email_clean,
+            full_name=client_in.primary_contact_name,
+            role="Client",
+            password=temp_pwd
+        )
+
+    return _format_client_response(doc, temporary_password=temp_pwd)
 
 
 @client_mgmt_router.get("/clients", response_model=ClientOverviewListPaginatedResponse, summary="List All Clients Grid (Image 1)")
@@ -263,68 +301,6 @@ async def list_clients_grid(
         clients=items
     )
 
-@client_mgmt_router.get("/clients/{client_id}", response_model=ClientListResponse, summary="Get Client by ID")
-async def get_client_by_id(
-    client_id: str,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    query = {"$or": [{"_id": client_id}, {"id": client_id}], "status": {"$ne": "deleted"}}
-    doc = await db["client_list"].find_one(query)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Client not found")
-    return _format_client_response(doc)
-
-@client_mgmt_router.patch("/clients/{client_id}", response_model=ClientListResponse, summary="Update Client Details")
-async def update_client(
-    client_id: str,
-    client_in: ClientListUpdate,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    query = {"$or": [{"_id": client_id}, {"id": client_id}], "status": {"$ne": "deleted"}}
-    doc = await db["client_list"].find_one(query)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Client not found")
-
-    fields = client_in.model_dump(exclude_unset=True)
-    fields["updated_at"] = datetime.now(timezone.utc)
-
-    await db["client_list"].update_one(query, {"$set": fields})
-    updated = await db["client_list"].find_one(query)
-    return _format_client_response(updated)
-
-@client_mgmt_router.delete("/clients/{client_id}", status_code=status.HTTP_200_OK, summary="Delete Client")
-async def delete_client(
-    client_id: str,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    query = {"$or": [{"_id": client_id}, {"id": client_id}]}
-    
-    # 1. Find the client first to get email
-    client_doc = await db["client_list"].find_one(query)
-    if not client_doc:
-        raise HTTPException(status_code=404, detail="Client not found")
-        
-    now = datetime.now(timezone.utc)
-    
-    # 2. Soft delete the client_list profile
-    await db["client_list"].update_one(
-        query, 
-        {"$set": {"status": "deleted", "is_active": False, "updated_at": now}}
-    )
-    
-    # 3. Soft delete the user login profile (block signin)
-    email = client_doc.get("email")
-    if email:
-        await db["users"].update_one(
-            {"email": email, "role": "client"},
-            {"$set": {"is_active": False, "updated_at": now}}
-        )
-        
-    return {"message": "Client deleted successfully"}
-
 @client_mgmt_router.get("/clients/deleted-list", response_model=ClientOverviewListPaginatedResponse, summary="List Deleted Clients")
 async def list_deleted_clients(
     page: int = 1,
@@ -348,13 +324,13 @@ async def list_deleted_clients(
                 {"email": {"$regex": search, "$options": "i"}}
             ]
         })
-        
+
     query = {"$and": conditions} if len(conditions) > 1 else conditions[0]
     total_count = await db["client_list"].count_documents(query)
     skip = (page - 1) * limit
     cursor = db["client_list"].find(query).sort("updated_at", -1).skip(skip).limit(limit)
     raw_clients = await cursor.to_list(length=limit)
-    
+
     clients = []
     for c in raw_clients:
         deleted_is_signup = c.get("is_signup")
@@ -370,19 +346,84 @@ async def list_deleted_clients(
             primary_contact_name=c.get("primary_contact_name", ""),
             email=c.get("email", ""),
             phone=c.get("phone", ""),
-            is_signup=bool(is_signup),
+            is_signup=bool(deleted_is_signup),
             locations_count=c.get("total_locations_count", 0),
             contract_status=c.get("contract_status", "no_contract"),
             created_at=c.get("created_at"),
             updated_at=c.get("updated_at")
         ))
-        
+
     return ClientOverviewListPaginatedResponse(
         total_count=total_count,
         page=page,
         limit=limit,
         clients=clients
     )
+
+
+@client_mgmt_router.get("/clients/{client_id}", response_model=ClientListResponse, summary="Get Client by ID")
+async def get_client_by_id(
+    client_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"$or": [{"_id": client_id}, {"id": client_id}], "status": {"$ne": "deleted"}}
+    doc = await db["client_list"].find_one(query)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Client not found")
+    return _format_client_response(doc)
+
+
+@client_mgmt_router.patch("/clients/{client_id}", response_model=ClientListResponse, summary="Update Client Details")
+async def update_client(
+    client_id: str,
+    client_in: ClientListUpdate,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"$or": [{"_id": client_id}, {"id": client_id}], "status": {"$ne": "deleted"}}
+    doc = await db["client_list"].find_one(query)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    fields = client_in.model_dump(exclude_unset=True)
+    fields["updated_at"] = datetime.now(timezone.utc)
+
+    await db["client_list"].update_one(query, {"$set": fields})
+    updated = await db["client_list"].find_one(query)
+    return _format_client_response(updated)
+
+
+@client_mgmt_router.delete("/clients/{client_id}", status_code=status.HTTP_200_OK, summary="Delete Client")
+async def delete_client(
+    client_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"$or": [{"_id": client_id}, {"id": client_id}]}
+
+    # 1. Find the client first to get email
+    client_doc = await db["client_list"].find_one(query)
+    if not client_doc:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    now = datetime.now(timezone.utc)
+
+    # 2. Soft delete the client_list profile
+    await db["client_list"].update_one(
+        query,
+        {"$set": {"status": "deleted", "is_active": False, "updated_at": now}}
+    )
+
+    # 3. Soft delete the user login profile (block signin)
+    email = client_doc.get("email")
+    if email:
+        await db["users"].update_one(
+            {"email": email, "role": "client"},
+            {"$set": {"is_active": False, "updated_at": now}}
+        )
+
+    return {"message": "Client deleted successfully"}
 
 
 @client_mgmt_router.post("/clients/{client_id}/restore", status_code=status.HTTP_200_OK, summary="Restore Deleted Client")

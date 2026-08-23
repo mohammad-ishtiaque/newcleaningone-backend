@@ -41,7 +41,6 @@ class ActivityFeedItem(BaseModel):
     activity_type: str = Field(..., json_schema_extra={"example": "photo_upload"})
 
 class WorkerHomeScreenResponse(BaseModel):
-    greeting: str = "Good Morning"
     worker_name: str = "Kaz Putters"
     profile_photo: Optional[str] = None
     active_shift: Optional[WorkerActiveShiftCard] = None

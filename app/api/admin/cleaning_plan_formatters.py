@@ -1,4 +1,5 @@
 import uuid
+from bson import ObjectId
 from datetime import datetime, timezone
 from typing import List, Optional, Union
 from app.schemas.client_list import (
@@ -137,9 +138,24 @@ async def _resolve_clients_data(rooms_data: List[CleaningPlanRoomDetail], db) ->
     cursor = db["rooms"].find({"$or": [{"_id": {"$in": room_ids}}, {"id": {"$in": room_ids}}, {"room_id": {"$in": room_ids}}]})
     raw_rooms = await cursor.to_list(length=len(room_ids) * 2 + 10)
 
+    # Collect location IDs for rooms without direct client_id
+    missing_loc_ids = [r.get("location_id") for r in raw_rooms if not r.get("client_id") and r.get("location_id")]
+    loc_client_map = {}
+    if missing_loc_ids:
+        cursor_loc = db["locations"].find({"$or": [{"_id": {"$in": missing_loc_ids}}, {"id": {"$in": missing_loc_ids}}]})
+        raw_locs = await cursor_loc.to_list(length=len(missing_loc_ids) * 2 + 10)
+        for loc in raw_locs:
+            c_val = str(loc.get("client_id") or "")
+            for lk in (loc.get("_id"), loc.get("id")):
+                if lk:
+                    loc_client_map[str(lk)] = c_val
+
     room_client_map = {}
     for r in raw_rooms:
         cid = str(r.get("client_id") or "")
+        if not cid:
+            loc_id = str(r.get("location_id") or "")
+            cid = loc_client_map.get(loc_id, "")
         for k in (r.get("_id"), r.get("id"), r.get("room_id")):
             if k:
                 room_client_map[str(k)] = cid
@@ -161,11 +177,30 @@ async def _resolve_clients_data(rooms_data: List[CleaningPlanRoomDetail], db) ->
     cursor_c = db["client_list"].find({"$or": [{"_id": {"$in": client_ids_order}}, {"id": {"$in": client_ids_order}}]})
     raw_clients = await cursor_c.to_list(length=len(client_ids_order) * 2 + 10)
 
+    found_cids = set()
     client_map = {}
     for c in raw_clients:
         for k in (c.get("_id"), c.get("id")):
             if k:
                 client_map[str(k)] = c
+                found_cids.add(str(k))
+
+    # Fallback to users collection for client details
+    missing_cids = [cid for cid in client_ids_order if cid not in found_cids]
+    if missing_cids:
+        cursor_u = db["users"].find({"$or": [{"_id": {"$in": missing_cids}}, {"id": {"$in": missing_cids}}]})
+        raw_users = await cursor_u.to_list(length=len(missing_cids) * 2 + 10)
+        for u in raw_users:
+            u_dict = {
+                "_id": str(u.get("_id") or u.get("id")),
+                "company_name": u.get("company_name") or u.get("full_name") or "Client Company",
+                "primary_contact_name": u.get("full_name") or "",
+                "email": u.get("email") or "",
+                "phone": u.get("phone") or ""
+            }
+            for k in (u.get("_id"), u.get("id")):
+                if k:
+                    client_map[str(k)] = u_dict
 
     clients_list = []
     for cid in client_ids_order:
@@ -218,8 +253,15 @@ async def _resolve_manager_data(manager_id: Optional[str], db, fallback_user: Op
 async def _resolve_workers_data(worker_ids: List[str], db, assigned_workers_meta: Optional[List[dict]] = None) -> List[CleaningPlanWorkerDetail]:
     if not worker_ids:
         return []
-    cursor = db["users"].find({"$or": [{"_id": {"$in": worker_ids}}, {"id": {"$in": worker_ids}}]})
-    raw_workers = await cursor.to_list(length=len(worker_ids) * 2)
+    clean_wids = [str(w).strip() for w in worker_ids if str(w).strip()]
+    obj_ids = [ObjectId(w) for w in clean_wids if ObjectId.is_valid(w)]
+    or_clauses = [{"id": {"$in": clean_wids}}]
+    if obj_ids:
+        or_clauses.append({"_id": {"$in": obj_ids}})
+    or_clauses.append({"_id": {"$in": clean_wids}})
+
+    cursor = db["users"].find({"$or": or_clauses})
+    raw_workers = await cursor.to_list(length=len(clean_wids) * 2)
 
     meta_positions = {}
     if assigned_workers_meta:
@@ -323,10 +365,15 @@ async def _format_manager_cleaning_plan_detail(doc: dict, db, current_user: Opti
     c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
     u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)
 
+    primary_cid = clients_data[0].client_id if clients_data else str(doc.get("client_id") or "")
+    primary_cname = clients_data[0].company_name if clients_data else str(doc.get("company_name") or "")
+
     return ManagerCleaningPlanDetailResponse(
         id=pid,
         title=title,
         shift_notes=shift_notes_val,
+        client_id=primary_cid,
+        company_name=primary_cname,
         clients_count=len(clients_data),
         clients=clients_data,
         manager=manager_data,
@@ -347,6 +394,7 @@ async def _format_manager_cleaning_plan_detail(doc: dict, db, current_user: Opti
         repeat_shift=repeat_shift_val,
         repeat_until=repeat_until_val,
         working_days=working_days_val,
+        timezone=doc.get("timezone", "Europe/Amsterdam"),
         status=doc.get("status", "draft"),
         is_active=doc.get("is_active", True),
         created_at=c_at,
@@ -372,8 +420,15 @@ async def _format_manager_cleaning_plan_list_item(doc: dict, db) -> ManagerClean
     # Fetch worker names
     worker_names = []
     if worker_ids:
-        cursor_w = db["users"].find({"$or": [{"_id": {"$in": worker_ids}}, {"id": {"$in": worker_ids}}]})
-        workers_found = await cursor_w.to_list(length=len(worker_ids) * 2)
+        clean_wids = [str(w).strip() for w in worker_ids if str(w).strip()]
+        obj_ids = [ObjectId(w) for w in clean_wids if ObjectId.is_valid(w)]
+        or_clauses = [{"id": {"$in": clean_wids}}]
+        if obj_ids:
+            or_clauses.append({"_id": {"$in": obj_ids}})
+        or_clauses.append({"_id": {"$in": clean_wids}})
+
+        cursor_w = db["users"].find({"$or": or_clauses})
+        workers_found = await cursor_w.to_list(length=len(clean_wids) * 2)
         worker_names = [w.get("full_name") or w.get("name", "Worker") for w in workers_found]
 
     t_cnt = doc.get("total_tasks_count", 0)
@@ -417,6 +472,7 @@ async def _format_manager_cleaning_plan_list_item(doc: dict, db) -> ManagerClean
         repeat_shift=repeat_shift_val,
         repeat_until=repeat_until_val,
         working_days=working_days_val,
+        timezone=doc.get("timezone", "Europe/Amsterdam"),
         status=doc.get("status", "draft"),
         is_active=doc.get("is_active", True),
         created_at=c_at,

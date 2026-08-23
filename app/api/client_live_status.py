@@ -1,14 +1,17 @@
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException
 from typing import Optional, List
+from zoneinfo import ZoneInfo
 from bson import ObjectId
 from app.core.database import get_database
 from app.dependencies.auth import get_current_user
+from app.dependencies.timezone import get_request_timezone
+from app.core.timezone_utils import now_in_tz, get_today_str, get_timezone
 from app.models.user import UserInDB, RoleEnum
 from app.schemas.shift import (
     ClientLiveStatusResponse, ClientLiveRoomProgress, ClientLiveTaskItem,
     AssignedCleanerCard, CurrentLocationCard, ArrivalTimeCard, ShiftResponse,
-    ClientLiveShiftPaginatedResponse
+    ClientLiveShiftPaginatedResponse, ClientLiveStatusSessionSummary
 )
 
 router = APIRouter(prefix="/client/live-status", tags=["Client Live Status Management"])
@@ -20,29 +23,37 @@ def require_client(current_user: UserInDB = Depends(get_current_user)) -> UserIn
     return current_user
 
 
-def _build_client_live_status(shift_doc: dict, loc_address: Optional[str] = None, cleaner_doc: Optional[dict] = None) -> ClientLiveStatusResponse:
+def _build_client_live_status(
+    shift_doc: dict,
+    loc_address: Optional[str] = None,
+    cleaner_doc: Optional[dict] = None,
+    active_sessions: Optional[List[ClientLiveStatusSessionSummary]] = None
+) -> ClientLiveStatusResponse:
     shift_id = str(shift_doc.get("_id") or shift_doc.get("id"))
     client_name = shift_doc.get("client_name") or shift_doc.get("client_company_name") or "Client"
     location_name = shift_doc.get("location_name") or "Location"
 
     # 1. Dynamic Assigned Cleaner Information
-    cleaner_name = "Sarah Mitchell"
+    cleaner_name = "Assigned Cleaner"
     cleaner_id = "cleaner_1"
-    cleaner_type = "Team Lead - Alpha"
+    cleaner_type = "Cleaning Specialist"
     cleaner_pic = None
+    worker_checkin_time = None
 
-    workers = shift_doc.get("workers", [])
-    if workers:
+    workers = shift_doc.get("assigned_workers", []) or shift_doc.get("workers", [])
+    if workers and isinstance(workers, list):
         w0 = workers[0]
-        cleaner_id = str(w0.get("worker_id") or w0.get("id") or "cleaner_1")
-        cleaner_name = w0.get("name") or w0.get("full_name") or cleaner_name
-        cleaner_pic = w0.get("profile_picture")
-        cleaner_type = w0.get("worker_type") or cleaner_type
+        if isinstance(w0, dict):
+            cleaner_id = str(w0.get("worker_id") or w0.get("id") or "cleaner_1")
+            cleaner_name = w0.get("name") or w0.get("full_name") or cleaner_name
+            cleaner_pic = w0.get("profile_picture") or w0.get("profile_photo")
+            cleaner_type = w0.get("position") or w0.get("worker_type") or cleaner_type
+            worker_checkin_time = w0.get("checkin_time")
 
     if cleaner_doc:
         cleaner_name = cleaner_doc.get("full_name") or cleaner_doc.get("name") or cleaner_name
         cleaner_pic = cleaner_doc.get("profile_photo") or cleaner_doc.get("profile_picture") or cleaner_pic
-        w_t = cleaner_doc.get("worker_type") or cleaner_doc.get("onboarding_draft", {}).get("worker_type") or cleaner_type
+        w_t = cleaner_doc.get("position") or cleaner_doc.get("worker_type") or cleaner_doc.get("onboarding_draft", {}).get("worker_type") or cleaner_type
         cleaner_type = str(w_t)
 
     assigned_cleaner = AssignedCleanerCard(
@@ -56,23 +67,38 @@ def _build_client_live_status(shift_doc: dict, loc_address: Optional[str] = None
     current_location = CurrentLocationCard(
         location_id=str(shift_doc.get("location_id", "")),
         location_name=location_name,
-        address_subtitle=loc_address or "Floor 3 - Main Office"
+        address_subtitle=loc_address or location_name
     )
 
-    # 3. Dynamic Arrival Time Information
-    start_time_str = shift_doc.get("start_time", "08:55 AM")
-    arrival_status = "On time"
+    # 3. Dynamic Arrival Time Information from Check-in
+    start_time_str = shift_doc.get("start_time", "08:00 AM")
     date_val = shift_doc.get("date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
     try:
-        y, m, d = map(int, date_val.split("-"))
+        y, m, d = map(int, str(date_val).split("-"))
         dt_obj = datetime(y, m, d)
         date_formatted = dt_obj.strftime("%b %d, %Y")
     except Exception:
-        date_formatted = date_val
+        date_formatted = str(date_val)
+
+    checkin_dt = shift_doc.get("checkin_time") or worker_checkin_time
+    if checkin_dt:
+        if isinstance(checkin_dt, str):
+            try:
+                checkin_dt = datetime.fromisoformat(checkin_dt)
+            except Exception:
+                pass
+        if isinstance(checkin_dt, datetime):
+            arrival_time_str = checkin_dt.strftime("%I:%M %p").lstrip("0")
+        else:
+            arrival_time_str = str(checkin_dt)
+        arrival_status = f"On time • {date_formatted}"
+    else:
+        arrival_time_str = start_time_str
+        arrival_status = f"Scheduled • {date_formatted}"
 
     arrival_time_info = ArrivalTimeCard(
-        arrival_time=start_time_str,
+        arrival_time=arrival_time_str,
         arrival_status=arrival_status,
         date_str=date_formatted
     )
@@ -81,28 +107,13 @@ def _build_client_live_status(shift_doc: dict, loc_address: Optional[str] = None
     rooms = shift_doc.get("rooms", [])
     all_rooms_progress = []
     active_room_progress = None
-    active_room_name = "Room 204"
+    active_room_name = location_name
 
     total_all_tasks = 0
     completed_all_tasks = 0
 
-    if not rooms:
-        # Default real room structure if rooms array in shift doc is empty
-        rooms = [{
-            "room_id": "r_204",
-            "room_name": "Room 204",
-            "status": "in_progress",
-            "tasks": [
-                {"id": "t1", "name": "Vacuum Floor", "is_completed": True, "completed_at": "09:48 AM"},
-                {"id": "t2", "name": "Clean Mirrors", "is_completed": True, "completed_at": "09:52 AM"},
-                {"id": "t3", "name": "Empty Trash", "is_completed": True, "completed_at": "10:01 AM"},
-                {"id": "t4", "name": "Mop Floor", "is_completed": False},
-                {"id": "t5", "name": "Replace Amenities", "is_completed": False}
-            ]
-        }]
-
     for r_idx, r in enumerate(rooms):
-        r_name = r.get("room_name") or r.get("custom_room_name") or f"Room {r_idx+1}"
+        r_name = r.get("room_name") or r.get("name") or r.get("custom_room_name") or f"Room {r_idx+1}"
         r_tasks = r.get("tasks", [])
         total_all_tasks += len(r_tasks)
 
@@ -116,14 +127,14 @@ def _build_client_live_status(shift_doc: dict, loc_address: Optional[str] = None
                 t_status = "DONE"
                 c_at = t.get("completed_at")
                 if c_at and isinstance(c_at, datetime):
-                    t_time_str = c_at.strftime("%I:%M %p")
+                    t_time_str = c_at.strftime("%I:%M %p").lstrip("0")
                 elif c_at:
                     t_time_str = str(c_at)
                 else:
-                    t_time_str = "09:48 AM"
+                    t_time_str = "Completed"
             elif not found_active_for_room and (idx == 0 or (idx > 0 and r_tasks[idx-1].get("is_completed"))):
                 t_status = "ACTIVE"
-                t_time_str = "10:09 AM (Est.)"
+                t_time_str = "In Progress"
                 found_active_for_room = True
             else:
                 t_status = "PENDING"
@@ -139,7 +150,7 @@ def _build_client_live_status(shift_doc: dict, loc_address: Optional[str] = None
 
         completed_count = sum(1 for t in r_tasks if t.get("is_completed"))
         room_prog = ClientLiveRoomProgress(
-            room_id=str(r.get("room_id", f"r_{r_idx}")),
+            room_id=str(r.get("room_id", r.get("id", f"r_{r_idx}"))),
             room_name=r_name,
             location_name=location_name,
             completed_tasks_count=completed_count,
@@ -159,14 +170,24 @@ def _build_client_live_status(shift_doc: dict, loc_address: Optional[str] = None
     if total_all_tasks > 0:
         overall_pct = round((completed_all_tasks / total_all_tasks) * 100.0, 1)
     else:
-        overall_pct = 60.0
+        overall_pct = float(shift_doc.get("overall_progress_percentage", 0.0))
 
-    active_location_text = f"Active on Floor 3 - Main Office • {active_room_name}"
+    active_location_text = f"Active at {location_name} • {active_room_name}"
     end_time_str = shift_doc.get("end_time", "12:00 PM")
+
+    status_raw = str(shift_doc.get("status", "scheduled")).lower()
+    if status_raw in ["in_progress", "running"]:
+        status_lbl = "CLEANING IN PROGRESS"
+    elif status_raw in ["completed"]:
+        status_lbl = "COMPLETED"
+    elif status_raw in ["photo_submitted"]:
+        status_lbl = "PENDING REVIEW"
+    else:
+        status_lbl = "SCHEDULED"
 
     return ClientLiveStatusResponse(
         shift_id=shift_id,
-        status_label="CLEANING IN PROGRESS" if shift_doc.get("status") in ["running", "published", "in_progress"] else str(shift_doc.get("status", "CLEANING IN PROGRESS")).upper(),
+        status_label=status_lbl,
         active_room_location_text=active_location_text,
         overall_progress_percentage=overall_pct,
         est_completion_time=f"Est. completion: {end_time_str}",
@@ -174,8 +195,27 @@ def _build_client_live_status(shift_doc: dict, loc_address: Optional[str] = None
         current_location=current_location,
         arrival_time_info=arrival_time_info,
         current_active_room=active_room_progress,
-        all_rooms_progress=all_rooms_progress
+        all_rooms_progress=all_rooms_progress,
+        active_sessions=active_sessions or []
     )
+
+
+async def _resolve_client_id_aliases(current_user: UserInDB, db) -> List[str]:
+    """Collects all possible identifiers for the logged-in client."""
+    client_ids = set()
+    uid = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "")
+    if uid:
+        client_ids.add(uid)
+
+    if getattr(current_user, "email", None):
+        c_doc = await db["client_list"].find_one({"email": current_user.email})
+        if c_doc:
+            if "_id" in c_doc:
+                client_ids.add(str(c_doc["_id"]))
+            if "id" in c_doc and c_doc["id"]:
+                client_ids.add(str(c_doc["id"]))
+
+    return list(client_ids)
 
 
 @router.get(
@@ -186,46 +226,113 @@ def _build_client_live_status(shift_doc: dict, loc_address: Optional[str] = None
 )
 async def get_client_live_status_dashboard(
     shift_id: Optional[str] = None,
+    client_tz: ZoneInfo = Depends(get_request_timezone),
     current_user: UserInDB = Depends(require_client)
 ):
     """
     Client Live Status Management Endpoint.
     Polls active cleaning shift progress, assigned cleaner info, arrival timestamp, and task checklist completion.
     """
+    from app.api.worker_shift_utils import resolve_shift_execution, is_plan_active_on_date, get_or_create_shift_execution
     db = get_database()
-    client_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "client_1")
+    client_aliases = await _resolve_client_id_aliases(current_user, db)
+    today_str = get_today_str(client_tz)
 
+    shift_doc = None
     if shift_id:
-        shift_doc = await db["shifts"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+        shift_doc, _ = await resolve_shift_execution(shift_id, db)
     else:
-        shift_doc = await db["shifts"].find_one({
-            "client_id": client_id,
-            "status": {"$in": ["running", "in_progress", "published"]}
-        }, sort=[("created_at", -1)])
+        # 1. Search shift_executions for active sessions for this client
+        shift_doc = await db["shift_executions"].find_one({
+            "client_id": {"$in": client_aliases},
+            "status": {"$in": ["in_progress", "running", "photo_submitted", "scheduled"]}
+        }, sort=[("updated_at", -1)])
 
-    if not shift_doc:
-        shift_doc = await db["shifts"].find_one({"client_id": client_id}, sort=[("created_at", -1)])
+        # 2. Check active cleaning plans for today
+        if not shift_doc:
+            cursor_p = db["cleaning_plans"].find({
+                "client_id": {"$in": client_aliases},
+                "status": {"$ne": "cancelled"}
+            })
+            plans = await cursor_p.to_list(length=50)
+            for p in plans:
+                if is_plan_active_on_date(p, today_str):
+                    shift_doc = await get_or_create_shift_execution(p, today_str, db)
+                    break
+
+        # 3. Fallback to shifts collection
+        if not shift_doc:
+            shift_doc = await db["shifts"].find_one({
+                "client_id": {"$in": client_aliases},
+                "status": {"$in": ["running", "in_progress", "published", "scheduled"]}
+            }, sort=[("created_at", -1)])
+
+        # 4. Fallback to any recent execution or shift
+        if not shift_doc:
+            shift_doc = await db["shift_executions"].find_one(
+                {"client_id": {"$in": client_aliases}},
+                sort=[("created_at", -1)]
+            )
+        if not shift_doc:
+            shift_doc = await db["shifts"].find_one(
+                {"client_id": {"$in": client_aliases}},
+                sort=[("created_at", -1)]
+            )
 
     if not shift_doc:
         raise HTTPException(status_code=404, detail="No active or recent cleaning session found for client")
 
     loc_address = None
-    c_query = {"_id": ObjectId(client_id)} if ObjectId.is_valid(client_id) else {"_id": client_id}
-    c_doc = await db["client_list"].find_one(c_query)
-    if c_doc and "locations" in c_doc:
-        target_loc_id = shift_doc.get("location_id")
-        target_loc = next((l for l in c_doc["locations"] if str(l.get("id") or l.get("_id")) == str(target_loc_id)), None)
-        if target_loc:
-            loc_address = target_loc.get("address")
+    loc_id = shift_doc.get("location_id")
+    if loc_id:
+        l_query = {"$or": [{"_id": ObjectId(loc_id)}, {"id": loc_id}]} if ObjectId.is_valid(loc_id) else {"$or": [{"_id": loc_id}, {"id": loc_id}]}
+        loc_doc = await db["locations"].find_one(l_query)
+        if loc_doc:
+            loc_address = loc_doc.get("address")
 
     cleaner_doc = None
-    workers = shift_doc.get("workers", [])
-    if workers:
-        w_id = workers[0].get("worker_id")
-        w_query = {"_id": ObjectId(w_id)} if ObjectId.is_valid(w_id) else {"_id": w_id}
-        cleaner_doc = await db["users"].find_one(w_query)
+    workers = shift_doc.get("assigned_workers", []) or shift_doc.get("workers", [])
+    if workers and isinstance(workers, list):
+        w0 = workers[0]
+        if isinstance(w0, dict):
+            w_id = str(w0.get("worker_id") or w0.get("id") or "")
+            if w_id:
+                w_query = {"_id": ObjectId(w_id)} if ObjectId.is_valid(w_id) else {"_id": w_id}
+                cleaner_doc = await db["users"].find_one(w_query)
 
-    return _build_client_live_status(shift_doc, loc_address=loc_address, cleaner_doc=cleaner_doc)
+    # 5. Build active_sessions for all today's sessions for this client
+    from app.api.worker_shift_utils import calculate_cleaning_plan_progress
+    active_sessions = []
+    seen_session_ids = set()
+
+    active_cursor = db["shift_executions"].find({
+        "client_id": {"$in": client_aliases},
+        "date": today_str,
+        "status": {"$ne": "cancelled"}
+    }).sort("start_time", 1)
+    todays_execs = await active_cursor.to_list(length=20)
+    for ex in todays_execs:
+        ex_id = str(ex.get("id") or ex.get("_id"))
+        if ex_id not in seen_session_ids:
+            seen_session_ids.add(ex_id)
+            ex_prog = calculate_cleaning_plan_progress(ex)
+            r_name = ex.get("rooms", [{}])[0].get("room_name") if ex.get("rooms") else None
+            active_sessions.append(ClientLiveStatusSessionSummary(
+                shift_id=ex_id,
+                location_name=ex.get("location_name") or "Location",
+                room_name=r_name,
+                status=str(ex.get("status", "scheduled")),
+                overall_progress_percentage=ex_prog["overall_progress_percentage"],
+                start_time=str(ex.get("start_time", "08:00 AM")),
+                end_time=str(ex.get("end_time", "12:00 PM"))
+            ))
+
+    return _build_client_live_status(
+        shift_doc,
+        loc_address=loc_address,
+        cleaner_doc=cleaner_doc,
+        active_sessions=active_sessions
+    )
 
 
 @router.get(
@@ -243,20 +350,41 @@ async def list_client_live_shifts(
     List Client Cleaning Sessions Endpoint (Paginated).
     Returns paginated cleaning shifts assigned to the current client.
     """
+    from app.api.worker_shift_utils import calculate_cleaning_plan_progress
     db = get_database()
-    client_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "client_1")
+    client_aliases = await _resolve_client_id_aliases(current_user, db)
 
-    query = {"client_id": client_id}
-    total_count = await db["shifts"].count_documents(query)
+    # 1. Fetch from shift_executions
+    exec_cursor = db["shift_executions"].find({"client_id": {"$in": client_aliases}}).sort("created_at", -1)
+    exec_shifts = await exec_cursor.to_list(length=100)
+
+    # 2. Fetch from shifts
+    shift_cursor = db["shifts"].find({"client_id": {"$in": client_aliases}}).sort("created_at", -1)
+    direct_shifts = await shift_cursor.to_list(length=100)
+
+    combined_map = {}
+    for s in exec_shifts + direct_shifts:
+        sid = str(s.get("id") or s.get("_id"))
+        if sid not in combined_map:
+            s["id"] = sid
+            prog = calculate_cleaning_plan_progress(s)
+            s["overall_progress_percentage"] = prog["overall_progress_percentage"]
+            s["completed_rooms_count"] = prog["completed_rooms_count"]
+            s["in_progress_rooms_count"] = prog["in_progress_rooms_count"]
+            s["pending_rooms_count"] = prog["pending_rooms_count"]
+            combined_map[sid] = s
+
+    all_items = list(combined_map.values())
+    total_count = len(all_items)
     skip = (page - 1) * limit
-
-    cursor = db["shifts"].find(query).sort("created_at", -1).skip(skip).limit(limit)
-    raw_shifts = await cursor.to_list(length=limit)
+    paged_items = all_items[skip:skip + limit]
 
     res = []
-    for s in raw_shifts:
-        s["id"] = str(s.get("_id") or s.get("id"))
-        res.append(ShiftResponse(**s))
+    for item in paged_items:
+        try:
+            res.append(ShiftResponse(**item))
+        except Exception:
+            pass
 
     return ClientLiveShiftPaginatedResponse(
         total_count=total_count,
@@ -281,4 +409,5 @@ async def get_client_live_status_by_shift(
     Returns real-time room task completion and status for the given shift ID.
     """
     return await get_client_live_status_dashboard(shift_id=shift_id, current_user=current_user)
+
 

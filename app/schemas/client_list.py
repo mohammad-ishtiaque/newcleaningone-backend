@@ -222,9 +222,11 @@ class ClientListResponse(BaseModel):
     industry: str
     status: str
     primary_contact_name: str
+    name: Optional[str] = None
     email: EmailStr
     phone: str
     is_signup: bool
+    temporary_password: Optional[str] = None
     locations_count: int = 0
     contract_status: str = "no_contract"
     license_expiration_date: Optional[str] = None
@@ -235,6 +237,13 @@ class ClientListResponse(BaseModel):
     reports: List[ReportResponse] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+
+    def __init__(self, **data):
+        if "name" not in data and "primary_contact_name" in data:
+            data["name"] = data["primary_contact_name"]
+        elif "primary_contact_name" not in data and "name" in data:
+            data["primary_contact_name"] = data["name"]
+        super().__init__(**data)
 
     class Config:
         populate_by_name = True
@@ -1061,6 +1070,7 @@ class ManagerCleaningPlanCreate(BaseModel):
     duration_minutes: Optional[int] = Field(default=None, json_schema_extra={"example": 330})
     location_id: Optional[str] = Field(default=None, json_schema_extra={"example": "loc_db28f5a3f6"})
     frequency_type: Optional[str] = Field(default=None, json_schema_extra={"example": "monthly"})
+    timezone: Optional[str] = Field(default="Europe/Amsterdam", json_schema_extra={"example": "Europe/Amsterdam"})
 
     model_config = {
         "json_schema_extra": {
@@ -1079,6 +1089,7 @@ class ManagerCleaningPlanCreate(BaseModel):
                     "sun"
                 ],
                 "shift_notes": "Monthly Sunday deep cleaning",
+                "timezone": "Europe/Amsterdam",
                 "additional_tasks": [
                     {
                         "name": "Deep Floor Scrubbing",
@@ -1115,6 +1126,7 @@ class ManagerCleaningPlanUpdate(BaseModel):
     additional_required_photos: Optional[List[RequiredPhotoCreate]] = None
     location_id: Optional[str] = None
     frequency_type: Optional[str] = None
+    timezone: Optional[str] = None
     status: Optional[str] = None
     is_active: Optional[bool] = None
 
@@ -1122,6 +1134,8 @@ class ManagerCleaningPlanDetailResponse(BaseModel):
     id: str
     title: str
     shift_notes: Optional[str] = ""
+    client_id: Optional[str] = None
+    company_name: Optional[str] = None
     clients_count: int = 0
     clients: List[CleaningPlanClientDetail] = Field(default_factory=list)
     manager: Optional[CleaningPlanManagerDetail] = None
@@ -1142,6 +1156,7 @@ class ManagerCleaningPlanDetailResponse(BaseModel):
     repeat_shift: str = "Does not repeat"
     repeat_until: Optional[str] = None
     working_days: List[str] = Field(default_factory=list)
+    timezone: Optional[str] = "Europe/Amsterdam"
     status: Optional[str] = "draft"
     is_active: bool = True
     created_at: Union[str, datetime]
@@ -1165,6 +1180,7 @@ class ManagerCleaningPlanListItemResponse(BaseModel):
     repeat_shift: str = "Does not repeat"
     repeat_until: Optional[str] = None
     working_days: List[str] = Field(default_factory=list)
+    timezone: Optional[str] = "Europe/Amsterdam"
     status: Optional[str] = "draft"
     is_active: bool = True
     created_at: Union[str, datetime]

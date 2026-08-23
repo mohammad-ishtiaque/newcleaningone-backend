@@ -376,20 +376,93 @@ async def mark_messages_read(
 async def websocket_chat_endpoint(websocket: WebSocket, user_id: str):
     """
     WebSocket Chat Endpoint for Real-time Messaging.
+    Supports send_message, typing, read receipts, and keep-alive pings.
     """
     await ws_manager.connect(user_id, websocket)
+    db = get_database()
     try:
         while True:
             data = await websocket.receive_json()
             event_type = data.get("type")
-            if event_type == "read":
+
+            if event_type == "send_message":
+                c_id = data.get("conversation_id")
+                content = data.get("content")
+                att_url = data.get("attachment_url")
+                att_type = data.get("attachment_type")
+                if c_id and (content or att_url):
+                    u_query = {"$or": [{"_id": ObjectId(user_id)}, {"id": user_id}]} if ObjectId.is_valid(user_id) else {"_id": user_id}
+                    u_doc = await db["users"].find_one(u_query)
+                    sender_name = u_doc.get("full_name", "User") if u_doc else "User"
+                    raw_role = u_doc.get("role", "client") if u_doc else "client"
+                    sender_role = getattr(raw_role, "value", str(raw_role)).lower()
+                    sender_avatar = u_doc.get("profile_photo") if u_doc else None
+
+                    now = datetime.now(timezone.utc)
+                    msg_id = f"msg_{uuid.uuid4().hex[:10]}"
+                    msg_doc = {
+                        "_id": msg_id,
+                        "id": msg_id,
+                        "conversation_id": c_id,
+                        "sender_id": str(user_id),
+                        "sender_name": sender_name,
+                        "sender_role": sender_role,
+                        "sender_avatar": sender_avatar,
+                        "content": content,
+                        "attachment_url": att_url,
+                        "attachment_type": att_type,
+                        "status": "sent",
+                        "read_by": [{"user_id": str(user_id), "read_at": now}],
+                        "created_at": now,
+                        "updated_at": now
+                    }
+                    await db["chat_messages"].insert_one(msg_doc)
+
+                    last_text = content if content else "[Attachment]"
+                    await db["conversations"].update_one(
+                        {"$or": [{"_id": c_id}, {"id": c_id}]},
+                        {"$set": {
+                            "last_message": {
+                                "text": last_text,
+                                "sender_id": str(user_id),
+                                "sender_name": sender_name,
+                                "timestamp": now.strftime("%I:%M %p")
+                            },
+                            "updated_at": now
+                        }}
+                    )
+                    from app.services.chat_ws_service import broadcast_new_message
+                    await broadcast_new_message(db, c_id, msg_doc)
+
+            elif event_type == "read":
                 c_id = data.get("conversation_id")
                 if c_id:
-                    db = get_database()
                     now = datetime.now(timezone.utc)
                     await db["chat_messages"].update_many(
                         {"conversation_id": c_id, "read_by.user_id": {"$ne": user_id}},
                         {"$push": {"read_by": {"user_id": user_id, "read_at": now}}}
                     )
+                    await db["conversations"].update_one(
+                        {"$or": [{"_id": c_id}, {"id": c_id}]},
+                        {"$set": {f"unread_counts.{user_id}": 0}}
+                    )
+                    from app.services.chat_ws_service import broadcast_messages_read
+                    await broadcast_messages_read(db, c_id, user_id, now.isoformat())
+
+            elif event_type == "typing":
+                c_id = data.get("conversation_id")
+                is_typing = bool(data.get("is_typing", True))
+                if c_id:
+                    u_query = {"$or": [{"_id": ObjectId(user_id)}, {"id": user_id}]} if ObjectId.is_valid(user_id) else {"_id": user_id}
+                    u_doc = await db["users"].find_one(u_query)
+                    sender_name = u_doc.get("full_name", "User") if u_doc else "User"
+                    from app.services.chat_ws_service import broadcast_typing_status
+                    await broadcast_typing_status(db, c_id, user_id, sender_name, is_typing)
+
+            elif event_type == "ping":
+                await websocket.send_json({"type": "pong", "timestamp": datetime.now(timezone.utc).isoformat()})
+
     except WebSocketDisconnect:
+        ws_manager.disconnect(user_id, websocket)
+    except Exception:
         ws_manager.disconnect(user_id, websocket)

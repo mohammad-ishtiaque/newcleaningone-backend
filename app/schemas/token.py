@@ -10,6 +10,7 @@ class Token(BaseModel):
     role: Optional[str] = None
     is_approved: Optional[bool] = None
     approval_status: Optional[str] = None
+    is_temporary_password: Optional[bool] = False
 
 class TokenData(BaseModel):
     user_id: str

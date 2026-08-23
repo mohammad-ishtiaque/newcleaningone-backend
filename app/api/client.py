@@ -192,27 +192,6 @@ async def get_client_shift_live_status(
     )
 
 
-@router.get("/live-status", response_model=Optional[LiveStatusResponse], summary="Get Latest Active Live Status for Client Portal")
-async def get_latest_client_live_status(
-    current_user: UserInDB = Depends(require_client)
-):
-    db = get_database()
-    client_id = str(current_user.id or current_user.mongo_id)
-
-    shift_doc = await db["shifts"].find_one({
-        "client_id": client_id,
-        "status": {"$in": ["running", "published"]}
-    }, sort=[("created_at", -1)])
-
-    if not shift_doc:
-        shift_doc = await db["shifts"].find_one({"client_id": client_id}, sort=[("created_at", -1)])
-
-    if not shift_doc:
-        return None
-
-    return await get_client_shift_live_status(shift_id=str(shift_doc.get("_id") or shift_doc.get("id")), current_user=current_user)
-
-
 @router.get("/overview", response_model=ClientOverviewResponse, summary="Get Client Dashboard Overview", description="Returns 100% dynamic Client Dashboard HomePage Overview data computed directly from MongoDB (Image Mockup).")
 async def get_client_overview(
     current_user: UserInDB = Depends(require_client)
@@ -227,7 +206,7 @@ async def get_client_overview(
     today_str = now.strftime("%Y-%m-%d")
 
     c_doc = await db["client_list"].find_one({"$or": [{"_id": client_id}, {"id": client_id}, {"email": current_user.email}]})
-    company_name = getattr(current_user, "company_name", None) or (c_doc.get("company_name") if c_doc else None) or getattr(current_user, "full_name", "Apex Technology Ltd.")
+    company_name = getattr(current_user, "company_name", None) or (c_doc.get("company_name") if c_doc else None) or getattr(current_user, "full_name", "Client")
 
     date_formatted = f"{now.strftime('%A, %d %B')} • Here's today's service at a glance."
 
@@ -278,14 +257,14 @@ async def get_client_overview(
             locs = c_doc.get("locations")
             if isinstance(locs, list) and len(locs) > 0 and isinstance(locs[0], dict):
                 loc_name = locs[0].get("name") or locs[0].get("location_name")
-    loc_name = loc_name or "Apex Tech • Main office"
-    time_slot = "08:00–15:30"
+    loc_name = loc_name or (company_name + " Office")
+    time_slot = "N/A"
     active_workers = []
 
     if today_shift:
-        loc_name = today_shift.get("location_name") or loc_name or "Apex Tech • Main office"
+        loc_name = today_shift.get("location_name") or loc_name or "Location"
         start_t_str = today_shift.get("start_time", "08:00")
-        end_t_str = today_shift.get("end_time", "15:30")
+        end_t_str = today_shift.get("end_time", "16:00")
         time_slot = f"{start_t_str}–{end_t_str}"
         s_status = today_shift.get("status", "published")
 
@@ -307,7 +286,7 @@ async def get_client_overview(
             et = datetime.strptime(end_t_str, "%H:%M")
             tot_hours = round((et - st).total_seconds() / 3600.0, 1)
         except Exception:
-            tot_hours = 7.5
+            tot_hours = 0.0
 
         cur_hm = now.strftime("%H:%M")
         try:
@@ -323,7 +302,7 @@ async def get_client_overview(
                 elapsed_sec = (cur_dt - st_dt).total_seconds()
                 hours_comp = round(elapsed_sec / 3600.0, 1)
         except Exception:
-            hours_comp = 4.8
+            hours_comp = 0.0
 
         workers_list = today_shift.get("assigned_workers") or today_shift.get("workers", [])
         for idx, w in enumerate(workers_list):

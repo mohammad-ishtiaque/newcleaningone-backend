@@ -79,7 +79,7 @@ async def get_worker_home_dashboard_screen(
     today_str = now.strftime("%Y-%m-%d")
 
     greeting_str = _get_time_greeting(now)
-    worker_name = getattr(current_user, "full_name", None) or getattr(current_user, "name", "Kaz Putters")
+    worker_name = getattr(current_user, "full_name", None) or getattr(current_user, "name", "Worker")
     profile_photo = getattr(current_user, "profile_photo", None)
 
     # 1. Active Running Shift
@@ -195,7 +195,6 @@ async def get_worker_home_dashboard_screen(
             ))
 
     return WorkerHomeScreenResponse(
-        greeting=greeting_str,
         worker_name=worker_name,
         profile_photo=profile_photo,
         active_shift=active_card,

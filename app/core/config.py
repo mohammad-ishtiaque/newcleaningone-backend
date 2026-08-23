@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     MANAGER_PORT: int = 8084
     ADMIN_PORT: int = 8085
 
+    # Timezone Config
+    DEFAULT_TIMEZONE: str = "Europe/Amsterdam"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()

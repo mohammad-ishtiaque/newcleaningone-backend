@@ -8,11 +8,16 @@ from app.core.database import get_database
 from app.dependencies.auth import get_current_user
 from app.models.user import UserInDB, RoleEnum
 from app.services.chat_service import (
-    get_user_id, format_conversation, format_message, resolve_participant_profile
+    get_user_id, format_conversation_list_item, format_conversation_detail,
+    format_conversation, format_message, resolve_participant_profile,
+    get_conversation_participants_details
 )
 from app.schemas.chat import (
-    ConversationResponse, MessageCreate, MessageResponse, PaginatedMessagesResponse,
-    ParticipantProfileResponse, AttachmentUploadResponse, PaginatedConversationsResponse
+    ConversationCreate, ConversationResponse, ConversationListItemResponse,
+    ConversationDetailResponse, MessageCreate, MessageUpdate,
+    MessageResponse, PaginatedMessagesResponse, ParticipantProfileResponse,
+    AttachmentUploadResponse, PaginatedConversationsResponse,
+    ConversationParticipantsResponse
 )
 
 router = APIRouter(prefix="/client/chat", tags=["Client Chat Management"])
@@ -49,13 +54,85 @@ async def list_client_conversations(
     cursor = db["conversations"].find(query).sort("updated_at", -1).skip(skip).limit(limit)
     raw_convs = await cursor.to_list(length=limit)
 
-    convs_res = [format_conversation(c, current_user_id=client_id) for c in raw_convs]
+    convs_res = [format_conversation_list_item(c, current_user_id=client_id) for c in raw_convs]
     return PaginatedConversationsResponse(total_count=total_count, page=page, limit=limit, conversations=convs_res)
+
+
+@router.post(
+    "/conversations",
+    response_model=ConversationResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Client Create or Get Conversation",
+    description="Creates a new direct or group conversation for client or returns an existing direct conversation."
+)
+async def create_client_conversation(
+    conv_in: ConversationCreate,
+    current_user: UserInDB = Depends(require_client)
+):
+    """
+    Client Create or Get Conversation Endpoint.
+    """
+    db = get_database()
+    client_id = get_user_id(current_user)
+
+    incoming_p_ids = list(conv_in.participant_ids or [])
+    if conv_in.target_user_id and conv_in.target_user_id not in incoming_p_ids:
+        incoming_p_ids.append(conv_in.target_user_id)
+
+    target_uids = list(set([client_id] + incoming_p_ids))
+
+    if conv_in.type == "direct" and len(incoming_p_ids) == 1:
+        other_id = incoming_p_ids[0]
+        existing = await db["conversations"].find_one({
+            "type": "direct",
+            "participants.user_id": {"$all": [client_id, other_id]}
+        })
+        if existing:
+            return format_conversation(existing, current_user_id=client_id)
+
+    participants = []
+    for u_id in target_uids:
+        u_query = {"$or": [{"_id": ObjectId(u_id)}, {"id": u_id}, {"_id": u_id}]} if ObjectId.is_valid(u_id) else {"$or": [{"_id": u_id}, {"id": u_id}]}
+        u_doc = await db["users"].find_one(u_query)
+        if u_doc:
+            participants.append({
+                "user_id": str(u_doc.get("_id") or u_doc.get("id")),
+                "name": u_doc.get("full_name", "User"),
+                "role": u_doc.get("role", "client"),
+                "profile_picture": u_doc.get("profile_photo")
+            })
+        else:
+            participants.append({
+                "user_id": str(u_id),
+                "name": "User",
+                "role": "client",
+                "profile_picture": None
+            })
+
+    conv_id = f"conv_{uuid.uuid4().hex[:10]}"
+    now = datetime.now(timezone.utc)
+    doc = {
+        "_id": conv_id,
+        "id": conv_id,
+        "type": conv_in.type,
+        "title": conv_in.title or "Conversation",
+        "subtitle": conv_in.subtitle,
+        "shift_id": conv_in.shift_id,
+        "cleaning_plan_id": conv_in.cleaning_plan_id,
+        "participants": participants,
+        "last_message": None,
+        "unread_counts": {},
+        "created_at": now,
+        "updated_at": now
+    }
+
+    await db["conversations"].insert_one(doc)
+    return format_conversation(doc, current_user_id=client_id)
 
 
 @router.get(
     "/conversations/{conversation_id}",
-    response_model=ConversationResponse,
+    response_model=ConversationDetailResponse,
     summary="Client Get Conversation Details",
     description="Retrieves conversation metadata and participant list for the specified conversation ID."
 )
@@ -71,7 +148,27 @@ async def get_client_conversation_detail(
     doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
     if not doc:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return format_conversation(doc, current_user_id=client_id)
+    return format_conversation_detail(doc, current_user_id=client_id)
+
+
+@router.get(
+    "/conversations/{conversation_id}/participants",
+    response_model=ConversationParticipantsResponse,
+    summary="Client Get Conversation Participants",
+    description="Returns the full list and profile details of all participants in the conversation for client."
+)
+async def get_client_conversation_participants(
+    conversation_id: str,
+    current_user: UserInDB = Depends(require_client)
+):
+    """
+    Client Get Conversation Participants Endpoint.
+    """
+    db = get_database()
+    doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return await get_conversation_participants_details(db, doc)
 
 
 @router.get(
@@ -197,7 +294,80 @@ async def send_client_message(
         }}
     )
 
+    from app.services.chat_ws_service import (
+        broadcast_new_message, broadcast_message_edited,
+        broadcast_message_deleted, broadcast_messages_read
+    )
+    await broadcast_new_message(db, conversation_id, msg_doc)
+
     return format_message(msg_doc)
+
+
+@router.patch(
+    "/messages/{message_id}",
+    response_model=MessageResponse,
+    summary="Client Edit Message",
+    description="Edits the text content of a message sent by the client."
+)
+async def edit_client_message(
+    message_id: str,
+    msg_in: MessageUpdate,
+    current_user: UserInDB = Depends(require_client)
+):
+    """
+    Client Edit Message Endpoint.
+    """
+    db = get_database()
+    client_id = get_user_id(current_user)
+    msg_doc = await db["chat_messages"].find_one({"$or": [{"_id": message_id}, {"id": message_id}]})
+    if not msg_doc:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if str(msg_doc.get("sender_id")) != client_id:
+        raise HTTPException(status_code=403, detail="Cannot edit messages sent by another user")
+
+    now = datetime.now(timezone.utc)
+    await db["chat_messages"].update_one(
+        {"$or": [{"_id": message_id}, {"id": message_id}]},
+        {"$set": {"content": msg_in.content, "updated_at": now}}
+    )
+
+    updated = await db["chat_messages"].find_one({"$or": [{"_id": message_id}, {"id": message_id}]})
+    c_id = updated.get("conversation_id")
+    if c_id:
+        from app.services.chat_ws_service import broadcast_message_edited
+        await broadcast_message_edited(db, c_id, updated)
+
+    return format_message(updated)
+
+
+@router.delete(
+    "/messages/{message_id}",
+    summary="Client Delete Message",
+    description="Deletes a message sent by the client."
+)
+async def delete_client_message(
+    message_id: str,
+    current_user: UserInDB = Depends(require_client)
+):
+    """
+    Client Delete Message Endpoint.
+    """
+    db = get_database()
+    client_id = get_user_id(current_user)
+    msg_doc = await db["chat_messages"].find_one({"$or": [{"_id": message_id}, {"id": message_id}]})
+    if not msg_doc:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if str(msg_doc.get("sender_id")) != client_id:
+        raise HTTPException(status_code=403, detail="Cannot delete messages sent by another user")
+
+    c_id = msg_doc.get("conversation_id")
+    await db["chat_messages"].delete_one({"$or": [{"_id": message_id}, {"id": message_id}]})
+
+    if c_id:
+        from app.services.chat_ws_service import broadcast_message_deleted
+        await broadcast_message_deleted(db, c_id, message_id)
+
+    return {"message": "Message deleted successfully"}
 
 
 @router.post(
@@ -225,6 +395,9 @@ async def mark_client_messages_read(
         {"$or": [{"_id": conversation_id}, {"id": conversation_id}]},
         {"$set": {f"unread_counts.{client_id}": 0}}
     )
+
+    from app.services.chat_ws_service import broadcast_messages_read
+    await broadcast_messages_read(db, conversation_id, client_id, now.isoformat())
 
     return {"message": "Messages marked as read"}
 

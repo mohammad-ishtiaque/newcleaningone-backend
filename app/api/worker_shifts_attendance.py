@@ -71,15 +71,39 @@ async def worker_shift_check_in(
     workers_list[target_idx]["checkin_time"] = now
     workers_list[target_idx]["status"] = attendance_status
 
+    # Automatically activate the first room if no room is yet started
+    rooms = shift_doc.get("rooms", [])
+    has_started_room = any(r.get("status") in ["in_progress", "completed", "photo_submitted"] for r in rooms)
+    if rooms and not has_started_room:
+        rooms[0]["status"] = "in_progress"
+        rooms[0]["started_at"] = now
+
     field_name = "assigned_workers" if "assigned_workers" in shift_doc else "workers"
     update_fields = {
         field_name: workers_list,
+        "rooms": rooms,
+        "checkin_time": now,
         "status": "in_progress",
         "updated_at": now
     }
 
     doc_id = shift_doc.get("_id")
     await db[coll_name].update_one({"_id": doc_id}, {"$set": update_fields})
+
+    # Broadcast real-time attendance change to Client, Manager & Workers
+    try:
+        from app.services.shift_ws_service import broadcast_shift_attendance_event
+        await broadcast_shift_attendance_event(
+            db=db,
+            shift_doc=shift_doc,
+            worker_id=worker_id,
+            action="check_in",
+            state="checked_in",
+            checkin_time=now,
+            status_label=attendance_status
+        )
+    except Exception:
+        pass
 
     return WorkerCheckInResponse(
         shift_id=str(shift_doc.get("id") or shift_doc.get("_id")),
@@ -155,6 +179,23 @@ async def worker_shift_check_out(
 
     doc_id = shift_doc.get("_id")
     await db[coll_name].update_one({"_id": doc_id}, {"$set": update_fields})
+
+    # Broadcast real-time checkout change to Client, Manager & Workers
+    try:
+        from app.services.shift_ws_service import broadcast_shift_attendance_event
+        await broadcast_shift_attendance_event(
+            db=db,
+            shift_doc=shift_doc,
+            worker_id=worker_id,
+            action="check_out",
+            state="completed",
+            checkin_time=checkin_dt,
+            checkout_time=now,
+            hours_worked=hours_worked,
+            status_label="completed"
+        )
+    except Exception:
+        pass
 
     return WorkerCheckOutResponse(
         shift_id=str(shift_doc.get("id") or shift_doc.get("_id")),

@@ -7,6 +7,7 @@ from app.api.admin.rooms import room_mgmt_router
 from app.api.admin.location_drawer_endpoints import location_drawer_router
 from app.api.admin.rooms_global import rooms_global_router
 from app.api.admin.cleaning_plans import cleaning_plan_mgmt_router
+from app.api.admin.cleaning_plan_dropdowns import cleaning_plan_dropdowns_router
 from app.api.admin.workers import worker_mgmt_router
 from app.api.admin.shifts import shift_mgmt_router
 from app.api.admin.roster import roster_mgmt_router
@@ -24,6 +25,7 @@ __all__ = [
     "room_mgmt_router",
     "rooms_global_router",
     "cleaning_plan_mgmt_router",
+    "cleaning_plan_dropdowns_router",
     "worker_mgmt_router",
     "shift_mgmt_router",
     "roster_mgmt_router",

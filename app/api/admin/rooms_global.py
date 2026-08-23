@@ -157,7 +157,7 @@ async def create_admin_room(
 ):
     db = get_database()
     l_doc = await db["locations"].find_one({"$or": [{"_id": room_in.location_id}, {"id": room_in.location_id}]})
-    lname = l_doc.get("name", "Location") if l_doc else "NH Hotel Amsterdam Centrum"
+    lname = l_doc.get("name", "Location") if l_doc else "Location"
     cid = l_doc.get("client_id", "") if l_doc else ""
     cname = l_doc.get("company_name", "") if l_doc else ""
 
@@ -220,15 +220,15 @@ async def get_room_drawer_details(
         raise HTTPException(status_code=404, detail="Room not found")
 
     rid = str(rdoc.get("_id") or rdoc.get("id"))
-    rname = rdoc.get("name", "Kamer 202")
-    rtype = rdoc.get("room_type") or rdoc.get("type") or "Deluxe"
+    rname = rdoc.get("name") or rdoc.get("room_name") or "Room"
+    rtype = rdoc.get("room_type") or rdoc.get("type") or "Standard"
 
     lid = rdoc.get("location_id", "")
     ldoc = await db["locations"].find_one({"$or": [{"_id": lid}, {"id": lid}]}) if lid else None
-    lname = ldoc.get("name", "NH Hotel Amsterdam Centrum") if ldoc else "NH Hotel Amsterdam Centrum"
+    lname = ldoc.get("name", "Location") if ldoc else "Location"
 
-    fl = rdoc.get("floor", 2)
-    dur = rdoc.get("est_cleaning_duration_minutes") or rdoc.get("duration", 60)
+    fl = rdoc.get("floor", 1)
+    dur = rdoc.get("est_cleaning_duration_minutes") or rdoc.get("duration", 30)
     tasks_raw = rdoc.get("tasks", [])
     photo_cnt = 0
     if isinstance(tasks_raw, list) and tasks_raw:
@@ -236,18 +236,18 @@ async def get_room_drawer_details(
             if isinstance(t, dict):
                 photo_cnt += len(t.get("photo", []))
     if photo_cnt == 0:
-        photo_cnt = len(rdoc.get("required_photos", [])) or rdoc.get("required_photos_count", 6)
-    t_cnt = len(tasks_raw) or rdoc.get("tasks_count", 15)
-    cp_name = rdoc.get("cleaning_plan_name", "Deluxe Clean")
+        photo_cnt = len(rdoc.get("required_photos", [])) or rdoc.get("required_photos_count", 0)
+    t_cnt = len(tasks_raw) or rdoc.get("tasks_count", 0)
+    cp_name = rdoc.get("cleaning_plan_name") or "Standard Clean"
 
-    code = f"R{rid[-3:].upper()}" if len(rid) >= 3 else "R002"
+    code = f"R{rid[-3:].upper()}" if len(rid) >= 3 else "R01"
 
     return RoomDrawerDetailResponse(
         room_id=rid,
         room_code=code,
         room_name=rname,
         room_type=rtype,
-        floor_label=f"Verdieping {fl}",
+        floor_label=f"Floor {fl}",
         location_name=lname,
         cleaning_plan_name=cp_name,
         duration_minutes=dur,

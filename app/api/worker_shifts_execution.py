@@ -66,10 +66,24 @@ async def start_cleaning_room(
         }}
     )
 
+    room_name_str = target_room.get("room_name") or target_room.get("name", "Room")
+    try:
+        from app.services.shift_ws_service import broadcast_room_status_event
+        await broadcast_room_status_event(
+            db=db,
+            shift_doc=shift_doc,
+            room_id=room_id,
+            room_name=room_name_str,
+            status_val="in_progress",
+            started_at=now
+        )
+    except Exception:
+        pass
+
     return {
         "shift_id": str(shift_doc.get("id") or shift_doc.get("_id")),
         "room_id": room_id,
-        "room_name": target_room.get("room_name") or target_room.get("name", "Room"),
+        "room_name": room_name_str,
         "status": "in_progress",
         "message": "Room status updated to in_progress. Cleaning started."
     }
@@ -111,7 +125,9 @@ async def toggle_room_task_completion(
 
     completed_tasks = sum(1 for t in tasks if t.get("is_completed"))
     target_room["completed_tasks_count"] = completed_tasks
-    if target_room.get("status") in ["pending", None] and completed_tasks > 0:
+    if len(tasks) > 0 and all(t.get("is_completed") for t in tasks):
+        target_room["status"] = "photo_submitted"
+    elif target_room.get("status") in ["pending", None] and completed_tasks > 0:
         target_room["status"] = "in_progress"
 
     progress = calculate_cleaning_plan_progress(shift_doc)
@@ -129,6 +145,21 @@ async def toggle_room_task_completion(
             "updated_at": now
         }}
     )
+
+    try:
+        from app.services.shift_ws_service import broadcast_task_toggled_event
+        await broadcast_task_toggled_event(
+            db=db,
+            shift_doc=shift_doc,
+            room_id=room_id,
+            task_id=task_id,
+            is_completed=new_state,
+            overall_progress_percentage=progress["overall_progress_percentage"],
+            completed_tasks_count=completed_tasks,
+            total_tasks_count=total_tasks
+        )
+    except Exception:
+        pass
 
     updated_shift = await db[coll_name].find_one({"_id": doc_id})
     return ShiftExecutionStateResponse(
@@ -156,6 +187,8 @@ async def upload_worker_room_photo(
     shift_id: str,
     room_id: str,
     photo_type: str = Form("after"),
+    photo_id: Optional[str] = Form(None),
+    task_id: Optional[str] = Form(None),
     file: UploadFile = File(...),
     current_user: UserInDB = Depends(require_worker)
 ):
@@ -187,6 +220,8 @@ async def upload_worker_room_photo(
 
     rev_id = f"RV-{uuid.uuid4().hex[:6].upper()}"
     review_query = {"shift_id": shift_id, "room.room_id": room_id}
+    if photo_id:
+        review_query["photo_id"] = photo_id
     existing_rev = await db["photo_reviews"].find_one(review_query)
 
     before_path = None
@@ -203,6 +238,8 @@ async def upload_worker_room_photo(
     review_doc = {
         "review_id": existing_rev.get("review_id", rev_id) if existing_rev else rev_id,
         "shift_id": shift_id,
+        "photo_id": photo_id,
+        "task_id": task_id,
         "cleaner": {
             "worker_id": worker_id,
             "name": worker_name,
@@ -235,27 +272,56 @@ async def upload_worker_room_photo(
     }
 
     await db["photo_reviews"].update_one(
-        review_query,
+        {"review_id": review_doc["review_id"]},
         {"$set": review_doc},
         upsert=True
     )
 
-    # Also register photo into shift execution room's submitted_photos
+    # Also register photo into shift execution room's submitted_photos and specific task
     if shift_doc and coll_name:
         rooms = shift_doc.get("rooms", [])
         target_room = next((r for r in rooms if str(r.get("room_id")) == str(room_id) or str(r.get("id")) == str(room_id)), None)
         if target_room:
             if "submitted_photos" not in target_room or not isinstance(target_room["submitted_photos"], list):
                 target_room["submitted_photos"] = []
-            target_room["submitted_photos"].append({
-                "photo_id": str(uuid.uuid4()),
+            
+            photo_record = {
+                "photo_id": photo_id or str(uuid.uuid4()),
+                "task_id": task_id,
                 "photo_url": photo_url,
                 "photo_type": photo_type,
                 "submitted_at": now,
                 "review_id": review_doc["review_id"],
                 "status": "pending_review"
-            })
-            target_room["status"] = "photo_submitted"
+            }
+            target_room["submitted_photos"].append(photo_record)
+
+            # Check if this photo corresponds to a specific task
+            r_tasks = target_room.get("tasks", [])
+            for t in r_tasks:
+                matches_task = (task_id and str(t.get("id")) == str(task_id))
+                matches_photo = False
+                if photo_id:
+                    task_photos = t.get("photo", [])
+                    if any(str(p.get("id")) == str(photo_id) for p in task_photos):
+                        matches_photo = True
+
+                if matches_task or matches_photo:
+                    if "submitted_photos" not in t or not isinstance(t["submitted_photos"], list):
+                        t["submitted_photos"] = []
+                    t["submitted_photos"].append(photo_record)
+
+                    req_count = len(t.get("photo", [])) or t.get("total_photos_required", 1)
+                    if len(t["submitted_photos"]) >= req_count:
+                        t["is_completed"] = True
+                        t["completed_at"] = now
+
+            # If all tasks in room are now completed, mark room photo_submitted
+            all_tasks_done = len(r_tasks) > 0 and all(t.get("is_completed") for t in r_tasks)
+            if all_tasks_done:
+                target_room["status"] = "photo_submitted"
+            elif target_room.get("status") in ["pending", None]:
+                target_room["status"] = "in_progress"
 
             progress = calculate_cleaning_plan_progress(shift_doc)
             doc_id = shift_doc.get("_id")
@@ -267,9 +333,24 @@ async def upload_worker_room_photo(
                     "completed_rooms_count": progress["completed_rooms_count"],
                     "in_progress_rooms_count": progress["in_progress_rooms_count"],
                     "pending_rooms_count": progress["pending_rooms_count"],
+                    "completed_tasks_count": progress["completed_tasks_count"],
                     "updated_at": now
                 }}
             )
+
+    try:
+        from app.services.shift_ws_service import broadcast_photo_submitted_event
+        await broadcast_photo_submitted_event(
+            db=db,
+            shift_doc=shift_doc,
+            room_id=room_id,
+            review_id=review_doc["review_id"],
+            photo_url=photo_url,
+            photo_type=photo_type,
+            ai_score=ai_score
+        )
+    except Exception:
+        pass
 
     return PhotoUploadResponse(
         review_id=review_doc["review_id"],
@@ -396,11 +477,25 @@ async def complete_room_and_upload_proof(
         }}
     )
 
+    room_name_str = target_room.get("room_name") or target_room.get("name", "Room")
+    try:
+        from app.services.shift_ws_service import broadcast_room_completed_event
+        await broadcast_room_completed_event(
+            db=db,
+            shift_doc=shift_doc,
+            room_id=room_id,
+            room_name=room_name_str,
+            review_id=review_id,
+            overall_progress_percentage=progress["overall_progress_percentage"]
+        )
+    except Exception:
+        pass
+
     return {
         "review_id": review_id,
         "shift_id": shift_id,
         "room_id": room_id,
-        "room_name": target_room.get("room_name") or target_room.get("name", "Room"),
+        "room_name": room_name_str,
         "status": "photo_submitted",
         "approval_status": "pending",
         "photo_url": after_url,
@@ -412,7 +507,8 @@ async def complete_room_and_upload_proof(
     "/{shift_id}/complete",
     response_model=ShiftResponse,
     summary="Mark Entire Shift Completed",
-    description="Worker marks shift complete after all assigned rooms are cleaned and approved."
+    description="Worker marks shift complete after all assigned rooms are cleaned and approved.",
+    include_in_schema=False
 )
 async def mark_shift_completed(
     shift_id: str,
@@ -444,6 +540,12 @@ async def mark_shift_completed(
             "updated_at": now
         }}
     )
+
+    try:
+        from app.services.shift_ws_service import broadcast_shift_completed_event
+        await broadcast_shift_completed_event(db=db, shift_doc=shift_doc)
+    except Exception:
+        pass
 
     updated_shift = await db[coll_name].find_one({"_id": doc_id})
     updated_shift["id"] = str(updated_shift.get("_id") or updated_shift.get("id"))

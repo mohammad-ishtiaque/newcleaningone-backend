@@ -72,25 +72,25 @@ async def get_admin_photo_reviews(
             shift_id=r.get("shift_id", "shift_1"),
             cleaner=PhotoReviewCleanerDetail(
                 worker_id=str(cleaner_d.get("worker_id") or cleaner_d.get("id") or "w_1"),
-                name=cleaner_d.get("name") or cleaner_d.get("full_name") or "Lisa Visser",
+                name=cleaner_d.get("name") or cleaner_d.get("full_name") or "Worker",
                 profile_picture=cleaner_d.get("profile_picture") or cleaner_d.get("profile_photo")
             ),
             client=PhotoReviewClientDetail(
-                client_id=str(client_d.get("client_id") or client_d.get("id") or "c_1"),
-                name=client_d.get("name") or client_d.get("company_name") or "NH Hotels Nederland"
+                client_id=str(client_d.get("client_id") or client_d.get("id") or ""),
+                name=client_d.get("name") or client_d.get("company_name") or "Client"
             ),
             location=PhotoReviewLocationDetail(
-                location_id=str(loc_d.get("location_id") or loc_d.get("id") or "l_1"),
-                name=loc_d.get("name") or loc_d.get("location_name") or "NH Hotel Amsterdam Centrum"
+                location_id=str(loc_d.get("location_id") or loc_d.get("id") or ""),
+                name=loc_d.get("name") or loc_d.get("location_name") or "Location"
             ),
             room=PhotoReviewRoomDetail(
-                room_id=str(room_d.get("room_id") or room_d.get("id") or "r_1"),
-                name=room_d.get("name") or room_d.get("room_name") or "Kamer 201"
+                room_id=str(room_d.get("room_id") or room_d.get("id") or ""),
+                name=room_d.get("name") or room_d.get("room_name") or "Room"
             ),
-            photo_url=r.get("photo_url") or r.get("after_photo_url", "/uploads/photo_reviews/sample_after.jpg"),
-            photo_name=r.get("photo_name", "Kamer 201 After Cleaning"),
-            ai_score=r.get("ai_score", 91.0),
-            ai_confidence=r.get("ai_confidence", "high"),
+            photo_url=r.get("photo_url") or r.get("after_photo_url") or "",
+            photo_name=r.get("photo_name") or "After Cleaning Photo",
+            ai_score=r.get("ai_score", 0.0),
+            ai_confidence=r.get("ai_confidence", "medium"),
             status=r.get("status", "pending_review"),
             rejection_reason=r.get("rejection_reason"),
             date_submitted=c_dt
@@ -124,23 +124,23 @@ async def get_photo_review_details(
 
     return PhotoReviewDetailModalResponse(
         review_id=r.get("review_id", review_id),
-        shift_id=r.get("shift_id", "shift_1"),
+        shift_id=r.get("shift_id") or "",
         cleaner=PhotoReviewCleanerDetail(
-            worker_id=str(cleaner_d.get("worker_id") or cleaner_d.get("id") or "w_1"),
-            name=cleaner_d.get("name") or cleaner_d.get("full_name") or "Lisa Visser",
+            worker_id=str(cleaner_d.get("worker_id") or cleaner_d.get("id") or ""),
+            name=cleaner_d.get("name") or cleaner_d.get("full_name") or "Worker",
             profile_picture=cleaner_d.get("profile_picture") or cleaner_d.get("profile_photo")
         ),
         client=PhotoReviewClientDetail(
-            client_id=str(client_d.get("client_id") or client_d.get("id") or "c_1"),
-            name=client_d.get("name") or client_d.get("company_name") or "NH Hotels Nederland"
+            client_id=str(client_d.get("client_id") or client_d.get("id") or ""),
+            name=client_d.get("name") or client_d.get("company_name") or "Client"
         ),
         location=PhotoReviewLocationDetail(
-            location_id=str(loc_d.get("location_id") or loc_d.get("id") or "l_1"),
-            name=loc_d.get("name") or loc_d.get("location_name") or "NH Hotel Amsterdam Centrum"
+            location_id=str(loc_d.get("location_id") or loc_d.get("id") or ""),
+            name=loc_d.get("name") or loc_d.get("location_name") or "Location"
         ),
         room=PhotoReviewRoomDetail(
-            room_id=str(room_d.get("room_id") or room_d.get("id") or "r_1"),
-            name=room_d.get("name") or room_d.get("room_name") or "Kamer 201"
+            room_id=str(room_d.get("room_id") or room_d.get("id") or ""),
+            name=room_d.get("name") or room_d.get("room_name") or "Room"
         ),
         before_photo_url=r.get("before_photo_url"),
         after_photo_url=r.get("after_photo_url") or r.get("photo_url", "/uploads/photo_reviews/after_sample.jpg"),
@@ -189,16 +189,22 @@ async def _sync_shift_room_approval(db, r_doc: dict, is_approved: bool):
         target_room["approval_status"] = "rejected"
         target_room["is_verified"] = False
 
-    # Mark photo status inside target room's submitted_photos
+    # Mark photo status inside target room's submitted_photos and tasks' submitted_photos
     approved_photos_count = 0
     for r in rooms:
         for p in r.get("submitted_photos", []):
-            if p.get("review_id") == r_doc.get("review_id") and is_approved:
+            if (p.get("review_id") == r_doc.get("review_id") or (r_doc.get("photo_id") and p.get("photo_id") == r_doc.get("photo_id"))) and is_approved:
                 p["status"] = "approved"
-            elif p.get("review_id") == r_doc.get("review_id") and not is_approved:
+            elif (p.get("review_id") == r_doc.get("review_id") or (r_doc.get("photo_id") and p.get("photo_id") == r_doc.get("photo_id"))) and not is_approved:
                 p["status"] = "rejected"
             if p.get("status") == "approved":
                 approved_photos_count += 1
+        for t in r.get("tasks", []):
+            for tp in t.get("submitted_photos", []):
+                if (tp.get("review_id") == r_doc.get("review_id") or (r_doc.get("photo_id") and tp.get("photo_id") == r_doc.get("photo_id"))) and is_approved:
+                    tp["status"] = "approved"
+                elif (tp.get("review_id") == r_doc.get("review_id") or (r_doc.get("photo_id") and tp.get("photo_id") == r_doc.get("photo_id"))) and not is_approved:
+                    tp["status"] = "rejected"
 
     if is_approved and approved_photos_count == 0:
         approved_photos_count = 1
@@ -206,12 +212,16 @@ async def _sync_shift_room_approval(db, r_doc: dict, is_approved: bool):
     shift_doc["approved_photos_count"] = approved_photos_count
     progress = calculate_cleaning_plan_progress(shift_doc, approved_photos_count=approved_photos_count)
 
+    all_completed = len(rooms) > 0 and all(r.get("status") == "completed" for r in rooms)
+    shift_status = "completed" if all_completed else ("in_progress" if is_approved else shift_doc.get("status", "in_progress"))
+
     doc_id = shift_doc.get("_id")
     await db[coll_name].update_one(
         {"_id": doc_id},
         {"$set": {
             "rooms": rooms,
-            "overall_progress_percentage": progress["overall_progress_percentage"],
+            "status": shift_status,
+            "overall_progress_percentage": 100.0 if all_completed else progress["overall_progress_percentage"],
             "completed_rooms_count": progress["completed_rooms_count"],
             "in_progress_rooms_count": progress["in_progress_rooms_count"],
             "pending_rooms_count": progress["pending_rooms_count"],
@@ -220,6 +230,17 @@ async def _sync_shift_room_approval(db, r_doc: dict, is_approved: bool):
             "updated_at": now
         }}
     )
+
+    if all_completed:
+        try:
+            from app.services.shift_ws_service import broadcast_shift_completed_event
+            await broadcast_shift_completed_event(
+                db=db,
+                shift_doc=shift_doc,
+                completed_by=admin_id if 'admin_id' in locals() else "manager"
+            )
+        except Exception:
+            pass
 
 @photo_reviews_router.patch("/photo-reviews/{review_id}/approve", summary="Approve Photo Review (Triggers PyTorch Online Learning & Completes Room)")
 async def approve_photo_review(

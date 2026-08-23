@@ -237,6 +237,7 @@ async def change_client_password(
         {"$or": [{"_id": obj_id}, {"id": user_id}]},
         {"$set": {
             "hashed_password": new_hash,
+            "is_temporary_password": False,
             "last_password_changed_at": now,
             "updated_at": now
         }}

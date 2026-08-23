@@ -1,39 +1,12 @@
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Union
 from bson import ObjectId
 import re
-
-def parse_time_to_minutes(time_str: str) -> int:
-    """Parses '08:00 AM', '02:30 PM', or '14:00' to minutes from midnight."""
-    if not time_str:
-        return 480  # Default 8:00 AM
-    clean_str = time_str.strip().upper()
-    try:
-        match = re.match(r"^(\d{1,2}):(\d{2})\s*(AM|PM)?$", clean_str)
-        if match:
-            h, m, meridiem = int(match.group(1)), int(match.group(2)), match.group(3)
-            if meridiem:
-                if meridiem == "PM" and h < 12:
-                    h += 12
-                elif meridiem == "AM" and h == 12:
-                    h = 0
-            return h * 60 + m
-        parts = clean_str.split(":")
-        return int(parts[0]) * 60 + int(parts[1])
-    except Exception:
-        return 480
-
-
-def parse_plan_start_datetime(date_str: str, time_str: str) -> datetime:
-    """Returns datetime object for shift start in UTC."""
-    try:
-        y, mon, d = map(int, date_str.strip().split("-"))
-        total_mins = parse_time_to_minutes(time_str)
-        hour = total_mins // 60
-        minute = total_mins % 60
-        return datetime(y, mon, d, hour, minute, tzinfo=timezone.utc)
-    except Exception:
-        return datetime.now(timezone.utc)
+from zoneinfo import ZoneInfo
+from app.core.timezone_utils import (
+    parse_time_to_minutes, parse_plan_start_datetime,
+    get_timezone, now_in_tz, get_today_str, human_time_until
+)
 
 
 def is_plan_active_on_date(plan_doc: dict, target_date_str: str) -> bool:
@@ -69,13 +42,17 @@ def is_plan_active_on_date(plan_doc: dict, target_date_str: str) -> bool:
                 return False
 
         # Check working days
-        day_name = t_dt.strftime("%A").lower()  # e.g. "monday"
+        day_name = t_dt.strftime("%A").lower()  # e.g. "sunday"
+        day_abbr = t_dt.strftime("%a").lower()  # e.g. "sun"
         working_days = [str(d).strip().lower() for d in plan_doc.get("working_days", [])]
 
-        if not working_days or repeat_type == "everyday":
+        if not working_days or repeat_type in ["everyday", "daily"] or plan_date == target_date_str:
             return True
 
-        return day_name in working_days
+        return any(
+            d in [day_name, day_abbr] or d.startswith(day_abbr) or day_name.startswith(d)
+            for d in working_days
+        )
     except Exception:
         return plan_date == target_date_str
 
@@ -272,10 +249,36 @@ def calculate_cleaning_plan_progress(plan_doc: dict, approved_photos_count: Opti
     }
 
 
+def is_task_due_on_date(task: dict, target_date_str: str, past_completed_dates: set) -> bool:
+    """Checks whether a periodic task (weekly, biweekly, monthly) is due on the target date."""
+    freq = str(task.get("frequency_type", "every_visit")).lower()
+    if freq in ["every_visit", "daily", "always", ""]:
+        return True
+
+    try:
+        y, m, d = map(int, target_date_str.split("-"))
+        target_dt = datetime(y, m, d)
+    except Exception:
+        return True
+
+    interval_days = 7 if freq == "weekly" else (14 if freq == "biweekly" else (30 if freq == "monthly" else 90))
+
+    for p_date_str in past_completed_dates:
+        try:
+            py, pm, pd = map(int, p_date_str.split("-"))
+            p_dt = datetime(py, pm, pd)
+            diff = (target_dt - p_dt).days
+            if 0 <= diff < interval_days and p_dt < target_dt:
+                return False  # Already satisfied within frequency interval
+        except Exception:
+            pass
+    return True
+
+
 async def get_or_create_shift_execution(plan_doc: dict, target_date_str: str, db) -> dict:
     """
     Retrieves or initializes a dedicated daily shift execution document in `shift_executions`.
-    This maintains completely separate daily tracking for recurring cleaning plans.
+    Maintains separate daily tracking and filters tasks by their due frequency for today.
     """
     plan_id = str(plan_doc.get("id") or plan_doc.get("_id"))
     execution_id = f"exec_{plan_id}_{target_date_str}"
@@ -286,7 +289,30 @@ async def get_or_create_shift_execution(plan_doc: dict, target_date_str: str, db
     if exec_doc:
         return exec_doc
 
+    # Query past executions to track when periodic tasks were last completed
+    past_completed_task_history = {}
+    try:
+        past_cursor = db["shift_executions"].find({
+            "$or": [{"plan_id": plan_id}, {"cleaning_plan_id": plan_id}],
+            "date": {"$lt": target_date_str}
+        }).sort("date", -1)
+        past_execs = await past_cursor.to_list(length=40)
+        for pe in past_execs:
+            p_date = pe.get("date")
+            if not p_date:
+                continue
+            for pr in pe.get("rooms", []):
+                pr_id = str(pr.get("room_id") or pr.get("id") or "")
+                for pt in pr.get("tasks", []):
+                    pt_id = str(pt.get("id") or "")
+                    if pt.get("is_completed"):
+                        key = f"{pr_id}:{pt_id}"
+                        past_completed_task_history.setdefault(key, set()).add(p_date)
+    except Exception:
+        pass
+
     # Resolve rooms checklist from rooms collection
+    embedded_rooms = plan_doc.get("rooms", [])
     room_ids = plan_doc.get("room_ids", [])
     raw_rooms = []
     if room_ids:
@@ -303,28 +329,53 @@ async def get_or_create_shift_execution(plan_doc: dict, target_date_str: str, db
     total_tasks_cnt = 0
     total_photos_cnt = 0
 
-    for rid in room_ids:
-        r = room_map.get(str(rid))
-        if not r:
-            continue
-        r_tasks = [
-            {
-                "id": str(t.get("id") or f"task_{idx+1}"),
+    candidate_rooms = embedded_rooms if (embedded_rooms and isinstance(embedded_rooms, list)) else []
+    if not candidate_rooms and room_ids:
+        for rid in room_ids:
+            r = room_map.get(str(rid))
+            if r:
+                candidate_rooms.append(r)
+
+    for idx, r in enumerate(candidate_rooms):
+        rid = str(r.get("room_id") or r.get("id") or r.get("_id") or f"room_{idx+1}")
+        raw_tasks = r.get("tasks", [])
+        due_tasks = []
+
+        for t_idx, t in enumerate(raw_tasks):
+            t_id = str(t.get("id") or f"task_{t_idx+1}")
+            hist_key = f"{rid}:{t_id}"
+            past_dates = past_completed_task_history.get(hist_key, set())
+
+            if not is_task_due_on_date(t, target_date_str, past_dates):
+                continue  # Task is not due today based on frequency
+
+            task_photos = t.get("photo") or []
+            is_photo_mandatory = bool(t.get("is_photo_req") or len(task_photos) > 0)
+            req_photos_num = len(task_photos) or t.get("total_photos_required", 0)
+
+            due_tasks.append({
+                "id": t_id,
                 "name": t.get("name") or t.get("task_name", "Task"),
+                "frequency_type": t.get("frequency_type", "every_visit"),
+                "is_photo_req": is_photo_mandatory,
+                "total_photos_required": req_photos_num,
+                "photo": task_photos,
+                "submitted_photos": [],
                 "is_completed": False,
                 "completed_at": None
-            }
-            for idx, t in enumerate(r.get("tasks", []))
-        ]
+            })
+
         r_photos = [
             {
-                "id": str(p.get("id") or f"photo_{idx+1}"),
+                "id": str(p.get("id") or f"photo_{p_idx+1}"),
                 "name": p.get("name") or p.get("photo_name", "Photo"),
-                "photo_type": p.get("photo_type", "after")
+                "photo_type": p.get("photo_type", "after"),
+                "frequency_type": p.get("frequency_type", "every_visit")
             }
-            for idx, p in enumerate(r.get("required_photos", []))
+            for p_idx, p in enumerate(r.get("required_photos", []) or r.get("photo_requirements", []))
         ]
-        total_tasks_cnt += len(r_tasks)
+
+        total_tasks_cnt += len(due_tasks)
         total_photos_cnt += len(r_photos)
 
         exec_rooms.append({
@@ -332,7 +383,7 @@ async def get_or_create_shift_execution(plan_doc: dict, target_date_str: str, db
             "room_name": r.get("room_name") or r.get("name", "Room"),
             "floor": r.get("floor", 1),
             "status": "pending",
-            "tasks": r_tasks,
+            "tasks": due_tasks,
             "required_photos": r_photos,
             "submitted_photos": []
         })

@@ -430,6 +430,15 @@ async def send_client_report_email(
     target_email = req_in.email if req_in and req_in.email else cdoc.get("email")
     cname = cdoc.get("company_name", "Client")
 
+    # Send report summary email via SMTP
+    if target_email:
+        from app.services.email_service import EmailService
+        await EmailService.send_report_summary_email(
+            to_email=target_email,
+            company_name=cname,
+            report_title=f"Monthly Service & Quality Report ({cname})"
+        )
+
     return {
         "message": f"Service report successfully sent to '{target_email}' for '{cname}'",
         "recipient": target_email,

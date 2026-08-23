@@ -82,6 +82,8 @@ async def parse_and_validate_worker_csv(file_bytes: bytes, db) -> WorkerBulkImpo
             "approval_status": "approved",
             "is_approved": True,
             "is_admin_created": True,
+            "is_temporary_password": True,
+            "temporary_password_created_at": now,
             "is_active": is_active,
             "created_at": now,
             "updated_at": now
