@@ -10,10 +10,11 @@ from app.models.user import UserInDB, RoleEnum
 from app.services.chat_service import (
     get_user_id, format_conversation_list_item, format_conversation_detail,
     format_conversation, format_message, resolve_participant_profile,
-    get_conversation_participants_details
+    get_conversation_participants_details, get_or_create_client_admin_conversation,
+    mark_conversation_read_shared_management
 )
 from app.schemas.chat import (
-    ConversationCreate, ConversationResponse, ConversationListItemResponse,
+    ConversationResponse, ConversationListItemResponse,
     ConversationDetailResponse, MessageCreate, MessageUpdate,
     MessageResponse, PaginatedMessagesResponse, ParticipantProfileResponse,
     AttachmentUploadResponse, PaginatedConversationsResponse,
@@ -24,7 +25,7 @@ router = APIRouter(prefix="/client/chat", tags=["Client Chat Management"])
 
 
 def require_client(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
-    if current_user.role != RoleEnum.client:
+    if current_user.role != RoleEnum.client and current_user.role != "client":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Client role required")
     return current_user
 
@@ -54,8 +55,16 @@ async def list_client_conversations(
     cursor = db["conversations"].find(query).sort("updated_at", -1).skip(skip).limit(limit)
     raw_convs = await cursor.to_list(length=limit)
 
-    convs_res = [format_conversation_list_item(c, current_user_id=client_id) for c in raw_convs]
-    return PaginatedConversationsResponse(total_count=total_count, page=page, limit=limit, conversations=convs_res)
+    convs_res = [format_conversation_list_item(c, current_user_id=client_id, viewer_role="client") for c in raw_convs]
+    has_more = (skip + len(convs_res)) < total_count
+
+    return PaginatedConversationsResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        has_more=has_more,
+        conversations=convs_res
+    )
 
 
 @router.post(
@@ -63,78 +72,32 @@ async def list_client_conversations(
     response_model=ConversationResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Client Create or Get Conversation",
-    description="Creates a new direct or group conversation for client or returns an existing direct conversation."
+    description="Creates or retrieves the unified direct support conversation with all Admins and Managers. Requires no request body."
 )
 async def create_client_conversation(
-    conv_in: ConversationCreate,
     current_user: UserInDB = Depends(require_client)
 ):
     """
     Client Create or Get Conversation Endpoint.
+    Automatically assigns all active Admins & Managers to the conversation.
+    Idempotent: Returns the existing conversation if one already exists.
+    Requires no request body.
     """
     db = get_database()
     client_id = get_user_id(current_user)
 
-    incoming_p_ids = list(conv_in.participant_ids or [])
-    if conv_in.target_user_id and conv_in.target_user_id not in incoming_p_ids:
-        incoming_p_ids.append(conv_in.target_user_id)
-
-    target_uids = list(set([client_id] + incoming_p_ids))
-
-    if conv_in.type == "direct" and len(incoming_p_ids) == 1:
-        other_id = incoming_p_ids[0]
-        existing = await db["conversations"].find_one({
-            "type": "direct",
-            "participants.user_id": {"$all": [client_id, other_id]}
-        })
-        if existing:
-            return format_conversation(existing, current_user_id=client_id)
-
-    participants = []
-    for u_id in target_uids:
-        u_query = {"$or": [{"_id": ObjectId(u_id)}, {"id": u_id}, {"_id": u_id}]} if ObjectId.is_valid(u_id) else {"$or": [{"_id": u_id}, {"id": u_id}]}
-        u_doc = await db["users"].find_one(u_query)
-        if u_doc:
-            participants.append({
-                "user_id": str(u_doc.get("_id") or u_doc.get("id")),
-                "name": u_doc.get("full_name", "User"),
-                "role": u_doc.get("role", "client"),
-                "profile_picture": u_doc.get("profile_photo")
-            })
-        else:
-            participants.append({
-                "user_id": str(u_id),
-                "name": "User",
-                "role": "client",
-                "profile_picture": None
-            })
-
-    conv_id = f"conv_{uuid.uuid4().hex[:10]}"
-    now = datetime.now(timezone.utc)
-    doc = {
-        "_id": conv_id,
-        "id": conv_id,
-        "type": conv_in.type,
-        "title": conv_in.title or "Conversation",
-        "subtitle": conv_in.subtitle,
-        "shift_id": conv_in.shift_id,
-        "cleaning_plan_id": conv_in.cleaning_plan_id,
-        "participants": participants,
-        "last_message": None,
-        "unread_counts": {},
-        "created_at": now,
-        "updated_at": now
-    }
-
-    await db["conversations"].insert_one(doc)
-    return format_conversation(doc, current_user_id=client_id)
+    doc = await get_or_create_client_admin_conversation(
+        db=db,
+        client_user=current_user
+    )
+    return format_conversation(doc, current_user_id=client_id, viewer_role="client")
 
 
 @router.get(
     "/conversations/{conversation_id}",
     response_model=ConversationDetailResponse,
     summary="Client Get Conversation Details",
-    description="Retrieves conversation metadata and participant list for the specified conversation ID."
+    description="Retrieves conversation metadata, participant list, and management seen footprints for the specified conversation ID."
 )
 async def get_client_conversation_detail(
     conversation_id: str,
@@ -148,7 +111,7 @@ async def get_client_conversation_detail(
     doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
     if not doc:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return format_conversation_detail(doc, current_user_id=client_id)
+    return format_conversation_detail(doc, current_user_id=client_id, viewer_role="client")
 
 
 @router.get(
@@ -210,7 +173,7 @@ async def get_client_participant_profile(
     "/conversations/{conversation_id}/messages",
     response_model=PaginatedMessagesResponse,
     summary="Client Get Paginated Messages",
-    description="Fetches paginated message history for a conversation and marks unread messages as delivered."
+    description="Fetches paginated message history for a conversation including Admin & Manager seen footprints."
 )
 async def get_client_conversation_messages(
     conversation_id: str,
@@ -256,34 +219,55 @@ async def send_client_message(
     """
     db = get_database()
     client_id = get_user_id(current_user)
+
+    conv_doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
+    if not conv_doc:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    participant_uids = [str(p.get("user_id")) for p in conv_doc.get("participants", []) if p.get("user_id")]
+    if client_id not in participant_uids:
+        raise HTTPException(status_code=403, detail="You are not a participant in this conversation")
+
+    content_clean = (msg_in.content or "").strip()
+    if not content_clean and not msg_in.attachment_url:
+        raise HTTPException(status_code=400, detail="Message content or attachment_url is required")
+
     now = datetime.now(timezone.utc)
     msg_id = f"msg_{uuid.uuid4().hex[:10]}"
-
-    sender_name = getattr(current_user, "full_name", None) or "Client"
+    sender_name = getattr(current_user, "company_name", None) or getattr(current_user, "full_name", None) or "Client"
+    sender_pic = getattr(current_user, "profile_photo", None)
 
     msg_doc = {
         "_id": msg_id,
         "id": msg_id,
-        "conversation_id": conversation_id,
+        "conversation_id": str(conv_doc.get("_id") or conv_doc.get("id")),
         "sender_id": client_id,
         "sender_name": sender_name,
         "sender_role": "client",
-        "sender_avatar": getattr(current_user, "profile_photo", None),
-        "content": msg_in.content,
+        "sender_avatar": sender_pic,
+        "content": content_clean,
         "attachment_url": msg_in.attachment_url,
         "attachment_type": msg_in.attachment_type,
         "status": "sent",
-        "read_by": [{"user_id": client_id, "read_at": now}],
+        "read_by": [{
+            "user_id": client_id,
+            "name": sender_name,
+            "role": "client",
+            "profile_picture": sender_pic,
+            "read_at": now
+        }],
         "created_at": now,
         "updated_at": now
     }
 
     await db["chat_messages"].insert_one(msg_doc)
 
-    last_text = msg_in.content if msg_in.content else "[Attachment]"
-    await db["conversations"].update_one(
-        {"$or": [{"_id": conversation_id}, {"id": conversation_id}]},
-        {"$set": {
+    last_text = content_clean if content_clean else "[Attachment]"
+    other_uids = [uid for uid in participant_uids if uid != client_id]
+    inc_unreads = {f"unread_counts.{uid}": 1 for uid in other_uids}
+
+    update_payload = {
+        "$set": {
             "last_message": {
                 "text": last_text,
                 "sender_id": client_id,
@@ -291,14 +275,18 @@ async def send_client_message(
                 "timestamp": now.strftime("%I:%M %p")
             },
             "updated_at": now
-        }}
+        }
+    }
+    if inc_unreads:
+        update_payload["$inc"] = inc_unreads
+
+    await db["conversations"].update_one(
+        {"_id": conv_doc["_id"]},
+        update_payload
     )
 
-    from app.services.chat_ws_service import (
-        broadcast_new_message, broadcast_message_edited,
-        broadcast_message_deleted, broadcast_messages_read
-    )
-    await broadcast_new_message(db, conversation_id, msg_doc)
+    from app.services.chat_ws_service import broadcast_new_message
+    await broadcast_new_message(db, str(conv_doc["_id"]), msg_doc)
 
     return format_message(msg_doc)
 
@@ -325,10 +313,14 @@ async def edit_client_message(
     if str(msg_doc.get("sender_id")) != client_id:
         raise HTTPException(status_code=403, detail="Cannot edit messages sent by another user")
 
+    content_clean = (msg_in.content or "").strip()
+    if not content_clean:
+        raise HTTPException(status_code=400, detail="Message content cannot be empty")
+
     now = datetime.now(timezone.utc)
     await db["chat_messages"].update_one(
         {"$or": [{"_id": message_id}, {"id": message_id}]},
-        {"$set": {"content": msg_in.content, "updated_at": now}}
+        {"$set": {"content": content_clean, "updated_at": now}}
     )
 
     updated = await db["chat_messages"].find_one({"$or": [{"_id": message_id}, {"id": message_id}]})
@@ -383,23 +375,7 @@ async def mark_client_messages_read(
     Client Mark Messages as Read Endpoint.
     """
     db = get_database()
-    client_id = get_user_id(current_user)
-    now = datetime.now(timezone.utc)
-
-    await db["chat_messages"].update_many(
-        {"conversation_id": conversation_id, "read_by.user_id": {"$ne": client_id}},
-        {"$push": {"read_by": {"user_id": client_id, "read_at": now}}}
-    )
-
-    await db["conversations"].update_one(
-        {"$or": [{"_id": conversation_id}, {"id": conversation_id}]},
-        {"$set": {f"unread_counts.{client_id}": 0}}
-    )
-
-    from app.services.chat_ws_service import broadcast_messages_read
-    await broadcast_messages_read(db, conversation_id, client_id, now.isoformat())
-
-    return {"message": "Messages marked as read"}
+    return await mark_conversation_read_shared_management(db, conversation_id, current_user)
 
 
 @router.post(

@@ -12,6 +12,10 @@ from app.models.user import UserInDB
 
 
 def _format_tasks_list(raw_tasks: list) -> List[CleaningTaskResponse]:
+    """
+    Formats raw tasks into CleaningTaskResponse models with embedded task photos.
+    Guarantees every photo is bound to its parent task.
+    """
     tasks = []
     for t in (raw_tasks or []):
         if isinstance(t, dict):
@@ -19,7 +23,7 @@ def _format_tasks_list(raw_tasks: list) -> List[CleaningTaskResponse]:
             t_name = t.get("name", "Task")
             t_freq = t.get("frequency_type", "every_visit")
             is_req = bool(t.get("is_photo_req", False))
-            
+
             raw_photos = t.get("photo") or t.get("photos") or []
             task_photos = []
             if isinstance(raw_photos, list):
@@ -32,7 +36,7 @@ def _format_tasks_list(raw_tasks: list) -> List[CleaningTaskResponse]:
                     elif hasattr(p, "name"):
                         p_id = str(getattr(p, "id", None) or uuid.uuid4().hex[:8])
                         task_photos.append(TaskPhotoResponse(id=p_id, name=getattr(p, "name", "Photo")))
-            
+
             if task_photos and not is_req:
                 is_req = True
 
@@ -115,6 +119,9 @@ async def _resolve_rooms_data(room_ids: List[str], db) -> List[CleaningPlanRoomD
         freq = r.get("monthly_cleaning_frequency", 4)
         c_type = r.get("clean_type") or r.get("cleaning_type", "standard")
 
+        room_tasks = _format_tasks_list(r.get("tasks", []))
+        total_p_req = sum(len(t.photo) for t in room_tasks)
+
         room_details.append(CleaningPlanRoomDetail(
             room_id=str(rid),
             room_name=r_name,
@@ -123,8 +130,10 @@ async def _resolve_rooms_data(room_ids: List[str], db) -> List[CleaningPlanRoomD
             duration=dur,
             monthly_cleaning_frequency=freq,
             clean_type=c_type,
-            tasks=_format_tasks_list(r.get("tasks", [])),
-            required_photos=_format_photos_list(r.get("required_photos", []))
+            tasks=room_tasks,
+            photo_number=total_p_req,
+            total_photos_required=total_p_req,
+            task_number=len(room_tasks)
         ))
 
     return room_details
@@ -345,12 +354,18 @@ async def _format_manager_cleaning_plan_detail(doc: dict, db, current_user: Opti
     workers_data = await _resolve_workers_data(worker_ids, db, assigned_workers_meta=doc.get("assigned_workers", []))
     manager_data = await _resolve_manager_data(manager_id, db, fallback_user=current_user)
 
-    # Format additional tasks & photos
-    add_tasks = _format_tasks_list(doc.get("additional_tasks", []))
-    add_photos = _format_photos_list(doc.get("additional_required_photos", []))
+    # Format additional tasks (with task-connected photos)
+    raw_add_tasks = doc.get("additional_tasks", []) or doc.get("tasks", [])
+    add_tasks = _format_tasks_list(raw_add_tasks)
 
-    t_cnt = doc.get("total_tasks_count") or (sum(len(r.tasks) for r in rooms_data) + len(add_tasks))
-    p_cnt = doc.get("total_photos_count") or (sum(len(r.required_photos) for r in rooms_data) + len(add_photos))
+    # Compute accurate task & photo counts
+    room_tasks_count = sum(len(r.tasks) for r in rooms_data)
+    room_photos_count = sum(sum(len(t.photo) for t in r.tasks) for r in rooms_data)
+    add_tasks_count = len(add_tasks)
+    add_photos_count = sum(len(t.photo) for t in add_tasks)
+
+    t_cnt = room_tasks_count + add_tasks_count
+    p_cnt = room_photos_count + add_photos_count
     dur_mins = doc.get("duration_minutes") or (sum(r.duration for r in rooms_data) if rooms_data else 60)
 
     working_days_val = doc.get("working_days") or doc.get("frequency") or []
@@ -384,7 +399,6 @@ async def _format_manager_cleaning_plan_detail(doc: dict, db, current_user: Opti
         workers=workers_data,
         workers_count=len(workers_data),
         additional_tasks=add_tasks,
-        additional_required_photos=add_photos,
         total_tasks_count=t_cnt,
         total_photos_count=p_cnt,
         date=date_val,
@@ -431,15 +445,16 @@ async def _format_manager_cleaning_plan_list_item(doc: dict, db) -> ManagerClean
         workers_found = await cursor_w.to_list(length=len(clean_wids) * 2)
         worker_names = [w.get("full_name") or w.get("name", "Worker") for w in workers_found]
 
-    t_cnt = doc.get("total_tasks_count", 0)
-    p_cnt = doc.get("total_photos_count", 0)
+    # Calculate task and photo counts
+    room_tasks_count = sum(len(r.tasks) for r in rooms_data)
+    room_photos_count = sum(sum(len(t.photo) for t in r.tasks) for r in rooms_data)
+    raw_add_tasks = doc.get("additional_tasks", []) or doc.get("tasks", [])
+    add_tasks = _format_tasks_list(raw_add_tasks)
+    add_tasks_count = len(add_tasks)
+    add_photos_count = sum(len(t.photo) for t in add_tasks)
 
-    # If count not stored in doc, calculate from room_ids + additional
-    if t_cnt == 0 or p_cnt == 0:
-        add_t = doc.get("additional_tasks", [])
-        add_p = doc.get("additional_required_photos", [])
-        t_cnt = sum(len(r.tasks) for r in rooms_data) + len(add_t)
-        p_cnt = sum(len(r.required_photos) for r in rooms_data) + len(add_p)
+    t_cnt = room_tasks_count + add_tasks_count
+    p_cnt = room_photos_count + add_photos_count
 
     dur_mins = doc.get("duration_minutes") or (sum(r.duration for r in rooms_data) if rooms_data else 60)
     working_days_val = doc.get("working_days") or doc.get("frequency") or []

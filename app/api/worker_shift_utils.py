@@ -206,15 +206,21 @@ def calculate_cleaning_plan_progress(plan_doc: dict, approved_photos_count: Opti
         completed_tasks += sum(1 for t in r_tasks if t.get("is_completed"))
 
         r_photos = r.get("required_photos", [])
-        total_photos += len(r_photos)
+        if r_photos:
+            total_photos += len(r_photos)
+        else:
+            total_photos += sum(len(t.get("photo", [])) for t in r_tasks)
 
     # Add additional tasks & photos if any
-    add_tasks = plan_doc.get("additional_tasks", [])
+    add_tasks = plan_doc.get("additional_tasks", []) or plan_doc.get("tasks", [])
     total_tasks += len(add_tasks)
     completed_tasks += sum(1 for t in add_tasks if t.get("is_completed"))
 
     add_photos = plan_doc.get("additional_required_photos", [])
-    total_photos += len(add_photos)
+    if add_photos:
+        total_photos += len(add_photos)
+    else:
+        total_photos += sum(len(t.get("photo", [])) for t in add_tasks)
 
     # Fallback to stored total counts if rooms checklist is not expanded
     if total_tasks == 0 and plan_doc.get("total_tasks_count", 0) > 0:

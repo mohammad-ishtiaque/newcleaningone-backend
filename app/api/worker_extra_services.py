@@ -165,27 +165,50 @@ async def upload_extra_service_photo(
 
     now = datetime.now(timezone.utc)
     photos = doc.get("required_photos", [])
+    tasks = doc.get("tasks", [])
 
     if photo_requirement_id:
+        # Check in task-level photos
+        for t in tasks:
+            for p in t.get("photo", []):
+                if str(p.get("id")) == str(photo_requirement_id):
+                    p["photo_url"] = url
+                    p["is_uploaded"] = True
+                    p["uploaded_at"] = now
+        # Check in standalone required_photos
         for p in photos:
             if str(p.get("id")) == str(photo_requirement_id):
                 p["photo_url"] = url
                 p["is_uploaded"] = True
                 p["uploaded_at"] = now
     else:
-        target_p = next((p for p in photos if not p.get("is_uploaded")), None)
-        if target_p:
-            target_p["photo_url"] = url
-            target_p["is_uploaded"] = True
-            target_p["uploaded_at"] = now
-        else:
-            photos.append({
-                "id": f"p_{uuid.uuid4().hex[:6]}",
-                "name": file.filename or "Uploaded Photo",
-                "photo_url": url,
-                "is_uploaded": True,
-                "uploaded_at": now
-            })
+        # First try to find unuploaded photo in tasks
+        matched = False
+        for t in tasks:
+            for p in t.get("photo", []):
+                if not p.get("is_uploaded"):
+                    p["photo_url"] = url
+                    p["is_uploaded"] = True
+                    p["uploaded_at"] = now
+                    matched = True
+                    break
+            if matched:
+                break
+
+        if not matched:
+            target_p = next((p for p in photos if not p.get("is_uploaded")), None)
+            if target_p:
+                target_p["photo_url"] = url
+                target_p["is_uploaded"] = True
+                target_p["uploaded_at"] = now
+            else:
+                photos.append({
+                    "id": f"p_{uuid.uuid4().hex[:6]}",
+                    "name": file.filename or "Uploaded Photo",
+                    "photo_url": url,
+                    "is_uploaded": True,
+                    "uploaded_at": now
+                })
 
     review_id = f"RV-{uuid.uuid4().hex[:6].upper()}"
     await db["photo_reviews"].insert_one({
@@ -221,7 +244,7 @@ async def upload_extra_service_photo(
 
     await db["extra_services"].update_one(
         {"$or": [{"_id": request_id}, {"id": request_id}]},
-        {"$set": {"required_photos": photos, "updated_at": now}}
+        {"$set": {"required_photos": photos, "tasks": tasks, "updated_at": now}}
     )
 
     updated_doc = await db["extra_services"].find_one({"$or": [{"_id": request_id}, {"id": request_id}]})

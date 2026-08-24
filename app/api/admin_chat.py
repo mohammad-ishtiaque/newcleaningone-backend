@@ -11,7 +11,8 @@ from app.services.chat_service import (
     get_user_id, format_conversation_list_item, format_conversation_detail,
     format_conversation, format_message, resolve_participant_profile,
     get_conversation_participants_details, add_conversation_participants,
-    remove_conversation_participant
+    remove_conversation_participant, get_or_create_worker_admin_conversation,
+    mark_conversation_read_shared_management
 )
 from app.schemas.chat import (
     ConversationCreate, ConversationResponse, ConversationListItemResponse,
@@ -26,7 +27,7 @@ base_chat_router = APIRouter()
 
 
 def require_manager(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
-    if current_user.role not in [RoleEnum.manager, RoleEnum.admin]:
+    if current_user.role not in [RoleEnum.manager, RoleEnum.admin, "manager", "admin"]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Manager or Admin role required")
     return current_user
 
@@ -46,9 +47,11 @@ async def list_admin_conversations(
 ):
     """
     List All Conversations Endpoint (Paginated).
+    Shows worker and client direct messages and group conversations.
     """
     db = get_database()
     admin_id = get_user_id(current_user)
+    viewer_role = str(getattr(current_user, "role", "manager")).lower()
 
     query = {}
 
@@ -60,27 +63,28 @@ async def list_admin_conversations(
                 {"type": "group"},
                 {"shift_id": {"$exists": True, "$ne": None, "$ne": ""}},
                 {"cleaning_plan_id": {"$exists": True, "$ne": None, "$ne": ""}},
-                {"participants.2": {"$exists": True}}
+                {
+                    "$and": [
+                        {"participants.role": "client"},
+                        {"participants.role": {"$in": ["worker", "employee", "cleaner"]}}
+                    ]
+                }
             ]
         elif t_clean in ["direct clients", "direct client", "direct_client", "client", "clients"]:
-            client_users = await db["users"].find({"role": "client"}, {"_id": 1, "id": 1}).to_list(length=500)
-            client_uids = [str(u.get("_id") or u.get("id")) for u in client_users]
             query["$and"] = [
                 {"type": {"$nin": ["group", "cleaning_plan_group"]}},
                 {"$or": [{"cleaning_plan_id": None}, {"cleaning_plan_id": ""}, {"cleaning_plan_id": {"$exists": False}}]},
                 {"$or": [{"shift_id": None}, {"shift_id": ""}, {"shift_id": {"$exists": False}}]},
-                {"participants.2": {"$exists": False}},
-                {"participants.user_id": {"$in": client_uids}}
+                {"participants.role": "client"},
+                {"participants.role": {"$nin": ["worker", "employee", "cleaner"]}}
             ]
         elif t_clean in ["direct worker", "direct_worker", "worker", "workers", "employee", "employees"]:
-            worker_users = await db["users"].find({"role": "worker"}, {"_id": 1, "id": 1}).to_list(length=500)
-            worker_uids = [str(u.get("_id") or u.get("id")) for u in worker_users]
             query["$and"] = [
                 {"type": {"$nin": ["group", "cleaning_plan_group"]}},
                 {"$or": [{"cleaning_plan_id": None}, {"cleaning_plan_id": ""}, {"cleaning_plan_id": {"$exists": False}}]},
                 {"$or": [{"shift_id": None}, {"shift_id": ""}, {"shift_id": {"$exists": False}}]},
-                {"participants.2": {"$exists": False}},
-                {"participants.user_id": {"$in": worker_uids}}
+                {"participants.role": {"$in": ["worker", "employee", "cleaner"]}},
+                {"participants.role": {"$ne": "client"}}
             ]
 
     # 2. Search filtering
@@ -88,6 +92,7 @@ async def list_admin_conversations(
         s_regex = {"$regex": str(search).strip(), "$options": "i"}
         search_or = [
             {"title": s_regex},
+            {"subtitle": s_regex},
             {"participants.name": s_regex},
             {"last_message.text": s_regex}
         ]
@@ -103,7 +108,7 @@ async def list_admin_conversations(
 
     cursor = db["conversations"].find(query).sort("updated_at", -1).skip(skip).limit(limit)
     raw_convs = await cursor.to_list(length=limit)
-    convs_res = [format_conversation_list_item(c, current_user_id=admin_id) for c in raw_convs]
+    convs_res = [format_conversation_list_item(c, current_user_id=admin_id, viewer_role=viewer_role) for c in raw_convs]
 
     has_more = (skip + len(convs_res)) < total_count
 
@@ -141,10 +146,21 @@ async def create_admin_conversation(
     """
     db = get_database()
     admin_id = get_user_id(current_user)
+    viewer_role = str(getattr(current_user, "role", "manager")).lower()
 
     incoming_p_ids = list(conv_in.participant_ids or [])
     if conv_in.target_user_id and conv_in.target_user_id not in incoming_p_ids:
         incoming_p_ids.append(conv_in.target_user_id)
+
+    # If targeting a worker, route to the unified worker-management direct thread
+    if len(incoming_p_ids) == 1:
+        target_uid = incoming_p_ids[0]
+        t_query = {"$or": [{"_id": ObjectId(target_uid)}, {"id": target_uid}, {"_id": target_uid}]} if ObjectId.is_valid(target_uid) else {"$or": [{"_id": target_uid}, {"id": target_uid}]}
+        t_user = await db["users"].find_one(t_query)
+        if t_user and str(t_user.get("role", "")).lower() in ["worker", "employee", "cleaner"]:
+            target_user_obj = UserInDB(**t_user)
+            doc = await get_or_create_worker_admin_conversation(db, target_user_obj, custom_title=conv_in.title, custom_subtitle=conv_in.subtitle)
+            return format_conversation(doc, current_user_id=admin_id, viewer_role=viewer_role)
 
     target_uids = list(set([admin_id] + incoming_p_ids))
 
@@ -155,7 +171,7 @@ async def create_admin_conversation(
             "participants.user_id": {"$all": [admin_id, other_id]}
         })
         if existing:
-            return format_conversation(existing, current_user_id=admin_id)
+            return format_conversation(existing, current_user_id=admin_id, viewer_role=viewer_role)
 
     participants = []
     for u_id in target_uids:
@@ -200,7 +216,7 @@ async def create_admin_conversation(
     }
 
     await db["conversations"].insert_one(doc)
-    return format_conversation(doc, current_user_id=admin_id)
+    return format_conversation(doc, current_user_id=admin_id, viewer_role=viewer_role)
 
 
 @base_chat_router.get(
@@ -218,10 +234,12 @@ async def get_admin_conversation_detail(
     """
     db = get_database()
     admin_id = get_user_id(current_user)
+    viewer_role = str(getattr(current_user, "role", "manager")).lower()
+
     doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
     if not doc:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return format_conversation_detail(doc, current_user_id=admin_id)
+    return format_conversation_detail(doc, current_user_id=admin_id, viewer_role=viewer_role)
 
 
 @base_chat_router.patch(
@@ -240,6 +258,8 @@ async def update_admin_conversation(
     """
     db = get_database()
     admin_id = get_user_id(current_user)
+    viewer_role = str(getattr(current_user, "role", "manager")).lower()
+
     doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
     if not doc:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -275,7 +295,7 @@ async def update_admin_conversation(
         except Exception:
             pass
 
-    return format_conversation_detail(doc, current_user_id=admin_id)
+    return format_conversation_detail(doc, current_user_id=admin_id, viewer_role=viewer_role)
 
 
 @base_chat_router.delete(
@@ -407,7 +427,9 @@ async def get_admin_participant_profile(
     if not target_user_id:
         conv_doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
         if conv_doc and "participants" in conv_doc:
-            other = next((p for p in conv_doc["participants"] if str(p.get("user_id")) != admin_id), None)
+            other = next((p for p in conv_doc["participants"] if str(p.get("user_id")) != admin_id and str(p.get("role", "")).lower() not in ["admin", "manager"]), None)
+            if not other:
+                other = next((p for p in conv_doc["participants"] if str(p.get("user_id")) != admin_id), None)
             if other:
                 target_user_id = str(other.get("user_id"))
 
@@ -472,6 +494,17 @@ async def send_admin_message(
     """
     db = get_database()
     admin_id = get_user_id(current_user)
+
+    conv_doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
+    if not conv_doc:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    participant_uids = [str(p.get("user_id")) for p in conv_doc.get("participants", []) if p.get("user_id")]
+
+    content_clean = (msg_in.content or "").strip()
+    if not content_clean and not msg_in.attachment_url:
+        raise HTTPException(status_code=400, detail="Message content or attachment_url is required")
+
     now = datetime.now(timezone.utc)
     msg_id = f"msg_{uuid.uuid4().hex[:10]}"
 
@@ -482,26 +515,34 @@ async def send_admin_message(
     msg_doc = {
         "_id": msg_id,
         "id": msg_id,
-        "conversation_id": conversation_id,
+        "conversation_id": str(conv_doc.get("_id") or conv_doc.get("id")),
         "sender_id": admin_id,
         "sender_name": sender_name,
         "sender_role": sender_role,
         "sender_avatar": getattr(current_user, "profile_photo", None),
-        "content": msg_in.content,
+        "content": content_clean,
         "attachment_url": msg_in.attachment_url,
         "attachment_type": msg_in.attachment_type,
         "status": "sent",
-        "read_by": [{"user_id": admin_id, "read_at": now}],
+        "read_by": [{
+            "user_id": admin_id,
+            "name": sender_name,
+            "role": sender_role,
+            "profile_picture": getattr(current_user, "profile_photo", None),
+            "read_at": now
+        }],
         "created_at": now,
         "updated_at": now
     }
 
     await db["chat_messages"].insert_one(msg_doc)
 
-    last_text = msg_in.content if msg_in.content else "[Attachment]"
-    await db["conversations"].update_one(
-        {"$or": [{"_id": conversation_id}, {"id": conversation_id}]},
-        {"$set": {
+    last_text = content_clean if content_clean else "[Attachment]"
+    other_uids = [uid for uid in participant_uids if uid != admin_id]
+    inc_unreads = {f"unread_counts.{uid}": 1 for uid in other_uids}
+
+    update_payload = {
+        "$set": {
             "last_message": {
                 "text": last_text,
                 "sender_id": admin_id,
@@ -509,14 +550,18 @@ async def send_admin_message(
                 "timestamp": now.strftime("%I:%M %p")
             },
             "updated_at": now
-        }}
+        }
+    }
+    if inc_unreads:
+        update_payload["$inc"] = inc_unreads
+
+    await db["conversations"].update_one(
+        {"_id": conv_doc["_id"]},
+        update_payload
     )
 
-    from app.services.chat_ws_service import (
-        broadcast_new_message, broadcast_message_edited,
-        broadcast_message_deleted, broadcast_messages_read
-    )
-    await broadcast_new_message(db, conversation_id, msg_doc)
+    from app.services.chat_ws_service import broadcast_new_message
+    await broadcast_new_message(db, str(conv_doc["_id"]), msg_doc)
 
     return format_message(msg_doc)
 
@@ -540,10 +585,14 @@ async def edit_admin_message(
     if not msg_doc:
         raise HTTPException(status_code=404, detail="Message not found")
 
+    content_clean = (msg_in.content or "").strip()
+    if not content_clean:
+        raise HTTPException(status_code=400, detail="Message content cannot be empty")
+
     now = datetime.now(timezone.utc)
     await db["chat_messages"].update_one(
         {"$or": [{"_id": message_id}, {"id": message_id}]},
-        {"$set": {"content": msg_in.content, "updated_at": now}}
+        {"$set": {"content": content_clean, "updated_at": now}}
     )
 
     updated = await db["chat_messages"].find_one({"$or": [{"_id": message_id}, {"id": message_id}]})
@@ -585,7 +634,7 @@ async def delete_admin_message(
 @base_chat_router.post(
     "/conversations/{conversation_id}/read",
     summary="Mark Messages as Seen",
-    description="Marks all messages in the conversation as read/seen for Admin or Manager."
+    description="Marks all messages in the conversation as read/seen for Admin and Manager team (Shared Inbox Read)."
 )
 async def mark_admin_messages_read(
     conversation_id: str,
@@ -595,23 +644,7 @@ async def mark_admin_messages_read(
     Mark Messages as Read Endpoint.
     """
     db = get_database()
-    admin_id = get_user_id(current_user)
-    now = datetime.now(timezone.utc)
-
-    await db["chat_messages"].update_many(
-        {"conversation_id": conversation_id, "read_by.user_id": {"$ne": admin_id}},
-        {"$push": {"read_by": {"user_id": admin_id, "read_at": now}}}
-    )
-
-    await db["conversations"].update_one(
-        {"$or": [{"_id": conversation_id}, {"id": conversation_id}]},
-        {"$set": {f"unread_counts.{admin_id}": 0}}
-    )
-
-    from app.services.chat_ws_service import broadcast_messages_read
-    await broadcast_messages_read(db, conversation_id, admin_id, now.isoformat())
-
-    return {"message": "Messages marked as read"}
+    return await mark_conversation_read_shared_management(db, conversation_id, current_user)
 
 
 @base_chat_router.post(
@@ -656,4 +689,3 @@ admin_chat_router.include_router(base_chat_router)
 
 # Default alias for backwards compatibility
 router = manager_chat_router
-

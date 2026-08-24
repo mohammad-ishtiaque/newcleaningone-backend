@@ -15,6 +15,13 @@ class LastMessageInfo(BaseModel):
     sender_name: str
     timestamp: str
 
+class ReadByInfo(BaseModel):
+    user_id: str
+    name: Optional[str] = None
+    role: Optional[str] = None
+    profile_picture: Optional[str] = None
+    read_at: datetime
+
 class ConversationCreate(BaseModel):
     type: Optional[str] = Field(default="direct", json_schema_extra={"example": "direct"})
     target_user_id: Optional[str] = Field(None, json_schema_extra={"example": "admin_123"})
@@ -35,6 +42,7 @@ class ConversationListItemResponse(BaseModel):
     participants_count: int = 0
     last_message: Optional[LastMessageInfo] = None
     unread_count: int = 0
+    seen_by_management: List[ReadByInfo] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -50,14 +58,11 @@ class ConversationDetailResponse(BaseModel):
     participants: List[ParticipantInfo] = Field(default_factory=list)
     last_message: Optional[LastMessageInfo] = None
     unread_count: int = 0
+    seen_by_management: List[ReadByInfo] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
-ConversationResponse = ConversationDetailResponse
-
-class ReadByInfo(BaseModel):
-    user_id: str
-    read_at: datetime
+ConversationResponse = ConversationListItemResponse
 
 class MessageCreate(BaseModel):
     content: str = Field(..., json_schema_extra={"example": "Hello! I have a question about my schedule."})
@@ -148,6 +153,3 @@ class DeleteConversationResponse(BaseModel):
 
 class PaginatedConversationsResponse(BasePaginatedResponse):
     conversations: List[ConversationListItemResponse] = Field(default_factory=list)
-
-
-

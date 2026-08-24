@@ -13,8 +13,7 @@ from app.schemas.client_list import (
     CleaningPlanRoomDropdownItem, CleaningPlanRoomDropdownPaginatedResponse,
     CleaningPlanWorkerDropdownItem, CleaningPlanWorkerDropdownPaginatedResponse,
     AssignWorkersToCleaningPlanRequest,
-    CleaningTaskCreate, CleaningTaskResponse,
-    RequiredPhotoCreate, RequiredPhotoResponse
+    CleaningTaskCreate, CleaningTaskResponse
 )
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
@@ -45,24 +44,31 @@ cleaning_plan_mgmt_router = APIRouter(prefix="/manager", tags=["Manager Cleaning
     summary="Create Cleaning Plan",
     description="""
 ### Create Cleaning Plan / Recurring Shift (Draft)
-Creates a cleaning plan / shift draft with automated duration calculation, multi-client aggregation, and auto-computed end time.
+Creates a cleaning plan / shift draft with automated duration calculation, single-client enforcement, and unified task & photo hierarchy.
 
-**Key Parameters**:
-- `title`: Plan title
-- `room_ids`: List of room IDs across multiple clients
-- `date`: Base shift date (`MM/DD/YYYY` or `YYYY-MM-DD`)
-- `start_time`: e.g. `08:00 AM` (auto-computes `end_time`)
-- `repeat_shift`: `Does not repeat`, `Every day`, `Standard working week`, `Weekly`, `Monthly`
-- `repeat_until`: Optional recurrence end date
-- `working_days`: Active shift days (e.g. `["sun"]` for Monthly Sunday cleaning)
-- `shift_notes`: Shift notes and instructions
-- `additional_tasks`, `additional_required_photos`: Extra tasks and photos outside room defaults
+#### Supported Field Values & Options:
+- **`repeat_shift`**: `"Does not repeat"`, `"Every day"`, `"Standard working week"`, `"Weekly"`, `"Monthly"`
+- **`working_days`**: `["mon", "tue", "wed", "thu", "fri", "sat", "sun"]` (e.g. `["sun"]` for Monthly Sunday deep cleaning)
+- **`additional_tasks[].frequency_type`**: `"every_visit"`, `"weekly"`, `"monthly"`, `"yearly"`
+- **`additional_tasks[].is_photo_req`**: `true` | `false` (automatically set to `true` when `photo` list is provided)
+- **`additional_tasks[].photo`**: List of required photo requirements attached directly to this specific task, e.g.:
+  ```json
+  "photo": [
+    {"name": "After Deep Floor scrubbing"},
+    {"name": "Before Deep Floor scrubbing"}
+  ]
+  ```
+- **`start_time`**: e.g. `"08:00 AM"` (automatically computes `end_time` using aggregated room durations)
+- **`room_ids`**: List of valid room IDs belonging to a single client (e.g. `["room_a366ecf17c", "room_848a13ff0c"]`)
 """
 )
 async def create_manager_cleaning_plan(
     plan_in: ManagerCleaningPlanCreate,
     current_user: UserInDB = Depends(require_manager)
 ):
+    """
+    Create Cleaning Plan Endpoint.
+    """
     db = get_database()
 
     # 1. Dedup room IDs while preserving input order
@@ -117,26 +123,35 @@ async def create_manager_cleaning_plan(
         if duration_minutes == 0:
             duration_minutes = 60
 
-    # 4. Process additional tasks and photos with assigned IDs
+    # 5. Process additional tasks with embedded photos and IDs
     add_tasks_dicts = []
     for t in (plan_in.additional_tasks or []):
-        t_dict = t.model_dump()
+        t_dict = t.model_dump() if hasattr(t, "model_dump") else dict(t)
         if not t_dict.get("id"):
             t_dict["id"] = uuid.uuid4().hex[:8]
+
+        raw_photos = t_dict.get("photo") or []
+        processed_photos = []
+        for p in raw_photos:
+            p_dict = p if isinstance(p, dict) else (p.model_dump() if hasattr(p, "model_dump") else {"name": str(p)})
+            if not p_dict.get("id"):
+                p_dict["id"] = uuid.uuid4().hex[:8]
+            processed_photos.append(p_dict)
+        t_dict["photo"] = processed_photos
+        if processed_photos and not t_dict.get("is_photo_req"):
+            t_dict["is_photo_req"] = True
         add_tasks_dicts.append(t_dict)
 
-    add_photos_dicts = []
-    for p in (plan_in.additional_required_photos or []):
-        p_dict = p.model_dump()
-        if not p_dict.get("id"):
-            p_dict["id"] = uuid.uuid4().hex[:8]
-        add_photos_dicts.append(p_dict)
+    # 6. Calculate total tasks and photos across rooms and additional tasks
+    room_tasks_count = sum(len(r.tasks) for r in rooms_data)
+    room_photos_count = sum(sum(len(t.photo) for t in r.tasks) for r in rooms_data)
+    add_tasks_count = len(add_tasks_dicts)
+    add_photos_count = sum(len(t.get("photo", [])) for t in add_tasks_dicts)
 
-    # 5. Calculate total tasks and photos
-    total_tasks_count = sum(len(r.tasks) for r in rooms_data) + len(add_tasks_dicts)
-    total_photos_count = sum(len(r.required_photos) for r in rooms_data) + len(add_photos_dicts)
+    total_tasks_count = room_tasks_count + add_tasks_count
+    total_photos_count = room_photos_count + add_photos_count
 
-    # 6. Frequency days & Repeat shift
+    # 7. Frequency days & Repeat shift
     date_val = plan_in.date or "2026-08-17"
     repeat_shift_val = plan_in.repeat_shift or "Standard working week"
     working_days = resolve_plan_working_days(
@@ -180,7 +195,6 @@ async def create_manager_cleaning_plan(
         "duration_minutes": duration_minutes,
         "timezone": plan_in.timezone or "Europe/Amsterdam",
         "additional_tasks": add_tasks_dicts,
-        "additional_required_photos": add_photos_dicts,
         "total_tasks_count": total_tasks_count,
         "total_photos_count": total_photos_count,
         "status": "draft",
@@ -202,7 +216,12 @@ async def create_manager_cleaning_plan(
 @cleaning_plan_mgmt_router.get(
     "/cleaning-plans",
     response_model=ManagerCleaningPlanPaginatedResponse,
-    summary="List Cleaning Plans"
+    summary="List Cleaning Plans",
+    description="""
+### List Cleaning Plans (Paginated)
+Retrieves paginated cleaning plans with filtering by `client_id`, `location_id`, `room_id`, `worker_id`, or text `search`.
+Computes aggregate room counts, worker counts, `total_tasks_count`, and `total_photos_count`.
+"""
 )
 async def list_manager_cleaning_plans(
     client_id: Optional[str] = None,
@@ -214,6 +233,9 @@ async def list_manager_cleaning_plans(
     limit: int = 10,
     current_user: UserInDB = Depends(require_manager)
 ):
+    """
+    List Cleaning Plans Endpoint.
+    """
     db = get_database()
     query = {}
     if client_id:
@@ -259,12 +281,19 @@ async def list_manager_cleaning_plans(
 @cleaning_plan_mgmt_router.get(
     "/cleaning-plans/{plan_id}",
     response_model=ManagerCleaningPlanDetailResponse,
-    summary="Get Full Cleaning Plan Details"
+    summary="Get Full Cleaning Plan Details",
+    description="""
+### Get Full Cleaning Plan Details
+Returns complete cleaning plan details including assigned rooms, room tasks, custom additional tasks, task-level photo requirements, client company profile, and manager info.
+"""
 )
 async def get_manager_cleaning_plan_detail(
     plan_id: str,
     current_user: UserInDB = Depends(require_manager)
 ):
+    """
+    Get Full Cleaning Plan Details Endpoint.
+    """
     db = get_database()
     plan_doc = await db["cleaning_plans"].find_one({"$or": [{"_id": plan_id}, {"id": plan_id}]})
     if not plan_doc:
@@ -276,13 +305,21 @@ async def get_manager_cleaning_plan_detail(
 @cleaning_plan_mgmt_router.patch(
     "/cleaning-plans/{plan_id}",
     response_model=ManagerCleaningPlanDetailResponse,
-    summary="Update Cleaning Plan"
+    summary="Update Cleaning Plan",
+    description="""
+### Update Cleaning Plan
+Updates cleaning plan title, shift notes, rooms, schedule, working days, or additional tasks with embedded photos.
+Automatically recalculates duration, end time, and task/photo counts.
+"""
 )
 async def update_manager_cleaning_plan(
     plan_id: str,
     plan_in: ManagerCleaningPlanUpdate,
     current_user: UserInDB = Depends(require_manager)
 ):
+    """
+    Update Cleaning Plan Endpoint.
+    """
     db = get_database()
     query = {"$or": [{"_id": plan_id}, {"id": plan_id}]}
     plan_doc = await db["cleaning_plans"].find_one(query)
@@ -310,7 +347,27 @@ async def update_manager_cleaning_plan(
         else:
             update_fields.pop("description", None)
 
-    # Re-calculate counts if room_ids or additional tasks/photos changed
+    # Process updated additional tasks if supplied
+    if "additional_tasks" in update_fields and isinstance(update_fields["additional_tasks"], list):
+        processed_add_tasks = []
+        for t in update_fields["additional_tasks"]:
+            t_dict = t if isinstance(t, dict) else (t.model_dump() if hasattr(t, "model_dump") else dict(t))
+            if not t_dict.get("id"):
+                t_dict["id"] = uuid.uuid4().hex[:8]
+            raw_photos = t_dict.get("photo") or []
+            processed_photos = []
+            for p in raw_photos:
+                p_dict = p if isinstance(p, dict) else (p.model_dump() if hasattr(p, "model_dump") else {"name": str(p)})
+                if not p_dict.get("id"):
+                    p_dict["id"] = uuid.uuid4().hex[:8]
+                processed_photos.append(p_dict)
+            t_dict["photo"] = processed_photos
+            if processed_photos and not t_dict.get("is_photo_req"):
+                t_dict["is_photo_req"] = True
+            processed_add_tasks.append(t_dict)
+        update_fields["additional_tasks"] = processed_add_tasks
+
+    # Re-calculate counts if room_ids changed
     if "room_ids" in update_fields and isinstance(update_fields["room_ids"], list):
         deduped_room_ids = list(dict.fromkeys([str(r).strip() for r in update_fields["room_ids"] if str(r).strip()]))
         if not deduped_room_ids:
@@ -345,10 +402,14 @@ async def update_manager_cleaning_plan(
         rooms_data = await _resolve_rooms_data(merged_room_ids, db)
 
     merged_add_tasks = update_fields.get("additional_tasks", plan_doc.get("additional_tasks", []))
-    merged_add_photos = update_fields.get("additional_required_photos", plan_doc.get("additional_required_photos", []))
 
-    update_fields["total_tasks_count"] = sum(len(r.tasks) for r in rooms_data) + len(merged_add_tasks)
-    update_fields["total_photos_count"] = sum(len(r.required_photos) for r in rooms_data) + len(merged_add_photos)
+    room_tasks_count = sum(len(r.tasks) for r in rooms_data)
+    room_photos_count = sum(sum(len(t.photo) for t in r.tasks) for r in rooms_data)
+    add_tasks_count = len(merged_add_tasks)
+    add_photos_count = sum(len(t.get("photo", [])) for t in merged_add_tasks)
+
+    update_fields["total_tasks_count"] = room_tasks_count + add_tasks_count
+    update_fields["total_photos_count"] = room_photos_count + add_photos_count
 
     # Recalculate duration and end_time
     if "duration_minutes" not in update_fields:
@@ -369,12 +430,19 @@ async def update_manager_cleaning_plan(
 @cleaning_plan_mgmt_router.delete(
     "/cleaning-plans/{plan_id}",
     status_code=status.HTTP_200_OK,
-    summary="Delete Cleaning Plan"
+    summary="Delete Cleaning Plan",
+    description="""
+### Delete Cleaning Plan
+Deletes a cleaning plan and decrements the cleaning plans counter on the associated location.
+"""
 )
 async def delete_manager_cleaning_plan(
     plan_id: str,
     current_user: UserInDB = Depends(require_manager)
 ):
+    """
+    Delete Cleaning Plan Endpoint.
+    """
     db = get_database()
     query = {"$or": [{"_id": plan_id}, {"id": plan_id}]}
     plan_doc = await db["cleaning_plans"].find_one(query)
@@ -418,21 +486,6 @@ Assigns one or more workers to a cleaning plan with assigned positions (`teamlea
 
 #### Path Parameter:
 - **`plan_id`** (`str`, **Required**): Target cleaning plan ID.
-
-#### Request Body:
-```json
-{
-  "workers": [
-    {"worker_id": "w_101", "position": "teamleader"},
-    {"worker_id": "w_102", "position": "co_leader"},
-    {"worker_id": "w_103", "position": "normal"}
-  ],
-  "action": "append"
-}
-```
-
-#### Query Parameter:
-- **`force`** (`bool`, *Optional*, default: `true`): If `false`, strictly prevents assignment if any selected worker has a time conflict.
 """
 )
 async def assign_workers_to_cleaning_plan(
@@ -441,6 +494,9 @@ async def assign_workers_to_cleaning_plan(
     force: bool = True,
     current_user: UserInDB = Depends(require_manager)
 ):
+    """
+    Assign Workers to Cleaning Plan Endpoint.
+    """
     db = get_database()
     query = {"$or": [{"_id": plan_id}, {"id": plan_id}]}
     plan_doc = await db["cleaning_plans"].find_one(query)
@@ -506,7 +562,6 @@ async def assign_workers_to_cleaning_plan(
     final_assigned_map = {}  # worker_id -> position
 
     if action == "append":
-        # Keep existing workers and their positions
         existing_assigned = plan_doc.get("assigned_workers", [])
         if isinstance(existing_assigned, list) and existing_assigned:
             for ew in existing_assigned:
@@ -515,12 +570,10 @@ async def assign_workers_to_cleaning_plan(
                     if ew_id:
                         final_assigned_map[ew_id] = ew.get("position", "normal")
         else:
-            # Fallback to existing worker_ids
             for ew_id in plan_doc.get("worker_ids", []):
                 if str(ew_id).strip():
                     final_assigned_map[str(ew_id).strip()] = "normal"
 
-    # Apply/overwrite with new worker assignments
     final_assigned_map.update(filtered_new_map)
 
     final_worker_ids = list(final_assigned_map.keys())
@@ -562,5 +615,3 @@ async def assign_workers_to_cleaning_plan(
         print(f"Error sending assignment notifications: {e}")
 
     return await _format_manager_cleaning_plan_detail(updated_doc, db, current_user=current_user)
-
-

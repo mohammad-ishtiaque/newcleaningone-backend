@@ -9,7 +9,7 @@ from app.dependencies.auth import get_current_user
 from app.models.user import UserInDB, RoleEnum
 from app.services.chat_service import (
     get_user_id, format_conversation, format_message, resolve_participant_profile,
-    sync_shift_group_conversation
+    sync_shift_group_conversation, mark_conversation_read_shared_management
 )
 from app.schemas.chat import (
     ConversationCreate, ConversationResponse, MessageCreate, MessageUpdate,
@@ -81,7 +81,8 @@ async def list_user_conversations(
     cursor = db["conversations"].find(query).sort("updated_at", -1)
     raw_convs = await cursor.to_list(length=100)
 
-    return [format_conversation(c, current_user_id=user_id) for c in raw_convs]
+    viewer_role = str(getattr(current_user, "role", "worker")).lower()
+    return [format_conversation(c, current_user_id=user_id, viewer_role=viewer_role) for c in raw_convs]
 
 
 @router.post("/conversations", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED, summary="Create or Get Conversation")
@@ -96,6 +97,7 @@ async def create_or_get_conversation(
     db = get_database()
     user_id = get_user_id(current_user)
     now = datetime.now(timezone.utc)
+    viewer_role = str(getattr(current_user, "role", "worker")).lower()
 
     if conv_in.type == "direct":
         target_id = conv_in.target_user_id
@@ -108,7 +110,7 @@ async def create_or_get_conversation(
             "participants.user_id": {"$all": [user_id, target_id]}
         })
         if existing:
-            return format_conversation(existing, current_user_id=user_id)
+            return format_conversation(existing, current_user_id=user_id, viewer_role=viewer_role)
 
         target_query = {"$or": [{"_id": target_id}, {"id": target_id}]}
         if ObjectId.is_valid(target_id):
@@ -136,7 +138,7 @@ async def create_or_get_conversation(
             "updated_at": now
         }
         await db["conversations"].insert_one(doc)
-        return format_conversation(doc, current_user_id=user_id)
+        return format_conversation(doc, current_user_id=user_id, viewer_role=viewer_role)
     else:
         shift_id = conv_in.shift_id
         if not shift_id:
@@ -145,7 +147,7 @@ async def create_or_get_conversation(
         if not shift_doc:
             raise HTTPException(status_code=404, detail="Shift not found for group conversation")
         doc = await sync_shift_group_conversation(db, shift_doc)
-        return format_conversation(doc, current_user_id=user_id)
+        return format_conversation(doc, current_user_id=user_id, viewer_role=viewer_role)
 
 
 @router.get("/conversations/{conversation_id}", response_model=ConversationResponse, summary="Get Conversation Details")
@@ -158,10 +160,11 @@ async def get_conversation_detail(
     """
     db = get_database()
     user_id = get_user_id(current_user)
+    viewer_role = str(getattr(current_user, "role", "worker")).lower()
     doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
     if not doc:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return format_conversation(doc, current_user_id=user_id)
+    return format_conversation(doc, current_user_id=user_id, viewer_role=viewer_role)
 
 
 @router.get("/conversations/{conversation_id}/participant-profile", response_model=ParticipantProfileResponse, summary="Participant Profile Sidebar")
@@ -287,9 +290,12 @@ async def send_message(
     last_text = msg_in.content if msg_in.content else "[Attachment]"
     conv = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
     if conv:
-        await db["conversations"].update_one(
-            {"_id": conv["_id"]},
-            {"$set": {
+        participant_uids = [str(p.get("user_id")) for p in conv.get("participants", []) if p.get("user_id")]
+        other_uids = [uid for uid in participant_uids if uid != user_id]
+        inc_unreads = {f"unread_counts.{uid}": 1 for uid in other_uids}
+
+        update_payload = {
+            "$set": {
                 "last_message": {
                     "text": last_text,
                     "sender_id": user_id,
@@ -297,11 +303,17 @@ async def send_message(
                     "timestamp": now.strftime("%I:%M %p")
                 },
                 "updated_at": now
-            }}
+            }
+        }
+        if inc_unreads:
+            update_payload["$inc"] = inc_unreads
+
+        await db["conversations"].update_one(
+            {"_id": conv["_id"]},
+            update_payload
         )
-        participant_ids = [str(p.get("user_id")) for p in conv.get("participants", []) if str(p.get("user_id")) != user_id]
-        formatted_msg = format_message(msg_doc)
-        await ws_manager.broadcast_to_users(formatted_msg.model_dump(mode="json"), participant_ids)
+        from app.services.chat_ws_service import broadcast_new_message
+        await broadcast_new_message(db, str(conv["_id"]), msg_doc)
 
     return format_message(msg_doc)
 
@@ -320,10 +332,14 @@ async def edit_message(
     if not msg_doc:
         raise HTTPException(status_code=404, detail="Message not found")
 
+    content_clean = (msg_in.content or "").strip()
+    if not content_clean:
+        raise HTTPException(status_code=400, detail="Message content cannot be empty")
+
     now = datetime.now(timezone.utc)
     await db["chat_messages"].update_one(
         {"$or": [{"_id": message_id}, {"id": message_id}]},
-        {"$set": {"content": msg_in.content, "updated_at": now}}
+        {"$set": {"content": content_clean, "updated_at": now}}
     )
 
     updated = await db["chat_messages"].find_one({"$or": [{"_id": message_id}, {"id": message_id}]})
@@ -356,20 +372,7 @@ async def mark_messages_read(
     Mark Messages as Seen Endpoint.
     """
     db = get_database()
-    user_id = get_user_id(current_user)
-    now = datetime.now(timezone.utc)
-
-    await db["chat_messages"].update_many(
-        {"conversation_id": conversation_id, "read_by.user_id": {"$ne": user_id}},
-        {"$push": {"read_by": {"user_id": user_id, "read_at": now}}}
-    )
-
-    await db["conversations"].update_one(
-        {"$or": [{"_id": conversation_id}, {"id": conversation_id}]},
-        {"$set": {f"unread_counts.{user_id}": 0}}
-    )
-
-    return {"message": "Messages marked as read"}
+    return await mark_conversation_read_shared_management(db, conversation_id, current_user)
 
 
 @router.websocket("/ws/{user_id}")
@@ -387,7 +390,7 @@ async def websocket_chat_endpoint(websocket: WebSocket, user_id: str):
 
             if event_type == "send_message":
                 c_id = data.get("conversation_id")
-                content = data.get("content")
+                content = (data.get("content") or "").strip()
                 att_url = data.get("attachment_url")
                 att_type = data.get("attachment_type")
                 if c_id and (content or att_url):
@@ -419,35 +422,41 @@ async def websocket_chat_endpoint(websocket: WebSocket, user_id: str):
                     await db["chat_messages"].insert_one(msg_doc)
 
                     last_text = content if content else "[Attachment]"
-                    await db["conversations"].update_one(
-                        {"$or": [{"_id": c_id}, {"id": c_id}]},
-                        {"$set": {
-                            "last_message": {
-                                "text": last_text,
-                                "sender_id": str(user_id),
-                                "sender_name": sender_name,
-                                "timestamp": now.strftime("%I:%M %p")
-                            },
-                            "updated_at": now
-                        }}
-                    )
+                    conv_doc = await db["conversations"].find_one({"$or": [{"_id": c_id}, {"id": c_id}]})
+                    if conv_doc:
+                        participant_uids = [str(p.get("user_id")) for p in conv_doc.get("participants", []) if p.get("user_id")]
+                        other_uids = [uid for uid in participant_uids if uid != str(user_id)]
+                        inc_unreads = {f"unread_counts.{uid}": 1 for uid in other_uids}
+
+                        update_payload = {
+                            "$set": {
+                                "last_message": {
+                                    "text": last_text,
+                                    "sender_id": str(user_id),
+                                    "sender_name": sender_name,
+                                    "timestamp": now.strftime("%I:%M %p")
+                                },
+                                "updated_at": now
+                            }
+                        }
+                        if inc_unreads:
+                            update_payload["$inc"] = inc_unreads
+
+                        await db["conversations"].update_one(
+                            {"_id": conv_doc["_id"]},
+                            update_payload
+                        )
                     from app.services.chat_ws_service import broadcast_new_message
                     await broadcast_new_message(db, c_id, msg_doc)
 
             elif event_type == "read":
                 c_id = data.get("conversation_id")
                 if c_id:
-                    now = datetime.now(timezone.utc)
-                    await db["chat_messages"].update_many(
-                        {"conversation_id": c_id, "read_by.user_id": {"$ne": user_id}},
-                        {"$push": {"read_by": {"user_id": user_id, "read_at": now}}}
-                    )
-                    await db["conversations"].update_one(
-                        {"$or": [{"_id": c_id}, {"id": c_id}]},
-                        {"$set": {f"unread_counts.{user_id}": 0}}
-                    )
-                    from app.services.chat_ws_service import broadcast_messages_read
-                    await broadcast_messages_read(db, c_id, user_id, now.isoformat())
+                    u_query = {"$or": [{"_id": ObjectId(user_id)}, {"id": user_id}]} if ObjectId.is_valid(user_id) else {"_id": user_id}
+                    u_doc = await db["users"].find_one(u_query)
+                    if u_doc:
+                        u_obj = UserInDB(**u_doc)
+                        await mark_conversation_read_shared_management(db, c_id, u_obj)
 
             elif event_type == "typing":
                 c_id = data.get("conversation_id")

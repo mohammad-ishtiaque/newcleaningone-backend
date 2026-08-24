@@ -8,256 +8,336 @@ from app.schemas.chat import (
     ParticipantInfo, LastMessageInfo, MessageResponse, ReadByInfo, ParticipantProfileResponse,
     ParticipantDetailItem, ConversationParticipantsResponse
 )
+from app.services.chat_formatters import (
+    get_user_id, build_user_id_or_query, build_user_map, resolve_conversation_type,
+    _extract_conv_base, format_conversation_list_item, format_conversation_detail,
+    format_conversation, format_message, resolve_participant_profile,
+    get_conversation_participants_details
+)
 
-def get_user_id(user: UserInDB) -> str:
-    """Helper to extract string user ID cleanly."""
-    return str(getattr(user, "id", None) or getattr(user, "_id", None) or getattr(user, "mongo_id", None) or "user_default")
 
-def build_user_id_or_query(user_ids: List[str]) -> List[dict]:
-    """Builds MongoDB query clauses to match string IDs or ObjectIds."""
-    clean_ids = [str(u).strip() for u in user_ids if str(u).strip()]
-    obj_ids = [ObjectId(u) for u in clean_ids if ObjectId.is_valid(u)]
-    clauses = [{"id": {"$in": clean_ids}}, {"_id": {"$in": clean_ids}}]
-    if obj_ids:
-        clauses.append({"_id": {"$in": obj_ids}})
-    return clauses
-
-def build_user_map(users: List[dict]) -> dict:
-    """Builds dual lookup map by string ObjectId and string id."""
-    mapping = {}
-    for u in users:
-        if "_id" in u:
-            mapping[str(u["_id"])] = u
-        if "id" in u and u["id"]:
-            mapping[str(u["id"])] = u
-    return mapping
-
-def resolve_conversation_type(doc: dict, current_user_id: Optional[str] = None) -> str:
+async def get_or_create_worker_admin_conversation(
+    db,
+    worker_user: UserInDB,
+    custom_title: Optional[str] = None,
+    custom_subtitle: Optional[str] = None
+) -> dict:
     """
-    Dynamically determines conversation type:
-    - 'Group': group type, cleaning plan group, shift group, or > 2 participants
-    - 'Direct clients': 1-1 conversation with a Client
-    - 'direct worker': 1-1 conversation with a Worker / Cleaner
+    Creates or retrieves the unified Direct Management conversation for a Worker.
+    Includes the Worker and all active Admins & Managers.
+    Idempotent: Re-calling always returns the existing conversation thread.
     """
-    raw_type = str(doc.get("type", "direct")).strip().lower()
-    raw_participants = doc.get("participants", [])
+    worker_id = get_user_id(worker_user)
+    worker_name = getattr(worker_user, "full_name", None) or getattr(worker_user, "name", "Worker")
+    worker_pic = getattr(worker_user, "profile_photo", None) or getattr(worker_user, "profile_picture", None)
 
-    if raw_type in ["group", "cleaning_plan_group"] or doc.get("shift_id") or doc.get("cleaning_plan_id") or len(raw_participants) > 2:
-        return "Group"
+    # 1. Fetch all active Admins & Managers from database
+    admin_mgr_cursor = db["users"].find({
+        "role": {"$in": ["admin", "manager", RoleEnum.admin, RoleEnum.manager]},
+        "is_active": True
+    })
+    admin_mgr_users = await admin_mgr_cursor.to_list(length=100)
 
-    other_participants = [p for p in raw_participants if str(p.get("user_id")) != str(current_user_id)] if current_user_id else raw_participants
-    if not other_participants and raw_participants:
-        other_participants = raw_participants
+    participants = [{
+        "user_id": worker_id,
+        "name": worker_name,
+        "role": "worker",
+        "profile_picture": worker_pic
+    }]
 
-    has_client = any(str(p.get("role", "")).lower() == "client" for p in other_participants)
-    has_worker = any(str(p.get("role", "")).lower() in ["worker", "employee", "cleaner"] for p in other_participants)
-
-    if has_client and not has_worker:
-        return "Direct clients"
-    elif has_worker and not has_client:
-        return "direct worker"
-    elif has_client and has_worker:
-        return "Group"
-    elif raw_type in ["direct_client", "client", "direct clients"]:
-        return "Direct clients"
-    elif raw_type in ["direct_worker", "worker", "employee", "direct worker"]:
-        return "direct worker"
-
-    return "direct worker"
-
-
-def _extract_conv_base(doc: dict, current_user_id: str):
-    conv_id = str(doc.get("_id") or doc.get("id"))
-    unread_c = doc.get("unread_counts", {}).get(current_user_id, 0)
-    raw_participants = doc.get("participants", [])
-    last_msg = doc.get("last_message")
-    last_msg_res = LastMessageInfo(
-        text=last_msg.get("text", ""),
-        sender_id=str(last_msg.get("sender_id", "")),
-        sender_name=last_msg.get("sender_name", ""),
-        timestamp=last_msg.get("timestamp", "")
-    ) if last_msg else None
-
-    c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
-    u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)
-    conv_type = resolve_conversation_type(doc, current_user_id=current_user_id)
-
-    avatar_url = doc.get("avatar_url")
-    if not avatar_url and conv_type != "Group":
-        other_p = next((p for p in raw_participants if str(p.get("user_id")) != str(current_user_id)), None)
-        if other_p:
-            avatar_url = other_p.get("profile_picture")
-
-    base = {
-        "id": conv_id,
-        "type": conv_type,
-        "title": doc.get("title", "Conversation"),
-        "subtitle": doc.get("subtitle"),
-        "shift_id": doc.get("shift_id"),
-        "cleaning_plan_id": doc.get("cleaning_plan_id"),
-        "avatar_url": avatar_url,
-        "participants_count": len(raw_participants),
-        "last_message": last_msg_res,
-        "unread_count": unread_c,
-        "created_at": c_at,
-        "updated_at": u_at
-    }
-    return base, raw_participants
-
-
-def format_conversation_list_item(doc: dict, current_user_id: str) -> ConversationListItemResponse:
-    """Formats a raw MongoDB conversation document into a compact ConversationListItemResponse (short form)."""
-    base, _ = _extract_conv_base(doc, current_user_id)
-    return ConversationListItemResponse(**base)
-
-
-def format_conversation_detail(doc: dict, current_user_id: str) -> ConversationDetailResponse:
-    """Formats a raw MongoDB conversation document into full ConversationDetailResponse (with all participants)."""
-    base, raw_participants = _extract_conv_base(doc, current_user_id)
-    participants_res = [
-        ParticipantInfo(
-            user_id=str(p.get("user_id")),
-            name=p.get("name", "User"),
-            role=p.get("role", "client"),
-            profile_picture=p.get("profile_picture")
-        )
-        for p in raw_participants
-    ]
-    return ConversationDetailResponse(**base, participants=participants_res)
-
-format_conversation = format_conversation_detail
-
-def format_message(doc: dict) -> MessageResponse:
-    """Formats a raw MongoDB message document into a MessageResponse schema."""
-    msg_id = str(doc.get("_id") or doc.get("id"))
-    c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
-    u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)
-
-    read_by_res = []
-    for r in doc.get("read_by", []):
-        r_dt = r.get("read_at") if isinstance(r.get("read_at"), datetime) else datetime.now(timezone.utc)
-        read_by_res.append(ReadByInfo(user_id=str(r.get("user_id")), read_at=r_dt))
-
-    return MessageResponse(
-        id=msg_id,
-        conversation_id=str(doc.get("conversation_id")),
-        sender_id=str(doc.get("sender_id")),
-        sender_name=doc.get("sender_name", "User"),
-        sender_role=doc.get("sender_role", "client"),
-        sender_avatar=doc.get("sender_avatar"),
-        content=doc.get("content", ""),
-        attachment_url=doc.get("attachment_url"),
-        attachment_type=doc.get("attachment_type"),
-        status=doc.get("status", "sent"),
-        read_by=read_by_res,
-        created_at=c_at,
-        updated_at=u_at
-    )
-
-async def resolve_participant_profile(user_doc: dict, db) -> ParticipantProfileResponse:
-    """Resolves dynamic participant profile details for the chat right sidebar."""
-    uid = str(user_doc.get("_id") or user_doc.get("id") or "")
-    role = str(user_doc.get("role", "worker")).lower()
-    name = user_doc.get("full_name") or user_doc.get("name", "User")
-    email = user_doc.get("email") or ""
-    phone = user_doc.get("phone") or user_doc.get("phone_number") or ""
-    pic = user_doc.get("profile_photo") or user_doc.get("profile_picture")
-
-    client_name = ""
-    role_label = role.capitalize()
-    current_loc_name = user_doc.get("location") or user_doc.get("address") or ""
-
-    if role in ["worker", "employee"]:
-        w_type = user_doc.get("worker_type", "employee")
-        pos = user_doc.get("position")
-        role_label = f"{w_type.capitalize()} • {pos}" if pos else f"{w_type.capitalize()}"
-        client_name = f"Worker • {w_type.capitalize()}"
-
-        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        shift_doc = await db["shifts"].find_one({
-            "workers.worker_id": uid,
-            "date": {"$regex": f"^{today_str}"}
-        })
-        if not shift_doc:
-            shift_doc = await db["shift_executions"].find_one({
-                "assigned_workers.worker_id": uid,
-                "date": today_str
+    seen_uids = {worker_id}
+    for adm in admin_mgr_users:
+        u_id = str(adm.get("_id") or adm.get("id"))
+        if u_id not in seen_uids:
+            seen_uids.add(u_id)
+            participants.append({
+                "user_id": u_id,
+                "name": adm.get("full_name", "Manager"),
+                "role": str(adm.get("role", "manager")).lower(),
+                "profile_picture": adm.get("profile_photo")
             })
-        if not shift_doc:
-            shift_doc = await db["shifts"].find_one({"workers.worker_id": uid})
 
-        if shift_doc and shift_doc.get("location_name"):
-            current_loc_name = shift_doc.get("location_name")
-        elif shift_doc and shift_doc.get("location_id"):
-            loc_doc = await db["locations"].find_one({"$or": [{"_id": shift_doc.get("location_id")}, {"id": shift_doc.get("location_id")}]})
-            current_loc_name = loc_doc.get("name", "") if loc_doc else ""
-        else:
-            current_loc_name = user_doc.get("location") or ""
+    if len(participants) == 1:
+        participants.append({
+            "user_id": "admin_1",
+            "name": "Admin Support",
+            "role": "admin",
+            "profile_picture": None
+        })
 
-    elif role == "client":
-        c_doc = await db["client_list"].find_one({"$or": [{"_id": uid}, {"id": uid}, {"email": email}, {"primary_contact_name": name}]})
-        if c_doc:
-            client_name = c_doc.get("company_name", name)
-            role_label = client_name
-            current_loc_name = c_doc.get("address") or c_doc.get("location_name") or ""
-        else:
-            client_name = user_doc.get("company_name") or name
-            role_label = client_name
-            current_loc_name = user_doc.get("location") or user_doc.get("address") or ""
+    # 2. Check for existing direct worker conversation
+    existing = await db["conversations"].find_one({
+        "$or": [
+            {"_id": f"conv_worker_{worker_id}"},
+            {"id": f"conv_worker_{worker_id}"},
+            {
+                "type": {"$in": ["direct", "direct_worker", "direct worker"]},
+                "cleaning_plan_id": {"$in": [None, ""]},
+                "shift_id": {"$in": [None, ""]},
+                "participants.user_id": worker_id
+            }
+        ]
+    })
 
-    return ParticipantProfileResponse(
-        user_id=uid,
-        name=name,
-        role=role,
-        role_label=role_label,
-        email=email,
-        phone=phone,
-        current_location_name=current_loc_name,
-        client_name=client_name,
-        account_status="Active client" if role == "client" else ("Active manager" if role in ["manager", "admin"] else "Active worker"),
-        is_online=True,
-        profile_picture=pic
+    now = datetime.now(timezone.utc)
+
+    if existing:
+        update_fields = {}
+        if existing.get("type") not in ["direct_worker", "direct worker"]:
+            update_fields["type"] = "direct_worker"
+
+        existing_participants = existing.get("participants", [])
+        existing_p_map = {str(p.get("user_id")): p for p in existing_participants if p.get("user_id")}
+        updated_participants = list(existing_participants)
+        needs_update = False
+
+        for target_p in participants:
+            p_uid = str(target_p["user_id"])
+            if p_uid not in existing_p_map:
+                updated_participants.append(target_p)
+                needs_update = True
+            elif p_uid == worker_id:
+                curr = existing_p_map[p_uid]
+                if curr.get("name") != worker_name or curr.get("profile_picture") != worker_pic:
+                    curr["name"] = worker_name
+                    curr["profile_picture"] = worker_pic
+                    needs_update = True
+
+        if needs_update:
+            update_fields["participants"] = updated_participants
+
+        if update_fields:
+            update_fields["updated_at"] = now
+            await db["conversations"].update_one(
+                {"_id": existing["_id"]},
+                {"$set": update_fields}
+            )
+            existing.update(update_fields)
+
+        return existing
+
+    # 3. Create new direct conversation for Worker <-> Management
+    conv_id = f"conv_worker_{worker_id}"
+    pos = getattr(worker_user, "position", None)
+    w_type = getattr(worker_user, "worker_type", None)
+    if isinstance(w_type, str):
+        w_type_str = w_type.capitalize()
+    else:
+        w_type_str = "Employee"
+
+    subtitle = custom_subtitle or (f"{w_type_str} • {pos}" if pos else "Worker Direct Chat")
+    title = custom_title or worker_name
+
+    conv_doc = {
+        "_id": conv_id,
+        "id": conv_id,
+        "type": "direct_worker",
+        "title": title,
+        "subtitle": subtitle,
+        "shift_id": None,
+        "cleaning_plan_id": None,
+        "avatar_url": worker_pic,
+        "participants": participants,
+        "last_message": None,
+        "unread_counts": {str(p["user_id"]): 0 for p in participants},
+        "seen_by_management": [],
+        "created_at": now,
+        "updated_at": now
+    }
+
+    await db["conversations"].insert_one(conv_doc)
+    return conv_doc
+
+
+async def get_or_create_client_admin_conversation(
+    db,
+    client_user: UserInDB,
+    custom_title: Optional[str] = None,
+    custom_subtitle: Optional[str] = None
+) -> dict:
+    """
+    Creates or retrieves the unified Direct Management conversation for a Client.
+    Includes the Client and all active Admins & Managers.
+    Idempotent: Re-calling always returns the existing conversation thread.
+    """
+    client_id = get_user_id(client_user)
+    client_name = getattr(client_user, "company_name", None) or getattr(client_user, "full_name", None) or "Client"
+    client_pic = getattr(client_user, "profile_photo", None) or getattr(client_user, "profile_picture", None)
+
+    # 1. Fetch all active Admins & Managers from database
+    admin_mgr_cursor = db["users"].find({
+        "role": {"$in": ["admin", "manager", RoleEnum.admin, RoleEnum.manager]},
+        "is_active": True
+    })
+    admin_mgr_users = await admin_mgr_cursor.to_list(length=100)
+
+    participants = [{
+        "user_id": client_id,
+        "name": client_name,
+        "role": "client",
+        "profile_picture": client_pic
+    }]
+
+    seen_uids = {client_id}
+    for adm in admin_mgr_users:
+        u_id = str(adm.get("_id") or adm.get("id"))
+        if u_id not in seen_uids:
+            seen_uids.add(u_id)
+            participants.append({
+                "user_id": u_id,
+                "name": adm.get("full_name", "Manager"),
+                "role": str(adm.get("role", "manager")).lower(),
+                "profile_picture": adm.get("profile_photo")
+            })
+
+    if len(participants) == 1:
+        participants.append({
+            "user_id": "admin_1",
+            "name": "Admin Support",
+            "role": "admin",
+            "profile_picture": None
+        })
+
+    # 2. Check for existing direct client conversation
+    existing = await db["conversations"].find_one({
+        "$or": [
+            {"_id": f"conv_client_{client_id}"},
+            {"id": f"conv_client_{client_id}"},
+            {
+                "type": {"$in": ["direct", "direct_client", "direct clients", "Direct clients"]},
+                "cleaning_plan_id": {"$in": [None, ""]},
+                "shift_id": {"$in": [None, ""]},
+                "participants.user_id": client_id
+            }
+        ]
+    })
+
+    now = datetime.now(timezone.utc)
+
+    if existing:
+        update_fields = {}
+        if existing.get("type") not in ["direct_client", "direct clients", "Direct clients"]:
+            update_fields["type"] = "direct_client"
+
+        existing_participants = existing.get("participants", [])
+        existing_p_map = {str(p.get("user_id")): p for p in existing_participants if p.get("user_id")}
+        updated_participants = list(existing_participants)
+        needs_update = False
+
+        for target_p in participants:
+            p_uid = str(target_p["user_id"])
+            if p_uid not in existing_p_map:
+                updated_participants.append(target_p)
+                needs_update = True
+            elif p_uid == client_id:
+                curr = existing_p_map[p_uid]
+                if curr.get("name") != client_name or curr.get("profile_picture") != client_pic:
+                    curr["name"] = client_name
+                    curr["profile_picture"] = client_pic
+                    needs_update = True
+
+        if needs_update:
+            update_fields["participants"] = updated_participants
+
+        if update_fields:
+            update_fields["updated_at"] = now
+            await db["conversations"].update_one(
+                {"_id": existing["_id"]},
+                {"$set": update_fields}
+            )
+            existing.update(update_fields)
+
+        return existing
+
+    # 3. Create new direct conversation for Client <-> Management
+    conv_id = f"conv_client_{client_id}"
+    comp = getattr(client_user, "company_name", None)
+    subtitle = custom_subtitle or (f"Client • {comp}" if comp else "Direct Client Support")
+    title = custom_title or client_name
+
+    conv_doc = {
+        "_id": conv_id,
+        "id": conv_id,
+        "type": "direct_client",
+        "title": title,
+        "subtitle": subtitle,
+        "shift_id": None,
+        "cleaning_plan_id": None,
+        "avatar_url": client_pic,
+        "participants": participants,
+        "last_message": None,
+        "unread_counts": {str(p["user_id"]): 0 for p in participants},
+        "seen_by_management": [],
+        "created_at": now,
+        "updated_at": now
+    }
+
+    await db["conversations"].insert_one(conv_doc)
+    return conv_doc
+
+
+async def mark_conversation_read_shared_management(
+    db,
+    conversation_id: str,
+    reader_user: UserInDB
+) -> dict:
+    """
+    Marks messages in a conversation as read and records rich footprints.
+    For Admins & Managers, clears unread counts for all Admins & Managers (Shared Inbox) and tracks seen_by_management footprint.
+    For Workers / Clients, clears unread count for that specific user.
+    """
+    reader_id = get_user_id(reader_user)
+    raw_role = getattr(reader_user, "role", "worker")
+    reader_role = (raw_role.value if hasattr(raw_role, "value") else str(raw_role)).lower()
+    reader_name = getattr(reader_user, "full_name", None) or getattr(reader_user, "name", "User")
+    reader_pic = getattr(reader_user, "profile_photo", None) or getattr(reader_user, "profile_picture", None)
+    now = datetime.now(timezone.utc)
+
+    reader_footprint = {
+        "user_id": reader_id,
+        "name": reader_name,
+        "role": reader_role,
+        "profile_picture": reader_pic,
+        "read_at": now
+    }
+
+    # 1. Update read_by list in chat_messages with full footprint
+    await db["chat_messages"].update_many(
+        {"conversation_id": conversation_id, "read_by.user_id": {"$ne": reader_id}},
+        {"$push": {"read_by": reader_footprint}}
     )
 
-async def get_conversation_participants_details(db, conv_doc: dict) -> ConversationParticipantsResponse:
-    """
-    Returns rich details of all participants in a conversation (name, role, email, phone, avatar, position, company).
-    """
-    conv_id = str(conv_doc.get("_id") or conv_doc.get("id"))
-    conv_title = conv_doc.get("title") or "Conversation"
-    raw_participants = conv_doc.get("participants", [])
+    # 2. Update unread_counts & seen_by_management in conversations
+    conv_doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
+    if conv_doc:
+        if "admin" in reader_role or "manager" in reader_role:
+            admin_mgr_uids = [
+                str(p.get("user_id")) for p in conv_doc.get("participants", [])
+                if str(p.get("role", "")).lower() in ["admin", "manager"]
+            ]
+            if reader_id not in admin_mgr_uids:
+                admin_mgr_uids.append(reader_id)
 
-    items = []
-    p_uids = [str(p.get("user_id")) for p in raw_participants if p.get("user_id")]
+            existing_seen = [s for s in conv_doc.get("seen_by_management", []) if str(s.get("user_id")) != reader_id]
+            existing_seen.append(reader_footprint)
 
-    # Fetch users from database
-    user_list = []
-    if p_uids:
-        users_cursor = db["users"].find({"$or": build_user_id_or_query(p_uids)})
-        user_list = await users_cursor.to_list(length=len(p_uids) + 50)
-    user_map = build_user_map(user_list)
+            unset_or_zero = {f"unread_counts.{uid}": 0 for uid in admin_mgr_uids}
+            await db["conversations"].update_one(
+                {"_id": conv_doc["_id"]},
+                {"$set": {**unset_or_zero, "seen_by_management": existing_seen}}
+            )
+        else:
+            await db["conversations"].update_one(
+                {"_id": conv_doc["_id"]},
+                {"$set": {f"unread_counts.{reader_id}": 0}}
+            )
 
-    for p in raw_participants:
-        u_id = str(p.get("user_id"))
-        u_doc = user_map.get(u_id) or {}
-        role = str(u_doc.get("role") or p.get("role") or "client")
-        name = u_doc.get("full_name") or p.get("name") or "User"
-        email = u_doc.get("email")
-        phone = u_doc.get("phone")
-        pic = u_doc.get("profile_photo") or p.get("profile_picture")
-        pos = u_doc.get("position")
-        comp = u_doc.get("company_name")
+    # 3. Broadcast WebSocket read receipt
+    from app.services.chat_ws_service import broadcast_messages_read
+    await broadcast_messages_read(db, conversation_id, reader_id, now.isoformat())
 
-        items.append(ParticipantDetailItem(
-            user_id=u_id, name=name, role=role, email=email,
-            phone=phone, profile_picture=pic, position=pos,
-            company_name=comp, is_online=True
-        ))
+    return {"message": "Messages marked as read"}
 
-    return ConversationParticipantsResponse(
-        conversation_id=conv_id, conversation_title=conv_title,
-        total_participants=len(items), participants=items
-    )
 
 async def sync_cleaning_plan_group_conversation(db, plan_doc: dict, current_manager: Optional[UserInDB] = None) -> dict:
     """
@@ -272,7 +352,7 @@ async def sync_cleaning_plan_group_conversation(db, plan_doc: dict, current_mana
     participants = []
     seen_uids = set()
 
-    # 1. Add All Managers and Admin (All managers should see and be part of this group)
+    # 1. Add All Managers and Admin
     admin_mgr_cursor = db["users"].find({"role": {"$in": ["manager", "admin", RoleEnum.manager, RoleEnum.admin]}, "is_active": True})
     admin_mgr_users = await admin_mgr_cursor.to_list(length=100)
     for adm in admin_mgr_users:
@@ -300,7 +380,7 @@ async def sync_cleaning_plan_group_conversation(db, plan_doc: dict, current_mana
     # 2. Add Client
     c_query = {"$or": [{"_id": ObjectId(client_id_raw)}, {"id": client_id_raw}, {"_id": client_id_raw}]} if ObjectId.is_valid(client_id_raw) else {"$or": [{"_id": client_id_raw}, {"id": client_id_raw}]}
     c_user = await db["users"].find_one(c_query)
-    
+
     if not c_user:
         c_list_doc = await db["client_list"].find_one({"$or": [{"_id": client_id_raw}, {"id": client_id_raw}]})
         if c_list_doc and c_list_doc.get("email"):
@@ -353,7 +433,6 @@ async def sync_cleaning_plan_group_conversation(db, plan_doc: dict, current_mana
     conv_title = plan_doc.get("title") or plan_doc.get("plan_name") or plan_doc.get("name") or f"{location_name} - Cleaning Team"
     conv_subtitle = f"Plan #{plan_id[:8]} • {num_workers} Worker(s)"
 
-    # Look for existing conversation for this cleaning_plan_id
     existing = await db["conversations"].find_one({
         "$or": [
             {"cleaning_plan_id": plan_id},
@@ -376,8 +455,6 @@ async def sync_cleaning_plan_group_conversation(db, plan_doc: dict, current_mana
         return await db["conversations"].find_one({"_id": existing["_id"]})
     else:
         conv_id = f"conv_grp_plan_{plan_id}"
-        
-        # Create initial system welcome message
         initial_msg_id = f"msg_sys_{uuid.uuid4().hex[:10]}"
         initial_msg_text = f"Cleaning plan group created for {location_name} with {num_workers} assigned worker(s)."
         sys_msg_doc = {
@@ -404,6 +481,7 @@ async def sync_cleaning_plan_group_conversation(db, plan_doc: dict, current_mana
                 "timestamp": now.strftime("%I:%M %p")
             },
             "unread_counts": {},
+            "seen_by_management": [],
             "created_at": now,
             "updated_at": now
         }
@@ -421,6 +499,7 @@ async def sync_cleaning_plan_group_conversation(db, plan_doc: dict, current_mana
             pass
 
         return conv_doc
+
 
 async def sync_shift_group_conversation(db, shift_doc: dict) -> dict:
     """Automatically creates or updates a group chat conversation for a shift containing Admin, Client, and assigned Workers."""
@@ -494,11 +573,13 @@ async def sync_shift_group_conversation(db, shift_doc: dict) -> dict:
             "participants": participants,
             "last_message": None,
             "unread_counts": {},
+            "seen_by_management": [],
             "created_at": now,
             "updated_at": now
         }
         await db["conversations"].insert_one(doc)
         return doc
+
 
 async def add_conversation_participants(
     db,
@@ -506,16 +587,14 @@ async def add_conversation_participants(
     user_ids: List[str],
     actor_user: UserInDB
 ) -> ConversationParticipantsResponse:
-    """
-    Adds one or more users (workers/clients/managers) to an existing group conversation.
-    """
+    """Adds one or more users to an existing group conversation."""
     from fastapi import HTTPException
     conv_doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
     if not conv_doc:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    if conv_doc.get("type") != "group":
-        raise HTTPException(status_code=400, detail="Cannot add participants to a direct 1-1 conversation. Use a group conversation.")
+    if conv_doc.get("type") not in ["group", "cleaning_plan_group"]:
+        raise HTTPException(status_code=400, detail="Cannot add participants to a direct 1-1 conversation.")
 
     existing_participants = conv_doc.get("participants", [])
     existing_uids = set(str(p.get("user_id")) for p in existing_participants if p.get("user_id"))
@@ -524,7 +603,6 @@ async def add_conversation_participants(
     if not clean_uids:
         raise HTTPException(status_code=400, detail="At least one valid user_id must be provided")
 
-    # Fetch users to add
     users_cursor = db["users"].find({"$or": build_user_id_or_query(clean_uids)})
     found_users = await users_cursor.to_list(length=len(clean_uids) * 2)
     found_map = build_user_map(found_users)
@@ -566,7 +644,6 @@ async def add_conversation_participants(
     updated_participants = existing_participants + new_participants
     now = datetime.now(timezone.utc)
 
-    # Post system message announcing addition
     actor_name = getattr(actor_user, "full_name", None) or "Admin"
     sys_msg_id = f"msg_sys_{uuid.uuid4().hex[:10]}"
     sys_msg_text = f"{actor_name} added {', '.join(added_names)} to the group."
@@ -618,21 +695,20 @@ async def add_conversation_participants(
     updated_conv = await db["conversations"].find_one({"_id": conv_doc["_id"]})
     return await get_conversation_participants_details(db, updated_conv)
 
+
 async def remove_conversation_participant(
     db,
     conversation_id: str,
     target_user_id: str,
     actor_user: UserInDB
 ) -> dict:
-    """
-    Removes a user (worker/client/manager) from an existing group conversation.
-    """
+    """Removes a user from an existing group conversation."""
     from fastapi import HTTPException
     conv_doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
     if not conv_doc:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
-    if conv_doc.get("type") != "group":
+    if conv_doc.get("type") not in ["group", "cleaning_plan_group"]:
         raise HTTPException(status_code=400, detail="Cannot remove participants from a direct 1-1 conversation.")
 
     existing_participants = conv_doc.get("participants", [])
@@ -646,9 +722,11 @@ async def remove_conversation_participant(
     updated_participants = [p for p in existing_participants if str(p.get("user_id")) != str(target_user_id)]
     now = datetime.now(timezone.utc)
 
-    # Post system message announcing removal
     target_name = target_p.get("name", "User")
     actor_name = getattr(actor_user, "full_name", None) or "Admin"
+    sys_msg_id = f"msg_sys_{uuid.uuid4().hex[:10]}"
+    sys_msg_text = f"{actor_name} removed {target_name} from the group."
+
     sys_msg_doc = {
         "_id": sys_msg_id, "id": sys_msg_id, "conversation_id": conversation_id,
         "sender_id": "system", "sender_name": "CleanOnes System", "sender_role": "system",

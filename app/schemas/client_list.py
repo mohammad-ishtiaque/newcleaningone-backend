@@ -1024,7 +1024,6 @@ class CleaningPlanRoomDetail(BaseModel):
     monthly_cleaning_frequency: int = 4
     clean_type: str = "standard"
     tasks: List[CleaningTaskResponse] = Field(default_factory=list)
-    required_photos: List[RequiredPhotoResponse] = Field(default_factory=list)
     photo_number: int = 0
     total_photos_required: int = 0
     task_number: int = 0
@@ -1057,27 +1056,30 @@ class CleaningPlanManagerDetail(BaseModel):
 
 class ManagerCleaningPlanCreate(BaseModel):
     title: str = Field(..., json_schema_extra={"example": "Kafa Automation Cleaning plan & Betopia Group"})
-    room_ids: List[str] = Field(default_factory=list, json_schema_extra={"example": ["room_a366ecf17c", "room_a366ecf17c", "room_848a13ff0c"]})
+    room_ids: List[str] = Field(default_factory=list, json_schema_extra={"example": ["room_a366ecf17c", "room_848a13ff0c"]})
     date: Optional[str] = Field(default="2026-08-17", json_schema_extra={"example": "2026-08-17"})
     start_time: Optional[str] = Field(default="08:00 AM", json_schema_extra={"example": "08:00 AM"})
-    repeat_shift: Optional[str] = Field(default="Standard working week", json_schema_extra={"example": "Every day"})
-    repeat_until: Optional[str] = Field(default="2026-09-14", json_schema_extra={"example": "2026-12-31"})
-    working_days: Optional[List[str]] = Field(default=None, json_schema_extra={"example": ["mon", "tue", "wed", "thu", "fri"]})
+    repeat_shift: Optional[str] = Field(default="Standard working week", json_schema_extra={"example": "Monthly"})
+    repeat_until: Optional[str] = Field(default="2026-12-31", json_schema_extra={"example": "2026-12-31"})
+    working_days: Optional[List[str]] = Field(default=None, json_schema_extra={"example": ["sun"]})
     shift_notes: Optional[str] = Field(default="", json_schema_extra={"example": "Monthly Sunday deep cleaning"})
     description: Optional[str] = Field(default="", json_schema_extra={"example": "Love to Wash"})
     additional_tasks: Optional[List[CleaningTaskCreate]] = Field(default_factory=list)
-    additional_required_photos: Optional[List[RequiredPhotoCreate]] = Field(default_factory=list)
     duration_minutes: Optional[int] = Field(default=None, json_schema_extra={"example": 330})
     location_id: Optional[str] = Field(default=None, json_schema_extra={"example": "loc_db28f5a3f6"})
     frequency_type: Optional[str] = Field(default=None, json_schema_extra={"example": "monthly"})
     timezone: Optional[str] = Field(default="Europe/Amsterdam", json_schema_extra={"example": "Europe/Amsterdam"})
+
+    def __init__(self, **data):
+        if "tasks" in data and ("additional_tasks" not in data or not data["additional_tasks"]):
+            data["additional_tasks"] = data["tasks"]
+        super().__init__(**data)
 
     model_config = {
         "json_schema_extra": {
             "example": {
                 "title": "Kafa Automation Cleaning plan & Betopia Group",
                 "room_ids": [
-                    "room_a366ecf17c",
                     "room_a366ecf17c",
                     "room_848a13ff0c"
                 ],
@@ -1093,17 +1095,29 @@ class ManagerCleaningPlanCreate(BaseModel):
                 "additional_tasks": [
                     {
                         "name": "Deep Floor Scrubbing",
-                        "frequency_type": "every_visit"
-                    }
-                ],
-                "additional_required_photos": [
-                    {
-                        "name": "Before cleaning photo",
-                        "frequency_type": "every_visit"
+                        "frequency_type": "every_visit",
+                        "is_photo_req": True,
+                        "photo": [
+                            {
+                                "name": "After Deep Floor scrubbing"
+                            },
+                            {
+                                "name": "Before Deep Floor scrubbing"
+                            }
+                        ]
                     },
                     {
-                        "name": "Before cleaning photo",
-                        "frequency_type": "every_visit"
+                        "name": "Clean the ceiling",
+                        "frequency_type": "weekly",
+                        "is_photo_req": True,
+                        "photo": [
+                            {
+                                "name": "After Clean the ceiling"
+                            },
+                            {
+                                "name": "Before Clean the ceiling"
+                            }
+                        ]
                     }
                 ]
             }
@@ -1123,12 +1137,37 @@ class ManagerCleaningPlanUpdate(BaseModel):
     duration_minutes: Optional[int] = None
     description: Optional[str] = None
     additional_tasks: Optional[List[CleaningTaskCreate]] = None
-    additional_required_photos: Optional[List[RequiredPhotoCreate]] = None
     location_id: Optional[str] = None
     frequency_type: Optional[str] = None
     timezone: Optional[str] = None
     status: Optional[str] = None
     is_active: Optional[bool] = None
+
+    def __init__(self, **data):
+        if "tasks" in data and ("additional_tasks" not in data or not data["additional_tasks"]):
+            data["additional_tasks"] = data["tasks"]
+        super().__init__(**data)
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "title": "Kafa Automation Cleaning plan & Betopia Group",
+                "shift_notes": "Updated monthly deep cleaning instructions",
+                "additional_tasks": [
+                    {
+                        "name": "Deep Floor Scrubbing",
+                        "frequency_type": "every_visit",
+                        "is_photo_req": True,
+                        "photo": [
+                            {
+                                "name": "After Deep Floor scrubbing"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }
+    }
 
 class ManagerCleaningPlanDetailResponse(BaseModel):
     id: str
@@ -1146,7 +1185,6 @@ class ManagerCleaningPlanDetailResponse(BaseModel):
     workers: List[CleaningPlanWorkerDetail] = Field(default_factory=list)
     workers_count: int = 0
     additional_tasks: List[CleaningTaskResponse] = Field(default_factory=list)
-    additional_required_photos: List[RequiredPhotoResponse] = Field(default_factory=list)
     total_tasks_count: int = 0
     total_photos_count: int = 0
     date: str = "2026-08-17"
