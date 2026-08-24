@@ -3,7 +3,8 @@ from pydantic import BaseModel, Field
 from typing import Optional, List, Literal
 from app.schemas.common import BasePaginatedResponse
 from app.schemas.client_list import (
-    CleaningTaskCreate, TaskPhotoCreate, TaskPhotoResponse, CleaningPlanWorkerDropdownItem
+    CleaningTaskCreate, TaskPhotoCreate, TaskPhotoResponse, CleaningPlanWorkerDropdownItem,
+    CleaningTaskResponse
 )
 
 class ExtraServiceTaskItem(BaseModel):
@@ -191,3 +192,113 @@ class ExtraServiceWorkerDropdownPaginatedResponse(BasePaginatedResponse):
     limit: int
     has_more: bool = False
     workers: List[CleaningPlanWorkerDropdownItem] = Field(default_factory=list)
+
+# --- Client Room Dropdown Schemas ---
+class ClientRoomDropdownItem(BaseModel):
+    id: str = ""
+    room_id: str = ""
+    room_name: str = ""
+    room_type: str = "standard"
+    location_id: Optional[str] = None
+    location_name: Optional[str] = None
+    floor: Optional[int] = 1
+    duration: Optional[int] = 30
+    cleaning_type: Optional[str] = "standard"
+    monthly_cleaning_frequency: Optional[int] = 4
+    photo_number: int = 0
+    task_number: int = 0
+    tasks: List[CleaningTaskResponse] = Field(default_factory=list)
+
+    def __init__(self, **data):
+        if "room_id" in data and not data.get("id"):
+            data["id"] = data["room_id"]
+        elif "id" in data and not data.get("room_id"):
+            data["room_id"] = data["id"]
+        if "name" in data and not data.get("room_name"):
+            data["room_name"] = data["name"]
+        super().__init__(**data)
+
+    model_config = {
+        "populate_by_name": True,
+        "from_attributes": True,
+        "json_schema_extra": {
+            "example": {
+                "id": "room_a366ecf17c",
+                "room_id": "room_a366ecf17c",
+                "room_name": "Executive Boardroom",
+                "room_type": "conference_room",
+                "location_id": "loc_db28f5a3f6",
+                "location_name": "Betopia HQ",
+                "floor": 2,
+                "duration": 45,
+                "cleaning_type": "standard",
+                "monthly_cleaning_frequency": 4,
+                "photo_number": 2,
+                "task_number": 3,
+                "tasks": [
+                    {
+                        "id": "t_01",
+                        "name": "Vacuum carpet",
+                        "frequency_type": "every_visit",
+                        "is_photo_req": True,
+                        "photo": [{"id": "p_01", "name": "After vacuum"}]
+                    }
+                ]
+            }
+        }
+    }
+
+class ClientRoomDropdownPaginatedResponse(BasePaginatedResponse):
+    total_count: int
+    page: int
+    limit: int
+    has_more: bool = False
+    rooms: List[ClientRoomDropdownItem] = Field(default_factory=list)
+
+# --- Client Location Dropdown Schemas ---
+class ClientLocationDropdownItem(BaseModel):
+    id: str = ""
+    location_id: str = ""
+    name: str = ""
+    location_name: str = ""
+    address: Optional[str] = None
+    city: Optional[str] = None
+    postal_code: Optional[str] = None
+    total_rooms_count: int = 0
+    cleaning_plans_count: int = 0
+
+    def __init__(self, **data):
+        if "location_id" in data and not data.get("id"):
+            data["id"] = data["location_id"]
+        elif "id" in data and not data.get("location_id"):
+            data["location_id"] = data["id"]
+        if "location_name" in data and not data.get("name"):
+            data["name"] = data["location_name"]
+        elif "name" in data and not data.get("location_name"):
+            data["location_name"] = data["name"]
+        super().__init__(**data)
+
+    model_config = {
+        "populate_by_name": True,
+        "from_attributes": True,
+        "json_schema_extra": {
+            "example": {
+                "id": "loc_db28f5a3f6",
+                "location_id": "loc_db28f5a3f6",
+                "name": "Betopia HQ Main Tower",
+                "location_name": "Betopia HQ Main Tower",
+                "address": "Keizersgracht 421, 1016 EK Amsterdam",
+                "city": "Amsterdam",
+                "postal_code": "1016 EK",
+                "total_rooms_count": 8,
+                "cleaning_plans_count": 2
+            }
+        }
+    }
+
+class ClientLocationDropdownPaginatedResponse(BasePaginatedResponse):
+    total_count: int
+    page: int
+    limit: int
+    has_more: bool = False
+    locations: List[ClientLocationDropdownItem] = Field(default_factory=list)

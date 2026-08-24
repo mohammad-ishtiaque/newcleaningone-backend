@@ -5,7 +5,8 @@ from app.api import (
     auth, worker, client, admin, profile, worker_shifts,
     admin_shift_monitoring, admin_dashboard, client_live_status,
     client_schedule, client_extra_services, admin_extra_services, worker_extra_services,
-    chat, client_chat, admin_chat, worker_chat, worker_roster, worker_home, client_profile_settings
+    chat, client_chat, admin_chat, worker_chat, worker_roster, worker_home, client_profile_settings,
+    client_location_monitoring
 )
 import os
 
@@ -96,6 +97,7 @@ def create_app(service_name: str = "all") -> FastAPI:
         app.include_router(client.router)
         app.include_router(client_schedule.router)
         app.include_router(client_extra_services.router)
+        app.include_router(client_location_monitoring.router)
         app.include_router(client_chat.router)
         app.include_router(client_profile_settings.router)
 
