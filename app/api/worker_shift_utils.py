@@ -66,17 +66,35 @@ def evaluate_worker_attendance_status(
     """
     Evaluates attendance status with 15-minute grace period:
     - ontime: checkin_time <= start_time + 15 mins
-    - late: checkin_time > start_time + 15 mins
-    - missing: no checkin and now > start_time + 15 mins on that date
+    - late: checkin_time > start_time + 15 mins, OR (no checkin yet, but now > start_time + 15 mins while shift is ongoing)
+    - missing: no checkin and shift has ended (or past date)
     - scheduled: no checkin and now <= start_time + 15 mins
     """
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
 
-    plan_date = target_date_str or plan_doc.get("date") or now_utc.strftime("%Y-%m-%d")
+    plan_tz = plan_doc.get("timezone") or "Europe/Amsterdam"
+    plan_date = target_date_str or plan_doc.get("date") or now_in_tz(plan_tz).strftime("%Y-%m-%d")
     start_time_str = plan_doc.get("start_time", "08:00 AM")
-    start_dt = parse_plan_start_datetime(plan_date, start_time_str)
+    start_dt = parse_plan_start_datetime(plan_date, start_time_str, tz=plan_tz)
     grace_cutoff_dt = start_dt + timedelta(minutes=15)
+
+    end_time_str = plan_doc.get("end_time")
+    dur_mins = int(plan_doc.get("duration_minutes") or 60)
+    if end_time_str:
+        try:
+            parsed_end = parse_plan_start_datetime(plan_date, end_time_str, tz=plan_tz)
+            if parsed_end > start_dt:
+                end_dt = parsed_end
+            else:
+                end_dt = start_dt + timedelta(minutes=dur_mins)
+        except Exception:
+            end_dt = start_dt + timedelta(minutes=dur_mins)
+    else:
+        end_dt = start_dt + timedelta(minutes=dur_mins)
+
+    today_in_plan_tz = now_in_tz(plan_tz).strftime("%Y-%m-%d")
+    now_in_plan_zone = now_utc.astimezone(get_timezone(plan_tz))
 
     c_time = worker_record.get("checkin_time") if worker_record else None
     if c_time:
@@ -87,16 +105,20 @@ def evaluate_worker_attendance_status(
                 c_time = now_utc
         if c_time.tzinfo is None:
             c_time = c_time.replace(tzinfo=timezone.utc)
+        c_time_in_zone = c_time.astimezone(get_timezone(plan_tz))
 
         # Worker has checked in
-        if c_time <= grace_cutoff_dt:
+        if c_time_in_zone <= grace_cutoff_dt:
             return "ontime"
         else:
             return "late"
     else:
         # Worker has not checked in yet
-        if now_utc > grace_cutoff_dt:
-            return "missing"
+        if now_in_plan_zone > grace_cutoff_dt:
+            if plan_date < today_in_plan_tz or now_in_plan_zone > end_dt:
+                return "missing"
+            else:
+                return "late"
         else:
             return "scheduled"
 
@@ -194,9 +216,10 @@ def calculate_cleaning_plan_progress(plan_doc: dict, approved_photos_count: Opti
 
     for r in rooms:
         r_status = r.get("status", "pending")
-        if r_status == "completed":
+        is_done = bool(r.get("is_completed") or r_status in ["completed", "approved"])
+        if is_done:
             completed_rooms += 1
-        elif r_status in ["in_progress", "photo_submitted"]:
+        elif r_status in ["in_progress", "photo_submitted"] or len(r.get("submitted_photos", [])) > 0:
             in_progress_rooms += 1
         else:
             pending_rooms += 1
@@ -293,6 +316,72 @@ async def get_or_create_shift_execution(plan_doc: dict, target_date_str: str, db
         "$or": [{"_id": execution_id}, {"id": execution_id}, {"plan_id": plan_id, "date": target_date_str}]
     })
     if exec_doc:
+        # Sync latest assigned workers from plan_doc if any were newly added
+        plan_workers = (plan_doc.get("assigned_workers") or []) + (plan_doc.get("workers") or [])
+        plan_w_ids = plan_doc.get("worker_ids") or []
+
+        exec_w_map = {}
+        for w in (exec_doc.get("assigned_workers") or exec_doc.get("workers") or []):
+            if isinstance(w, dict):
+                wid = str(w.get("worker_id") or w.get("id") or "")
+                if wid:
+                    exec_w_map[wid] = w
+
+        needs_update = False
+        for pw in plan_workers:
+            if isinstance(pw, dict):
+                pw_id = str(pw.get("worker_id") or pw.get("id") or "").strip()
+                if pw_id and pw_id not in exec_w_map:
+                    exec_w_map[pw_id] = {
+                        "worker_id": pw_id,
+                        "position": pw.get("position", "normal"),
+                        "checkin_time": None,
+                        "checkout_time": None,
+                        "status": "scheduled",
+                        "hours_worked": None
+                    }
+                    needs_update = True
+            elif isinstance(pw, str) and pw.strip():
+                pw_id = pw.strip()
+                if pw_id and pw_id not in exec_w_map:
+                    exec_w_map[pw_id] = {
+                        "worker_id": pw_id,
+                        "position": "normal",
+                        "checkin_time": None,
+                        "checkout_time": None,
+                        "status": "scheduled",
+                        "hours_worked": None
+                    }
+                    needs_update = True
+
+        for pw_id in plan_w_ids:
+            pw_id_str = str(pw_id).strip()
+            if pw_id_str and pw_id_str not in exec_w_map:
+                exec_w_map[pw_id_str] = {
+                    "worker_id": pw_id_str,
+                    "position": "normal",
+                    "checkin_time": None,
+                    "checkout_time": None,
+                    "status": "scheduled",
+                    "hours_worked": None
+                }
+                needs_update = True
+
+        if needs_update:
+            updated_workers_list = list(exec_w_map.values())
+            updated_w_ids = list(exec_w_map.keys())
+            exec_doc["assigned_workers"] = updated_workers_list
+            exec_doc["workers"] = updated_workers_list
+            exec_doc["worker_ids"] = updated_w_ids
+            await db["shift_executions"].update_one(
+                {"_id": exec_doc["_id"]},
+                {"$set": {
+                    "assigned_workers": updated_workers_list,
+                    "workers": updated_workers_list,
+                    "worker_ids": updated_w_ids,
+                    "updated_at": datetime.now(timezone.utc)
+                }}
+            )
         return exec_doc
 
     # Query past executions to track when periodic tasks were last completed
@@ -342,7 +431,17 @@ async def get_or_create_shift_execution(plan_doc: dict, target_date_str: str, db
             if r:
                 candidate_rooms.append(r)
 
-    for idx, r in enumerate(candidate_rooms):
+    seen_room_ids = set()
+    unique_candidate_rooms = []
+    for r in candidate_rooms:
+        orig_rid = str(r.get("room_id") or r.get("id") or r.get("_id") or "")
+        if orig_rid and orig_rid in seen_room_ids:
+            continue
+        if orig_rid:
+            seen_room_ids.add(orig_rid)
+        unique_candidate_rooms.append(r)
+
+    for idx, r in enumerate(unique_candidate_rooms):
         rid = str(r.get("room_id") or r.get("id") or r.get("_id") or f"room_{idx+1}")
         raw_tasks = r.get("tasks", [])
         due_tasks = []
@@ -385,38 +484,31 @@ async def get_or_create_shift_execution(plan_doc: dict, target_date_str: str, db
         total_photos_cnt += len(r_photos)
 
         exec_rooms.append({
+            "id": str(rid),
             "room_id": str(rid),
             "room_name": r.get("room_name") or r.get("name", "Room"),
             "floor": r.get("floor", 1),
             "status": "pending",
+            "is_completed": False,
             "tasks": due_tasks,
             "required_photos": r_photos,
             "submitted_photos": []
         })
 
-    # Prepare workers list
+    # Prepare workers list across all possible field representations
     workers_list = []
-    for aw in plan_doc.get("assigned_workers", []):
-        if isinstance(aw, dict) and aw.get("worker_id"):
-            workers_list.append({
-                "worker_id": str(aw["worker_id"]),
-                "position": aw.get("position", "normal"),
-                "checkin_time": None,
-                "checkout_time": None,
-                "status": None,
-                "hours_worked": None
-            })
-    if not workers_list:
-        for wid in plan_doc.get("worker_ids", []):
-            if str(wid).strip():
-                workers_list.append({
-                    "worker_id": str(wid).strip(),
-                    "position": "normal",
-                    "checkin_time": None,
-                    "checkout_time": None,
-                    "status": None,
-                    "hours_worked": None
-                })
+    seen_worker_ids = set()
+    raw_sources = ((plan_doc.get("assigned_workers") or []) + (plan_doc.get("workers") or []) + (plan_doc.get("worker_ids") or []))
+    for aw in raw_sources:
+        wid, pos, c_in, c_out, st, hrs = None, "normal", None, None, None, None
+        if isinstance(aw, dict):
+            wid = str(aw.get("worker_id") or aw.get("id") or aw.get("_id") or "").strip()
+            pos, c_in, c_out, st, hrs = aw.get("position", "normal"), aw.get("checkin_time"), aw.get("checkout_time"), aw.get("status"), aw.get("hours_worked")
+        elif isinstance(aw, str) and aw.strip():
+            wid = aw.strip()
+        if wid and wid not in seen_worker_ids:
+            seen_worker_ids.add(wid)
+            workers_list.append({"worker_id": wid, "position": pos, "checkin_time": c_in, "checkout_time": c_out, "status": st, "hours_worked": hrs})
 
     new_exec = {
         "_id": execution_id,
@@ -432,6 +524,8 @@ async def get_or_create_shift_execution(plan_doc: dict, target_date_str: str, db
         "location_id": plan_doc.get("location_id", ""),
         "location_name": plan_doc.get("location_name", ""),
         "assigned_workers": workers_list,
+        "workers": workers_list,
+        "worker_ids": list(seen_worker_ids),
         "rooms": exec_rooms,
         "additional_tasks": plan_doc.get("additional_tasks", []),
         "additional_required_photos": plan_doc.get("additional_required_photos", []),
@@ -488,4 +582,100 @@ async def resolve_shift_execution(shift_id: str, db) -> Tuple[Optional[dict], Op
     if legacy_doc:
         return legacy_doc, "shifts"
 
+    # 5. Fallback to extra_services collection
+    es_doc = await db["extra_services"].find_one({"$or": [{"_id": shift_id}, {"id": shift_id}]})
+    if es_doc:
+        return es_doc, "extra_services"
+
+    return None, None
+
+
+def calculate_rounded_work_hours(duration_seconds: float) -> Tuple[float, float, float]:
+    """
+    Computes (rounded_hours, raw_hours, duration_minutes).
+    Rounding rule (30-minute blocks):
+    - Extra minutes == 0 -> exact whole hours (e.g. 2 hr 0 min -> 2.0 hr).
+    - Extra minutes in [1, 30] -> rounded to next half-hour (e.g. 2 hr 1 min -> 2.5 hr, 2 hr 30 min -> 2.5 hr).
+    - Extra minutes in [31, 59] -> rounded to next full hour (e.g. 2 hr 31 min -> 3.0 hr, 2 hr 45 min -> 3.0 hr).
+    """
+    total_minutes = max(0, int(round(duration_seconds / 60.0)))
+    hours = total_minutes // 60
+    rem_mins = total_minutes % 60
+
+    if rem_mins == 0:
+        rounded_hours = float(hours)
+    elif rem_mins <= 30:
+        rounded_hours = float(hours) + 0.5
+    else:
+        rounded_hours = float(hours) + 1.0
+
+    raw_hours = round(max(0.0, duration_seconds / 3600.0), 2)
+    return rounded_hours, raw_hours, float(total_minutes)
+
+
+def evaluate_shift_overtime(
+    rounded_hours: float,
+    scheduled_duration_minutes: Optional[float] = None
+) -> Tuple[float, float]:
+    """
+    Computes (regular_hours, overtime_hours) based on rounded hours worked vs scheduled duration.
+    If scheduled duration is not specified, defaults regular hours to rounded hours (no overtime).
+    """
+    if scheduled_duration_minutes and scheduled_duration_minutes > 0:
+        scheduled_hours = round(scheduled_duration_minutes / 60.0, 2)
+        if rounded_hours > scheduled_hours:
+            regular_hours = scheduled_hours
+            overtime_hours = round(rounded_hours - scheduled_hours, 2)
+        else:
+            regular_hours = rounded_hours
+            overtime_hours = 0.0
+    else:
+        regular_hours = rounded_hours
+        overtime_hours = 0.0
+
+    return regular_hours, overtime_hours
+
+
+VALID_DAYS_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+DAY_NORM_MAP = {
+    "mon": "mon", "monday": "mon", "tue": "tue", "tuesday": "tue",
+    "wed": "wed", "wednesday": "wed", "thu": "thu", "thursday": "thu",
+    "fri": "fri", "friday": "fri", "sat": "sat", "saturday": "sat",
+    "sun": "sun", "sunday": "sun"
+}
+
+
+def normalize_working_days(raw_days: Optional[List[str]]) -> Tuple[List[str], List[str]]:
+    """Normalizes a list of working days into ordered 3-letter codes and computes off-days."""
+    if not raw_days:
+        raw_days = ["mon", "tue", "wed", "thu", "fri", "sat"]
+    normalized_set = set()
+    for d in raw_days:
+        if not d:
+            continue
+        clean = str(d).strip().lower()
+        if clean in DAY_NORM_MAP:
+            normalized_set.add(DAY_NORM_MAP[clean])
+        elif len(clean) >= 3 and clean[:3] in DAY_NORM_MAP:
+            normalized_set.add(DAY_NORM_MAP[clean[:3]])
+    if not normalized_set:
+        normalized_set = {"mon", "tue", "wed", "thu", "fri", "sat"}
+    working_days = [d for d in VALID_DAYS_ORDER if d in normalized_set]
+    off_days = [d for d in VALID_DAYS_ORDER if d not in normalized_set]
+    return working_days, off_days
+
+
+def extract_date_weekday(date_val: Any) -> Tuple[Optional[str], Optional[str]]:
+    """Extracts (day_abbr, day_full) e.g. ('mon', 'Monday') from date string or datetime."""
+    if not date_val:
+        return None, None
+    if isinstance(date_val, datetime):
+        return date_val.strftime("%a").lower(), date_val.strftime("%A")
+    d_str = str(date_val).strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try:
+            dt = datetime.strptime(d_str, fmt)
+            return dt.strftime("%a").lower(), dt.strftime("%A")
+        except Exception:
+            pass
     return None, None

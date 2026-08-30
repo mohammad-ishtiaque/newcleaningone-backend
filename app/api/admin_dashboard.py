@@ -46,21 +46,75 @@ async def get_admin_dashboard_overview(
     status_filter: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
+    from app.api.worker_shift_utils import is_plan_active_on_date, get_or_create_shift_execution, evaluate_worker_attendance_status
+    from app.core.timezone_utils import parse_plan_start_datetime, get_timezone
     db = get_database()
     now_utc = datetime.now(timezone.utc)
+    today_str = now_utc.strftime("%Y-%m-%d")
     date_formatted = now_utc.strftime("%A, %d %B")
     subtitle_dt_str = f"{date_formatted} • Live status across all locations"
 
     admin_fname = getattr(current_user, "full_name", None) or getattr(current_user, "name", "Admin")
     greeting_str = f"Good morning, {admin_fname.split()[0]}"
 
-    shifts_cnt = await db["shifts"].count_documents({"status": {"$ne": "cancelled"}})
     reviews_pending_cnt = await db["photo_reviews"].count_documents({"status": "pending_review"})
     open_esc_cnt = await db["escalations"].count_documents({"status": {"$in": ["open", "in_progress"]}})
 
-    current_time_minutes = now_utc.hour * 60 + now_utc.minute
+    # 1. Fetch active plans and daily shift executions for today
+    raw_shifts = []
+    seen_shift_ids = set()
 
-    raw_shifts = await db["shifts"].find({"status": {"$ne": "cancelled"}}).to_list(length=500)
+    cursor_plans = db["cleaning_plans"].find({"status": {"$ne": "cancelled"}})
+    plans = await cursor_plans.to_list(length=200)
+    for p in plans:
+        if is_plan_active_on_date(p, today_str):
+            exec_doc = await get_or_create_shift_execution(p, today_str, db)
+            sid = str(exec_doc.get("id") or exec_doc.get("_id"))
+            if sid not in seen_shift_ids:
+                seen_shift_ids.add(sid)
+                raw_shifts.append(exec_doc)
+
+    exec_cursor = db["shift_executions"].find({"date": today_str, "status": {"$ne": "cancelled"}})
+    today_execs = await exec_cursor.to_list(length=100)
+    for ex in today_execs:
+        sid = str(ex.get("id") or ex.get("_id"))
+        if sid not in seen_shift_ids:
+            seen_shift_ids.add(sid)
+            raw_shifts.append(ex)
+
+    direct_shifts = await db["shifts"].find({"date": today_str, "status": {"$ne": "cancelled"}}).to_list(length=100)
+    for ds in direct_shifts:
+        sid = str(ds.get("id") or ds.get("_id"))
+        if sid not in seen_shift_ids:
+            seen_shift_ids.add(sid)
+            raw_shifts.append(ds)
+
+    # 2. Batch resolve worker details from users collection
+    all_worker_ids = set()
+    for s in raw_shifts:
+        for wid in s.get("worker_ids", []):
+            if wid:
+                all_worker_ids.add(str(wid))
+        for w in (s.get("assigned_workers") or s.get("workers") or []):
+            if isinstance(w, dict):
+                wid = str(w.get("worker_id") or w.get("id") or "")
+                if wid:
+                    all_worker_ids.add(wid)
+
+    worker_user_map = {}
+    if all_worker_ids:
+        w_list = list(all_worker_ids)
+        oid_list = [ObjectId(x) for x in w_list if ObjectId.is_valid(x)]
+        or_clauses = [{"_id": {"$in": w_list}}, {"id": {"$in": w_list}}]
+        if oid_list:
+            or_clauses.append({"_id": {"$in": oid_list}})
+        async for u in db["users"].find({"$or": or_clauses}):
+            uid_str = str(u.get("_id") or u.get("id"))
+            worker_user_map[uid_str] = u
+            if "id" in u and u["id"]:
+                worker_user_map[str(u["id"])] = u
+            if "_id" in u:
+                worker_user_map[str(u["_id"])] = u
 
     att_pills = []
     late_no_show_cnt = 0
@@ -68,75 +122,100 @@ async def get_admin_dashboard_overview(
     group_map = {}
 
     for s in raw_shifts:
-        c_name = s.get("client_name") or s.get("client_company_name") or "Client"
+        c_name = s.get("client_name") or s.get("client_company_name") or s.get("company_name") or "Client"
         c_id = str(s.get("client_id") or "c_1")
         l_name = s.get("location_name") or "Location"
         l_id = str(s.get("location_id") or "l_1")
 
-        start_t = s.get("start_time", "08:00")
-        end_t = s.get("end_time", "16:00")
-
-        try:
-            sh, sm = map(int, start_t.split(":"))
-            start_mins = sh * 60 + sm
-        except Exception:
-            start_mins = 8 * 60
+        start_t = s.get("start_time", "08:00 AM")
+        end_t = s.get("end_time", "04:00 PM")
+        s_tz = s.get("timezone") or "Europe/Amsterdam"
 
         grp_key = f"{c_id}_{l_id}"
         if grp_key not in group_map:
-            w_list = s.get("workers", [])
             group_map[grp_key] = ClientLocationGroup(
                 client_id=c_id,
                 client_company_name=c_name,
                 location_id=l_id,
                 location_name=l_name,
-                roster_count_text=f"{len(w_list)} on roster",
+                roster_count_text="0 on roster",
                 workers=[]
             )
 
-        for w in s.get("workers", []):
-            w_id = str(w.get("worker_id") or w.get("id") or "w_1")
-            w_name = w.get("name") or w.get("full_name") or "Worker"
-            w_phone = w.get("phone_number") or w.get("phone")
-            st_val = w.get("status", "on_time")
-            if st_val == "ontime":
-                st_val = "on_time"
+        worker_entries = s.get("assigned_workers") or s.get("workers") or []
+        if not worker_entries and s.get("worker_ids"):
+            worker_entries = [{"worker_id": wid} for wid in s.get("worker_ids")]
+
+        for w in worker_entries:
+            if not isinstance(w, dict):
+                continue
+            w_id = str(w.get("worker_id") or w.get("id") or "")
+            if not w_id:
+                continue
+
+            u_doc = worker_user_map.get(w_id, {})
+            w_name = u_doc.get("full_name") or u_doc.get("name") or w.get("name") or "Worker"
+            w_phone = u_doc.get("phone") or u_doc.get("phone_number") or w.get("phone_number") or w.get("phone")
+            w_pic = u_doc.get("profile_photo") or u_doc.get("profile_picture") or w.get("profile_picture") or w.get("profile_photo")
 
             c_time_raw = w.get("checkin_time")
-            delay_mins = 0
-            if current_time_minutes > start_mins and not c_time_raw:
-                delay_mins = current_time_minutes - start_mins
-            elif st_val == "late" and isinstance(c_time_raw, datetime):
-                c_mins = c_time_raw.hour * 60 + c_time_raw.minute
-                delay_mins = max(1, c_mins - start_mins)
+            co_time_raw = w.get("checkout_time")
 
-            if st_val in ["late", "no_show"] or delay_mins > 0:
-                if st_val == "on_time" and delay_mins > 15:
+            # Evaluate attendance status
+            status_label = evaluate_worker_attendance_status(
+                plan_doc=s,
+                worker_record={"checkin_time": c_time_raw, "checkout_time": co_time_raw},
+                now_utc=now_utc,
+                target_date_str=today_str
+            )
+
+            is_checked_in = (c_time_raw is not None and co_time_raw is None)
+            is_checked_out = (co_time_raw is not None)
+
+            if is_checked_in:
+                workers_on_site_cnt += 1
+                if status_label == "late":
                     st_val = "late"
-
-            if st_val in ["late", "no_show"]:
+                    lbl = "Late (Checked In)"
+                else:
+                    st_val = "on_time"
+                    lbl = "On site"
+            elif is_checked_out:
+                st_val = "completed"
+                lbl = "Completed"
+            elif status_label == "late":
+                st_val = "late"
                 late_no_show_cnt += 1
-                delay_str = f"{delay_mins} min" if delay_mins > 0 else "Late"
+                lbl = "Late (No checkin)"
                 att_pills.append(AttentionWorkerCallPill(
                     worker_id=w_id,
                     worker_name=w_name,
-                    late_duration_minutes=delay_mins,
-                    late_duration_text=delay_str,
+                    late_duration_minutes=15,
+                    late_duration_text="15+ min",
                     phone_number=w_phone
                 ))
-            else:
-                workers_on_site_cnt += 1
-
-            lbl = "On time"
-            if st_val == "late":
-                lbl = f"{delay_mins}m late" if delay_mins > 0 else "Late"
-            elif st_val == "no_show":
+            elif status_label == "missing":
+                st_val = "no_show"
+                late_no_show_cnt += 1
                 lbl = "No show"
+                att_pills.append(AttentionWorkerCallPill(
+                    worker_id=w_id,
+                    worker_name=w_name,
+                    late_duration_minutes=60,
+                    late_duration_text="Shift ended",
+                    phone_number=w_phone
+                ))
+            elif status_label == "ontime":
+                st_val = "on_time"
+                lbl = "On time"
+            else:
+                st_val = "scheduled"
+                lbl = "Scheduled"
 
             wk_item = DashboardWorkerItem(
                 worker_id=w_id,
                 name=w_name,
-                profile_picture=w.get("profile_picture"),
+                profile_picture=w_pic,
                 shift_time_range=f"{start_t}–{end_t}",
                 delay_reason=w.get("delay_reason"),
                 status=st_val,
@@ -148,6 +227,9 @@ async def get_admin_dashboard_overview(
             if not status_filter or status_filter.lower() == "all" or st_val == status_filter.lower():
                 group_map[grp_key].workers.append(wk_item)
 
+    for grp in group_map.values():
+        grp.roster_count_text = f"{len(grp.workers)} on roster"
+
     groups = [g for g in group_map.values() if g.workers or not status_filter or status_filter.lower() == "all"]
 
     att_banner = AttentionRequiredBanner(
@@ -158,7 +240,7 @@ async def get_admin_dashboard_overview(
     )
 
     cards = DashboardSummaryCards(
-        active_shifts_count=shifts_cnt,
+        active_shifts_count=len(raw_shifts),
         workers_on_site_count=workers_on_site_cnt,
         late_no_show_count=late_no_show_cnt,
         reviews_pending_count=reviews_pending_cnt

@@ -14,14 +14,28 @@ qc_reports_router = APIRouter(prefix="/manager", tags=["Manager Quality Control 
 
 @qc_reports_router.get("/reports/quality-control", response_model=QualityControlReportResponse, summary="Global Quality Control Reports Dashboard (Image Mockup)")
 async def get_quality_control_report(
-    timeframe: Literal["week", "month", "quarter", "year"] = "month",
+    timeframe: Optional[str] = "month",
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    tf = timeframe.lower()
+    raw_tf = (timeframe or "month").strip().lower()
+    if raw_tf in ["week", "weekly", "1w", "7d"]:
+        tf = "week"
+    elif raw_tf in ["quarter", "quarterly", "3m"]:
+        tf = "quarter"
+    elif raw_tf in ["year", "yearly", "1y", "annual"]:
+        tf = "year"
+    else:
+        tf = "month"
 
-    # Query MongoDB counts
-    shifts_cnt = await db["shifts"].count_documents({})
+    # Query MongoDB counts across shifts, executions, plans
+    shifts_cnt = (
+        await db["shifts"].count_documents({"status": {"$ne": "cancelled"}}) +
+        await db["shift_executions"].count_documents({"status": {"$ne": "cancelled"}})
+    )
+    if shifts_cnt == 0:
+        shifts_cnt = await db["cleaning_plans"].count_documents({"status": {"$ne": "cancelled"}})
+
     photos_approved_cnt = await db["photo_reviews"].count_documents({"status": "approved"})
     photos_pending_cnt = await db["photo_reviews"].count_documents({"status": "pending_review"})
     photos_rejected_cnt = await db["photo_reviews"].count_documents({"status": "rejected"})
@@ -33,10 +47,12 @@ async def get_quality_control_report(
     if tf == "week":
         days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         for d_idx, day_name in enumerate(days):
-            # Calculate date for each day of current week
             day_dt = now - timedelta(days=now.weekday()) + timedelta(days=d_idx)
             day_str = day_dt.strftime("%Y-%m-%d")
-            c = await db["shifts"].count_documents({"date": day_str})
+            c = (
+                await db["shifts"].count_documents({"date": day_str, "status": {"$ne": "cancelled"}}) +
+                await db["shift_executions"].count_documents({"date": day_str, "status": {"$ne": "cancelled"}})
+            )
             trends.append(ShiftTrendDataPoint(label=day_name, count=c))
     elif tf == "quarter":
         curr_year = now.year
@@ -47,20 +63,29 @@ async def get_quality_control_report(
             ("Q4", f"{curr_year}-10-01", f"{curr_year}-12-31"),
         ]
         for q_label, q_start, q_end in q_map:
-            c = await db["shifts"].count_documents({"date": {"$gte": q_start, "$lte": q_end}})
+            c = (
+                await db["shifts"].count_documents({"date": {"$gte": q_start, "$lte": q_end}}) +
+                await db["shift_executions"].count_documents({"date": {"$gte": q_start, "$lte": q_end}})
+            )
             trends.append(ShiftTrendDataPoint(label=q_label, count=c))
     elif tf == "year":
         curr_year = now.year
         for yr in range(curr_year - 3, curr_year + 1):
             yr_str = str(yr)
-            c = await db["shifts"].count_documents({"date": {"$regex": f"^{yr_str}"}})
+            c = (
+                await db["shifts"].count_documents({"date": {"$regex": f"^{yr_str}"}}) +
+                await db["shift_executions"].count_documents({"date": {"$regex": f"^{yr_str}"}})
+            )
             trends.append(ShiftTrendDataPoint(label=yr_str, count=c))
     else:  # month
         months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         curr_year = now.year
         for m_idx, m_name in enumerate(months, start=1):
             m_prefix = f"{curr_year}-{m_idx:02d}"
-            c = await db["shifts"].count_documents({"date": {"$regex": f"^{m_prefix}"}})
+            c = (
+                await db["shifts"].count_documents({"date": {"$regex": f"^{m_prefix}"}}) +
+                await db["shift_executions"].count_documents({"date": {"$regex": f"^{m_prefix}"}})
+            )
             trends.append(ShiftTrendDataPoint(label=m_name, count=c))
 
     pie_dist = PhotoQualityDistributionData(
@@ -83,10 +108,18 @@ async def get_quality_control_report(
 
 @qc_reports_router.get("/reports/quality-control/pdf", summary="Export Quality Control Report PDF (Top Right PDF Button Image Mockup)")
 async def export_quality_control_report_pdf(
-    timeframe: Literal["week", "month", "quarter", "year"] = "month",
+    timeframe: Optional[str] = "month",
     current_user: UserInDB = Depends(require_manager)
 ):
-    tf_str = timeframe.capitalize()
+    raw_tf = (timeframe or "month").strip().lower()
+    if raw_tf in ["week", "weekly", "1w", "7d"]:
+        tf_str = "Week"
+    elif raw_tf in ["quarter", "quarterly", "3m"]:
+        tf_str = "Quarter"
+    elif raw_tf in ["year", "yearly", "1y", "annual"]:
+        tf_str = "Year"
+    else:
+        tf_str = "Month"
     now_str = datetime.now(timezone.utc).strftime("%B %d, %Y")
 
     # Generate PDF Content

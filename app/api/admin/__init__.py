@@ -15,6 +15,8 @@ from app.api.admin.photo_reviews import photo_reviews_router
 from app.api.admin.escalations import escalations_router
 from app.api.admin.reports_quality_control import qc_reports_router
 from app.api.admin.notifications import admin_notifications_router
+from app.api.admin.worker_approvals import worker_approvals_router
+from app.api.admin.worker_earnings_invoices import worker_earnings_invoices_router
 
 __all__ = [
     "router",
@@ -27,6 +29,8 @@ __all__ = [
     "cleaning_plan_mgmt_router",
     "cleaning_plan_dropdowns_router",
     "worker_mgmt_router",
+    "worker_approvals_router",
+    "worker_earnings_invoices_router",
     "shift_mgmt_router",
     "roster_mgmt_router",
     "photo_reviews_router",

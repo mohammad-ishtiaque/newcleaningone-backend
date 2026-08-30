@@ -57,3 +57,28 @@ class EscalationDrawerResponse(BaseModel):
     photo_url: Optional[str] = None
     created_at: datetime
     notes: Optional[str] = None
+
+class WorkerEscalationCreate(BaseModel):
+    shift_id: Optional[str] = Field(None, json_schema_extra={"example": "shift_123"})
+    room_id: Optional[str] = Field(None, json_schema_extra={"example": "room_456"})
+    title: str = Field(..., json_schema_extra={"example": "Broken Keycard / Inaccessible Room"})
+    category: Optional[str] = Field("maintenance", json_schema_extra={"example": "maintenance"})
+    severity: Literal["high", "medium", "low"] = Field("high", json_schema_extra={"example": "high"})
+    description: str = Field(..., json_schema_extra={"example": "Door handle is detached and room cannot be entered."})
+    photo_urls: Optional[List[str]] = Field(default_factory=list)
+    photo_url: Optional[str] = None
+
+class WorkerEscalationResponse(BaseModel):
+    id: str
+    escalation_id: str
+    shift_id: Optional[str] = None
+    room_id: Optional[str] = None
+    title: str
+    category: str = "maintenance"
+    severity: str = "high"
+    description: str
+    status: str = "open"
+    photo_url: Optional[str] = None
+    photo_urls: List[str] = Field(default_factory=list)
+    created_at: datetime
+    message: str = "Escalation report submitted successfully"

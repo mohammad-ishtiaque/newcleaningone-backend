@@ -46,6 +46,8 @@ class LiveStatusItem(BaseModel):
     position: Optional[str] = "normal"
     shift_id: str
     shift_name: Optional[str] = None
+    date: Optional[str] = Field(default=None, description="Shift service date (YYYY-MM-DD)", json_schema_extra={"example": "2026-08-26"})
+    shift_date: Optional[str] = Field(default=None, description="Shift service date alias (YYYY-MM-DD)", json_schema_extra={"example": "2026-08-26"})
     location_id: str
     location_name: str
     client_id: str
@@ -58,6 +60,12 @@ class LiveStatusItem(BaseModel):
     hours_worked_numeric: float = 0.0
     progress_percentage: float = 0.0
     status: Literal["ontime", "late", "missing", "scheduled"]
+    pending_approval_count: int = Field(default=0, description="Photos currently pending manager review", json_schema_extra={"example": 0})
+    pending_photos_count: int = Field(default=0, description="Photos pending upload or review", json_schema_extra={"example": 0})
+    rejected_photos_count: int = Field(default=0, description="Photos rejected by manager needing resubmission", json_schema_extra={"example": 0})
+    uncompleted_tasks_count: int = Field(default=0, description="Cleaning tasks not yet completed", json_schema_extra={"example": 0})
+    checkout_blocked_reason: Optional[str] = Field(default=None, description="Detailed reason explaining why checkout is blocked", json_schema_extra={"example": None})
+    can_checkout: bool = Field(default=True, description="Whether worker is eligible to check out with all items approved", json_schema_extra={"example": True})
 
 class LiveStatusResponse(BaseModel):
     total_shifts_count: int

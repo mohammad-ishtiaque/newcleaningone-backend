@@ -62,6 +62,10 @@ class UserInDB(BaseModel):
     base_location: Optional[str] = None
     languages: List[str] = Field(default_factory=list)
     employee_contract_pdf: Optional[str] = None
+    working_days: List[str] = Field(default_factory=lambda: ["mon", "tue", "wed", "thu", "fri", "sat"])
+    # Canonical worker pay rate (EUR/hour). Legacy `per_hour_salary` was removed;
+    # see app/services/worker_salary.py for the read fallback on old documents.
+    hourly_rate: Optional[float] = 25.0
     
     # Draft storage for onboarding
     onboarding_draft: dict = Field(default_factory=dict)

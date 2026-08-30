@@ -3,19 +3,44 @@ from fastapi import APIRouter, Depends, status, HTTPException
 from typing import List, Optional
 from bson import ObjectId
 from app.core.database import get_database
+from app.services.worker_salary import resolve_hourly_rate
 from app.schemas.user import (
     WorkerApprovalResponse, WorkerApprovalPaginatedResponse,
-    WorkerApproveRequest, WorkerRejectRequest
+    WorkerApproveRequest, WorkerRejectRequest, WorkerDetailResponse
 )
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
 
 worker_approvals_router = APIRouter(prefix="/manager", tags=["Manager Worker Management"])
 
+
+def _format_viewable_url(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    p = str(path).strip()
+    if p.startswith("http://") or p.startswith("https://") or p.startswith("/uploads/") or p.startswith("/static/"):
+        return p
+    clean_name = p.lstrip("/")
+    if clean_name.startswith("uploads/"):
+        return f"/{clean_name}"
+    return f"/uploads/{clean_name}"
+
+
 @worker_approvals_router.get(
     "/worker-approvals",
     response_model=WorkerApprovalPaginatedResponse,
-    summary="List Pending Worker Approvals"
+    summary="List Pending Worker Approvals",
+    description="""
+### List Pending Worker Approvals
+Returns a paginated list of worker registrations awaiting manager approval.
+Only workers who have completed their email verification (via OTP) are eligible and listed for approval.
+"""
+)
+@worker_approvals_router.get(
+    "/manager/worker-approvals",
+    response_model=WorkerApprovalPaginatedResponse,
+    summary="List Pending Worker Approvals (Alias)",
+    include_in_schema=False
 )
 async def list_pending_worker_approvals(
     page: int = 1,
@@ -25,15 +50,18 @@ async def list_pending_worker_approvals(
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"role": "worker"}
+    
+    # Must be worker role and must have verified email
+    query = {"role": "worker", "is_verified": True}
 
-    if status_filter:
+    if status_filter and status_filter.lower() != "all":
         query["approval_status"] = status_filter
 
     if search:
         query["$or"] = [
             {"full_name": {"$regex": search, "$options": "i"}},
-            {"email": {"$regex": search, "$options": "i"}}
+            {"email": {"$regex": search, "$options": "i"}},
+            {"phone": {"$regex": search, "$options": "i"}}
         ]
 
     total_count = await db["users"].count_documents(query)
@@ -47,23 +75,41 @@ async def list_pending_worker_approvals(
         cat = w.get("created_at") if isinstance(w.get("created_at"), datetime) else datetime.now(timezone.utc)
         uat = w.get("updated_at") if isinstance(w.get("updated_at"), datetime) else datetime.now(timezone.utc)
 
+        draft = w.get("onboarding_draft") or {}
+        id_front = _format_viewable_url(w.get("id_card_front") or draft.get("id_card_front"))
+        id_back = _format_viewable_url(w.get("id_card_back") or draft.get("id_card_back"))
+        photo = _format_viewable_url(w.get("profile_photo") or draft.get("profile_photo"))
+        raw_certs = w.get("certificates") or draft.get("certificates") or []
+        certs = [_format_viewable_url(c) for c in raw_certs if c] if isinstance(raw_certs, list) else []
+        dob = w.get("dob") or draft.get("dob")
+        nat = w.get("nationality") or draft.get("nationality")
+
         approvals.append(WorkerApprovalResponse(
             id=wid,
             full_name=w.get("full_name", ""),
             email=w.get("email", ""),
             phone=w.get("phone"),
-            worker_type=str(w.get("worker_type", "employee")),
+            worker_type=str(w.get("worker_type", "freelancer")),
             approval_status=w.get("approval_status", "pending"),
             is_approved=w.get("is_approved", False),
             rejection_reason=w.get("rejection_reason"),
+            id_card_front=id_front,
+            id_card_back=id_back,
+            profile_photo=photo,
+            certificates=certs,
+            dob=str(dob) if dob else None,
+            nationality=str(nat) if nat else None,
             created_at=cat,
             updated_at=uat
         ))
+
+    has_more = (skip + len(approvals)) < total_count
 
     return WorkerApprovalPaginatedResponse(
         total_count=total_count,
         page=page,
         limit=limit,
+        has_more=has_more,
         pending_approvals=approvals
     )
 
@@ -71,7 +117,47 @@ async def list_pending_worker_approvals(
 @worker_approvals_router.post(
     "/workers/{worker_id}/approve",
     response_model=WorkerApprovalResponse,
-    summary="Approve Worker Signup"
+    summary="Approve Worker Signup",
+    description="""
+### Approve Worker Signup
+Approves a worker who signed up themselves. Sets `approval_status: "approved"`, activates the
+account, mirrors the worker into `admin_workers`, records the action in `worker_approval_history`,
+and notifies the worker by push and WebSocket.
+
+#### Request Body (entirely optional — send `{}` to approve with the worker's own details)
+
+| Field | Type | Supported values | Omitted means |
+| :--- | :--- | :--- | :--- |
+| `worker_type` | enum | `"employee"`, `"freelancer"` | keep what the worker signed up with |
+| `position` | string | e.g. `"Cleaner"` | keep existing, else `"Cleaner"` |
+| `base_location` | string | Free text location label | keep existing, else `"Amsterdam-Centrum"` |
+| `hourly_rate` | number | `> 0` and `<= 1000`, decimals allowed (`25.5`) | **keep the rate already on the account** |
+
+#### Example Requests
+```json
+{}
+```
+```json
+{ "worker_type": "employee", "position": "Cleaner", "hourly_rate": 25.5 }
+```
+
+#### Note on `hourly_rate`
+Omitting it keeps whatever rate the account already carries. Previously this field defaulted to `25`,
+which was indistinguishable from an omitted field, so approving with an empty body silently reset a
+30/hour worker down to 25. Sending the removed `per_hour_salary` returns a `422`.
+
+#### Errors
+- `400` — worker is already approved
+- `404` — no worker with this `worker_id`
+- `422` — invalid `hourly_rate`, or the removed `per_hour_salary` was sent
+- `403` — caller is not a manager
+"""
+)
+@worker_approvals_router.post(
+    "/manager/workers/{worker_id}/approve",
+    response_model=WorkerApprovalResponse,
+    summary="Approve Worker Signup (Alias)",
+    include_in_schema=False
 )
 async def approve_worker_signup(
     worker_id: str,
@@ -90,6 +176,12 @@ async def approve_worker_signup(
     w_type = approve_in.worker_type if approve_in and approve_in.worker_type else (user.get("worker_type") or "employee")
     w_pos = approve_in.position if approve_in and approve_in.position else (user.get("position") or "Cleaner")
     w_loc = approve_in.base_location if approve_in and approve_in.base_location else (user.get("base_location") or "Amsterdam-Centrum")
+    # Only an explicitly supplied rate overrides what is already on the account.
+    hourly_r = (
+        approve_in.hourly_rate
+        if (approve_in and approve_in.hourly_rate is not None)
+        else resolve_hourly_rate(user)
+    )
 
     update_fields = {
         "is_approved": True,
@@ -100,6 +192,7 @@ async def approve_worker_signup(
         "position": w_pos,
         "base_location": w_loc,
         "location": w_loc,
+        "hourly_rate": hourly_r,
         "updated_at": now
     }
 
@@ -116,6 +209,7 @@ async def approve_worker_signup(
             "worker_type": w_type,
             "position": w_pos,
             "base_location": w_loc,
+            "hourly_rate": hourly_r,
             "status": "active",
             "is_active": True,
             "updated_at": now
@@ -158,6 +252,7 @@ async def approve_worker_signup(
     cat = updated.get("created_at") if isinstance(updated.get("created_at"), datetime) else datetime.now(timezone.utc)
     uat = updated.get("updated_at") if isinstance(updated.get("updated_at"), datetime) else datetime.now(timezone.utc)
 
+    draft = updated.get("onboarding_draft") or {}
     return WorkerApprovalResponse(
         id=str(updated["_id"]),
         full_name=updated.get("full_name", ""),
@@ -166,7 +261,14 @@ async def approve_worker_signup(
         worker_type=str(updated.get("worker_type", "employee")),
         approval_status="approved",
         is_approved=True,
+        hourly_rate=hourly_r,
         rejection_reason=None,
+        id_card_front=updated.get("id_card_front") or draft.get("id_card_front"),
+        id_card_back=updated.get("id_card_back") or draft.get("id_card_back"),
+        profile_photo=updated.get("profile_photo") or draft.get("profile_photo"),
+        certificates=updated.get("certificates") or draft.get("certificates") or [],
+        dob=str(updated.get("dob") or draft.get("dob")) if (updated.get("dob") or draft.get("dob")) else None,
+        nationality=str(updated.get("nationality") or draft.get("nationality")) if (updated.get("nationality") or draft.get("nationality")) else None,
         created_at=cat,
         updated_at=uat
     )
@@ -176,6 +278,12 @@ async def approve_worker_signup(
     "/workers/{worker_id}/reject",
     status_code=status.HTTP_200_OK,
     summary="Reject Worker Signup"
+)
+@worker_approvals_router.post(
+    "/manager/workers/{worker_id}/reject",
+    status_code=status.HTTP_200_OK,
+    summary="Reject Worker Signup (Alias)",
+    include_in_schema=False
 )
 async def reject_worker_signup(
     worker_id: str,
@@ -217,3 +325,65 @@ async def reject_worker_signup(
     })
 
     return {"message": "Worker signup rejected", "worker_id": worker_id, "rejection_reason": reason_txt}
+
+
+@worker_approvals_router.get(
+    "/workers/{worker_id}",
+    response_model=WorkerDetailResponse,
+    summary="Get Single Worker Details by ID"
+)
+async def get_worker_detail(
+    worker_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"$or": [{"_id": worker_id}, {"id": worker_id}]}
+    user = await db["users"].find_one({"$and": [query, {"role": "worker"}]})
+    if not user:
+        # Check admin_workers collection
+        user = await db["admin_workers"].find_one({"$or": [{"_id": worker_id}, {"id": worker_id}, {"worker_id": worker_id}]})
+        if not user:
+            raise HTTPException(status_code=404, detail="Worker not found")
+
+    wid = str(user.get("_id") or user.get("id") or worker_id)
+    cat = user.get("created_at") if isinstance(user.get("created_at"), datetime) else datetime.now(timezone.utc)
+    uat = user.get("updated_at") if isinstance(user.get("updated_at"), datetime) else datetime.now(timezone.utc)
+
+    draft = user.get("onboarding_draft") or {}
+    id_front = user.get("id_card_front") or draft.get("id_card_front")
+    id_back = user.get("id_card_back") or draft.get("id_card_back")
+    photo = user.get("profile_photo") or draft.get("profile_photo")
+    certs = user.get("certificates") or draft.get("certificates") or []
+    dob = user.get("dob") or draft.get("dob")
+    nat = user.get("nationality") or draft.get("nationality")
+
+    # Shift counts
+    total_s = await db["shifts"].count_documents({"worker_id": wid}) + await db["shift_executions"].count_documents({"assigned_workers.worker_id": wid})
+    comp_s = await db["shifts"].count_documents({"worker_id": wid, "status": "completed"}) + await db["shift_executions"].count_documents({"assigned_workers.worker_id": wid, "status": "completed"})
+
+    return WorkerDetailResponse(
+        id=wid,
+        worker_id=wid,
+        full_name=user.get("full_name") or user.get("name", "Worker"),
+        email=user.get("email", "worker@cleaningone.com"),
+        phone=user.get("phone"),
+        worker_type=user.get("worker_type", "employee"),
+        position=user.get("position", "Cleaner"),
+        base_location=user.get("base_location") or user.get("location") or "Amsterdam-Centrum",
+        profile_photo=photo,
+        id_card_front=id_front,
+        id_card_back=id_back,
+        certificates=certs if isinstance(certs, list) else [],
+        dob=str(dob) if dob else None,
+        nationality=str(nat) if nat else None,
+        status=user.get("status") or ("active" if user.get("is_active", True) else "inactive"),
+        account_status=user.get("account_status", "active"),
+        is_approved=user.get("is_approved", True),
+        approval_status=user.get("approval_status", "approved"),
+        total_shifts_count=total_s,
+        completed_shifts_count=comp_s,
+        rating=float(user.get("rating", 5.0)),
+        hourly_rate=resolve_hourly_rate(user),
+        created_at=cat,
+        updated_at=uat
+    )

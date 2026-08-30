@@ -11,6 +11,7 @@ from app.schemas.client_location_monitoring import (
     ClientLocationRoomsPaginatedResponse, ClientRoomFullDetailResponse
 )
 from app.schemas.client_list import CleaningTaskResponse, TaskPhotoResponse
+from app.services.client_helper import resolve_client_id_aliases
 
 router = APIRouter(prefix="/client", tags=["Client Location Monitoring"])
 
@@ -82,14 +83,15 @@ async def list_client_locations_monitoring(
     Client List Locations (Summary Form).
     """
     db = get_database()
-    client_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "client_1")
+    client_aliases = await resolve_client_id_aliases(current_user, db)
 
     # Base query for locations of this client
     query_parts = [{
         "$or": [
-            {"client_id": client_id},
-            {"client_ids": client_id},
-            {"id": client_id}
+            {"client_id": {"$in": client_aliases}},
+            {"client_ids": {"$in": client_aliases}},
+            {"_id": {"$in": client_aliases}},
+            {"id": {"$in": client_aliases}}
         ]
     }]
 
@@ -115,9 +117,12 @@ async def list_client_locations_monitoring(
 
     # Fallback to embedded locations in client_list if locations collection is empty
     if not raw_locs and total_count == 0:
-        c_doc = await db["client_list"].find_one({"$or": [{"_id": client_id}, {"id": client_id}]})
-        if c_doc and "locations" in c_doc and isinstance(c_doc["locations"], list):
-            embedded_locs = c_doc["locations"]
+        c_docs = await db["client_list"].find({"$or": [{"_id": {"$in": client_aliases}}, {"id": {"$in": client_aliases}}, {"user_id": {"$in": client_aliases}}]}).to_list(length=10)
+        embedded_locs = []
+        for c_doc in c_docs:
+            if "locations" in c_doc and isinstance(c_doc["locations"], list):
+                embedded_locs.extend(c_doc["locations"])
+        if embedded_locs:
             if search:
                 s_lower = search.lower()
                 embedded_locs = [
@@ -164,7 +169,6 @@ async def list_client_locations_monitoring(
 
             rooms_summary.append(ClientRoomShortSummaryItem(
                 id=rid,
-                room_id=rid,
                 room_name=rname,
                 room_type=rtype,
                 floor=r.get("floor", 1),
@@ -180,9 +184,7 @@ async def list_client_locations_monitoring(
 
         locations_list.append(ClientLocationShortItem(
             id=lid,
-            location_id=lid,
             name=lname,
-            location_name=lname,
             type=loc_type,
             address=addr or None,
             city=city or None,
@@ -225,25 +227,33 @@ async def get_client_location_detail(
     Client Single Location Detail Endpoint.
     """
     db = get_database()
-    client_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "client_1")
+    client_aliases = await resolve_client_id_aliases(current_user, db)
+    client_id = client_aliases[0] if client_aliases else str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "client_1")
     company_name = getattr(current_user, "company_name", None) or getattr(current_user, "full_name", None) or "Client"
 
     # Validate that location exists and belongs to this client
     query_loc = {
         "$and": [
             {"$or": [{"_id": location_id}, {"id": location_id}]},
-            {"$or": [{"client_id": client_id}, {"client_ids": client_id}, {"id": client_id}]}
+            {"$or": [
+                {"client_id": {"$in": client_aliases}},
+                {"client_ids": {"$in": client_aliases}},
+                {"id": {"$in": client_aliases}},
+                {"_id": {"$in": client_aliases}}
+            ]}
         ]
     }
     loc_doc = await db["locations"].find_one(query_loc)
 
     # Fallback to embedded locations in client_list
     if not loc_doc:
-        c_doc = await db["client_list"].find_one({"$or": [{"_id": client_id}, {"id": client_id}]})
-        if c_doc and "locations" in c_doc and isinstance(c_doc["locations"], list):
-            target_l = next((l for l in c_doc["locations"] if str(l.get("id") or l.get("_id")) == str(location_id)), None)
-            if target_l:
-                loc_doc = target_l
+        c_docs = await db["client_list"].find({"$or": [{"_id": {"$in": client_aliases}}, {"id": {"$in": client_aliases}}, {"user_id": {"$in": client_aliases}}]}).to_list(length=10)
+        for c_doc in c_docs:
+            if "locations" in c_doc and isinstance(c_doc["locations"], list):
+                target_l = next((l for l in c_doc["locations"] if str(l.get("id") or l.get("_id")) == str(location_id)), None)
+                if target_l:
+                    loc_doc = target_l
+                    break
 
     if not loc_doc:
         raise HTTPException(status_code=404, detail="Location not found or does not belong to client")
@@ -271,7 +281,6 @@ async def get_client_location_detail(
 
         rooms_detail_list.append(ClientRoomDetailItem(
             id=rid,
-            room_id=rid,
             room_name=rname,
             room_type=rtype,
             location_id=lid,
@@ -292,9 +301,7 @@ async def get_client_location_detail(
 
     return ClientLocationDetailResponse(
         id=lid,
-        location_id=lid,
         name=lname,
-        location_name=lname,
         type=loc_doc.get("type", "office"),
         address=loc_doc.get("address") or loc_doc.get("street"),
         city=loc_doc.get("city"),
@@ -336,13 +343,18 @@ async def list_client_location_rooms(
     Client List Rooms for Location Endpoint.
     """
     db = get_database()
-    client_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "client_1")
+    client_aliases = await resolve_client_id_aliases(current_user, db)
 
     # Verify location belongs to client
     query_loc = {
         "$and": [
             {"$or": [{"_id": location_id}, {"id": location_id}]},
-            {"$or": [{"client_id": client_id}, {"client_ids": client_id}, {"id": client_id}]}
+            {"$or": [
+                {"client_id": {"$in": client_aliases}},
+                {"client_ids": {"$in": client_aliases}},
+                {"id": {"$in": client_aliases}},
+                {"_id": {"$in": client_aliases}}
+            ]}
         ]
     }
     loc_doc = await db["locations"].find_one(query_loc)
@@ -384,7 +396,6 @@ async def list_client_location_rooms(
 
         rooms_list.append(ClientRoomDetailItem(
             id=rid,
-            room_id=rid,
             room_name=rname,
             room_type=rtype,
             location_id=location_id,
@@ -436,7 +447,8 @@ async def get_client_room_full_detail(
     Client Full Room Detail Endpoint.
     """
     db = get_database()
-    client_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "client_1")
+    client_aliases = await resolve_client_id_aliases(current_user, db)
+    client_id = client_aliases[0] if client_aliases else str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "client_1")
     company_name = getattr(current_user, "company_name", None) or getattr(current_user, "full_name", None) or "Client"
 
     query_room = {"$or": [{"_id": room_id}, {"id": room_id}, {"room_id": room_id}]}
@@ -450,7 +462,7 @@ async def get_client_room_full_detail(
 
     # Verify that the room or its location belongs to this client
     r_client_id = str(room_doc.get("client_id") or "")
-    if r_client_id and r_client_id != client_id:
+    if r_client_id and r_client_id not in client_aliases:
         raise HTTPException(status_code=403, detail="Access denied to this room")
 
     # If client_id is not directly on room doc, verify via location
@@ -458,7 +470,7 @@ async def get_client_room_full_detail(
         loc_doc = await db["locations"].find_one({"$or": [{"_id": r_loc_id}, {"id": r_loc_id}]})
         if loc_doc:
             l_client_id = str(loc_doc.get("client_id") or "")
-            if l_client_id and l_client_id != client_id:
+            if l_client_id and l_client_id not in client_aliases:
                 raise HTTPException(status_code=403, detail="Access denied to this room")
 
     rid = str(room_doc.get("_id") or room_doc.get("id") or room_doc.get("room_id") or room_id)
@@ -476,7 +488,6 @@ async def get_client_room_full_detail(
 
     return ClientRoomFullDetailResponse(
         id=rid,
-        room_id=rid,
         room_name=rname,
         room_type=rtype,
         location_id=r_loc_id or None,

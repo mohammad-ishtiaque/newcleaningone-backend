@@ -6,7 +6,8 @@ from app.api import (
     admin_shift_monitoring, admin_dashboard, client_live_status,
     client_schedule, client_extra_services, admin_extra_services, worker_extra_services,
     chat, client_chat, admin_chat, worker_chat, worker_roster, worker_home, client_profile_settings,
-    client_location_monitoring
+    client_location_monitoring, worker_escalations, client_cleaning_plans,
+    worker_assignments, worker_invoices, worker_availability, client_notes, worker_earnings
 )
 import os
 
@@ -43,12 +44,7 @@ def create_app(service_name: str = "all") -> FastAPI:
         "http://localhost:8084",
         "http://localhost:3000",
         "http://localhost:5173",
-        "http://127.0.0.1:8000",
-        "http://127.0.0.1:8080",
-        "http://127.0.0.1:8081",
-        "http://127.0.0.1:8082",
-        "http://127.0.0.1:8083",
-        "http://127.0.0.1:8084",
+        "*"
     ]
     
     app.add_middleware(
@@ -75,6 +71,8 @@ def create_app(service_name: str = "all") -> FastAPI:
         app.include_router(admin.cleaning_plan_mgmt_router)
         app.include_router(admin.cleaning_plan_dropdowns_router)
         app.include_router(admin.worker_mgmt_router)
+        app.include_router(admin.worker_earnings_invoices_router)
+        app.include_router(admin.worker_approvals_router)
         app.include_router(admin.shift_mgmt_router)
         app.include_router(admin.roster_mgmt_router)
         app.include_router(admin.photo_reviews_router)
@@ -96,18 +94,25 @@ def create_app(service_name: str = "all") -> FastAPI:
         app.include_router(client_live_status.router)
         app.include_router(client.router)
         app.include_router(client_schedule.router)
+        app.include_router(client_cleaning_plans.router)
         app.include_router(client_extra_services.router)
         app.include_router(client_location_monitoring.router)
         app.include_router(client_chat.router)
         app.include_router(client_profile_settings.router)
+        app.include_router(client_notes.router)
 
     if service_name in ("worker", "all"):
         app.include_router(worker.router)
         app.include_router(worker_shifts.worker_shift_router)
+        app.include_router(worker_assignments.router)
+        app.include_router(worker_invoices.router)
+        app.include_router(worker_availability.router)
+        app.include_router(worker_earnings.router)
         app.include_router(worker_extra_services.router)
         app.include_router(worker_chat.router)
         app.include_router(worker_roster.router)
         app.include_router(worker_home.router)
+        app.include_router(worker_escalations.router)
 
     os.makedirs("uploads", exist_ok=True)
     app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")

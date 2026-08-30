@@ -159,88 +159,164 @@ async def get_photo_review_details(
 
 from app.api.worker_shift_utils import resolve_shift_execution, calculate_cleaning_plan_progress
 
-async def _sync_shift_room_approval(db, r_doc: dict, is_approved: bool):
-    """Helper to update shift room status and recalculate shift progress when Admin approves or rejects proof."""
+async def _sync_shift_room_approval(db, r_doc: dict, is_approved: bool, rejection_reason: Optional[str] = None):
+    """
+    Helper to update shift room and task status and recalculate shift progress when Admin approves or rejects proof.
+    Ripple Logic:
+    1. Photo status -> Approved/Rejected.
+    2. If all required photos for a task are approved -> Task marked is_completed=True.
+    3. If all tasks for a room are completed -> Room marked status='completed', is_completed=True.
+    4. If all rooms & additional tasks are completed -> Shift marked status='completed'.
+    """
     if not r_doc:
         return
     shift_id = r_doc.get("shift_id")
-    room_info = r_doc.get("room", {})
-    room_id = room_info.get("room_id") if isinstance(room_info, dict) else r_doc.get("room_id")
+    target_photo_id = str(r_doc.get("photo_id") or "")
+    review_id = str(r_doc.get("review_id") or r_doc.get("_id") or "")
 
-    if not shift_id or not room_id:
+    if not shift_id:
         return
 
     shift_doc, coll_name = await resolve_shift_execution(shift_id, db)
     if not shift_doc:
         return
 
-    rooms = shift_doc.get("rooms", [])
-    target_room = next((r for r in rooms if str(r.get("room_id")) == str(room_id)), None)
-    if not target_room:
-        return
-
     now = datetime.now(timezone.utc)
-    if is_approved:
-        target_room["status"] = "completed"
-        target_room["approval_status"] = "verified"
-        target_room["is_verified"] = True
-    else:
-        target_room["status"] = "in_progress"
-        target_room["approval_status"] = "rejected"
-        target_room["is_verified"] = False
+    rooms = shift_doc.get("rooms", [])
+    additional_tasks = shift_doc.get("additional_tasks", [])
 
-    # Mark photo status inside target room's submitted_photos and tasks' submitted_photos
     approved_photos_count = 0
+
+    # 1. Update photos in rooms and tasks
     for r in rooms:
+        # Update room level submitted photos
         for p in r.get("submitted_photos", []):
-            if (p.get("review_id") == r_doc.get("review_id") or (r_doc.get("photo_id") and p.get("photo_id") == r_doc.get("photo_id"))) and is_approved:
-                p["status"] = "approved"
-            elif (p.get("review_id") == r_doc.get("review_id") or (r_doc.get("photo_id") and p.get("photo_id") == r_doc.get("photo_id"))) and not is_approved:
-                p["status"] = "rejected"
+            if str(p.get("photo_id")) == target_photo_id or str(p.get("review_id")) == review_id:
+                p["status"] = "approved" if is_approved else "rejected"
+                if not is_approved and rejection_reason:
+                    p["rejection_reason"] = rejection_reason
             if p.get("status") == "approved":
                 approved_photos_count += 1
+
+        # Update task level submitted photos
         for t in r.get("tasks", []):
             for tp in t.get("submitted_photos", []):
-                if (tp.get("review_id") == r_doc.get("review_id") or (r_doc.get("photo_id") and tp.get("photo_id") == r_doc.get("photo_id"))) and is_approved:
-                    tp["status"] = "approved"
-                elif (tp.get("review_id") == r_doc.get("review_id") or (r_doc.get("photo_id") and tp.get("photo_id") == r_doc.get("photo_id"))) and not is_approved:
-                    tp["status"] = "rejected"
+                if str(tp.get("photo_id")) == target_photo_id or str(tp.get("review_id")) == review_id:
+                    tp["status"] = "approved" if is_approved else "rejected"
+                    if not is_approved and rejection_reason:
+                        tp["rejection_reason"] = rejection_reason
 
-    if is_approved and approved_photos_count == 0:
-        approved_photos_count = 1
+            # Evaluate task completion
+            req_photos = t.get("photo", []) or t.get("required_photos", [])
+            sub_photos = t.get("submitted_photos", [])
+            if len(req_photos) > 0:
+                all_photos_ok = True
+                for rp in req_photos:
+                    rp_id = str(rp.get("id") or rp.get("photo_id") or "")
+                    matched_sub = next((sp for sp in sub_photos if str(sp.get("photo_id")) == rp_id), None)
+                    if not matched_sub or matched_sub.get("status") != "approved":
+                        all_photos_ok = False
+                        break
+                t["is_completed"] = all_photos_ok
+                t["completed_at"] = now if all_photos_ok else None
 
-    shift_doc["approved_photos_count"] = approved_photos_count
-    progress = calculate_cleaning_plan_progress(shift_doc, approved_photos_count=approved_photos_count)
+        # Evaluate room completion
+        r_tasks = r.get("tasks", [])
+        if len(r_tasks) > 0 and all(t.get("is_completed") for t in r_tasks):
+            r["status"] = "completed"
+            r["is_completed"] = True
+            r["approval_status"] = "verified"
+            r["completed_at"] = now.isoformat()
+        else:
+            if not is_approved:
+                r["status"] = "in_progress"
+                r["is_completed"] = False
+                r["approval_status"] = "rejected"
+            elif len(r_tasks) == 0 and is_approved:
+                r["status"] = "completed"
+                r["is_completed"] = True
+                r["approval_status"] = "verified"
+                r["completed_at"] = now.isoformat()
 
-    all_completed = len(rooms) > 0 and all(r.get("status") == "completed" for r in rooms)
-    shift_status = "completed" if all_completed else ("in_progress" if is_approved else shift_doc.get("status", "in_progress"))
+    # 2. Update additional tasks
+    for at in additional_tasks:
+        for atp in at.get("submitted_photos", []):
+            if str(atp.get("photo_id")) == target_photo_id or str(atp.get("review_id")) == review_id:
+                atp["status"] = "approved" if is_approved else "rejected"
+                if not is_approved and rejection_reason:
+                    atp["rejection_reason"] = rejection_reason
+
+        at_req = at.get("photo", []) or at.get("required_photos", [])
+        at_sub = at.get("submitted_photos", [])
+        if len(at_req) > 0:
+            all_at_ok = True
+            for rp in at_req:
+                rp_id = str(rp.get("id") or rp.get("photo_id") or "")
+                matched_sub = next((sp for sp in at_sub if str(sp.get("photo_id")) == rp_id), None)
+                if not matched_sub or matched_sub.get("status") != "approved":
+                    all_at_ok = False
+                    break
+            at["is_completed"] = all_at_ok
+            at["completed_at"] = now if all_at_ok else None
+
+    # Count all approved photos
+    total_approved = 0
+    for r in rooms:
+        for t in r.get("tasks", []):
+            for tp in t.get("submitted_photos", []):
+                if tp.get("status") == "approved":
+                    total_approved += 1
+    for at in additional_tasks:
+        for atp in at.get("submitted_photos", []):
+            if atp.get("status") == "approved":
+                total_approved += 1
+
+    if total_approved == 0 and is_approved:
+        total_approved = 1
+
+    shift_doc["approved_photos_count"] = total_approved
+    progress = calculate_cleaning_plan_progress(shift_doc, approved_photos_count=total_approved)
+
+    all_rooms_done = len(rooms) > 0 and all(r.get("status") == "completed" for r in rooms)
+    all_add_done = len(additional_tasks) == 0 or all(at.get("is_completed") for at in additional_tasks)
+    shift_all_done = all_rooms_done and all_add_done
+
+    shift_status = "completed" if shift_all_done else ("in_progress" if is_approved else shift_doc.get("status", "in_progress"))
 
     doc_id = shift_doc.get("_id")
-    await db[coll_name].update_one(
-        {"_id": doc_id},
-        {"$set": {
-            "rooms": rooms,
-            "status": shift_status,
-            "overall_progress_percentage": 100.0 if all_completed else progress["overall_progress_percentage"],
-            "completed_rooms_count": progress["completed_rooms_count"],
-            "in_progress_rooms_count": progress["in_progress_rooms_count"],
-            "pending_rooms_count": progress["pending_rooms_count"],
-            "completed_tasks_count": progress["completed_tasks_count"],
-            "approved_photos_count": approved_photos_count,
-            "updated_at": now
-        }}
-    )
+    update_dict = {
+        "rooms": rooms,
+        "status": shift_status,
+        "overall_progress_percentage": 100.0 if shift_all_done else progress["overall_progress_percentage"],
+        "completed_rooms_count": progress["completed_rooms_count"],
+        "in_progress_rooms_count": progress["in_progress_rooms_count"],
+        "pending_rooms_count": progress["pending_rooms_count"],
+        "completed_tasks_count": progress["completed_tasks_count"],
+        "approved_photos_count": total_approved,
+        "updated_at": now
+    }
+    if additional_tasks:
+        update_dict["additional_tasks"] = additional_tasks
 
-    if all_completed:
-        try:
-            from app.services.shift_ws_service import broadcast_shift_completed_event
-            await broadcast_shift_completed_event(
-                db=db,
-                shift_doc=shift_doc,
-                completed_by=admin_id if 'admin_id' in locals() else "manager"
-            )
-        except Exception:
-            pass
+    await db[coll_name].update_one({"_id": doc_id}, {"$set": update_dict})
+
+    # Broadcast real-time websocket updates
+    try:
+        from app.services.shift_ws_service import broadcast_room_status_event, broadcast_shift_completed_event
+        for r in rooms:
+            if r.get("status") == "completed":
+                await broadcast_room_status_event(
+                    db=db,
+                    shift_doc=shift_doc,
+                    room_id=str(r.get("room_id") or r.get("id")),
+                    room_name=r.get("room_name") or r.get("name", "Room"),
+                    status_val="completed"
+                )
+        if shift_all_done:
+            await broadcast_shift_completed_event(db=db, shift_doc=shift_doc)
+    except Exception:
+        pass
+
 
 @photo_reviews_router.patch("/photo-reviews/{review_id}/approve", summary="Approve Photo Review (Triggers PyTorch Online Learning & Completes Room)")
 async def approve_photo_review(
@@ -249,7 +325,7 @@ async def approve_photo_review(
 ):
     """
     Approve Photo Review Endpoint.
-    Approves worker submitted photo, updates AI online learning model, and marks linked shift room as completed with 'verified' status.
+    Approves worker submitted photo, updates AI online learning model, and marks linked tasks, rooms, and shift as completed when all required photos are approved.
     """
     db = get_database()
     admin_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "admin_1")
@@ -285,8 +361,9 @@ async def approve_photo_review(
     return {
         "review_id": review_id,
         "status": "approved",
-        "message": "Photo review approved successfully. Room marked completed and verified in MongoDB shift."
+        "message": "Photo review approved successfully. Tasks, rooms, and shift completion status updated in MongoDB."
     }
+
 
 @photo_reviews_router.patch("/photo-reviews/{review_id}/reject", summary="Reject Photo Review (Triggers PyTorch Online Learning & Reopens Room)")
 async def reject_photo_review(
@@ -296,7 +373,7 @@ async def reject_photo_review(
 ):
     """
     Reject Photo Review Endpoint.
-    Rejects submitted photo with reason, updates AI online learning model, and marks room as rejected in shift.
+    Rejects submitted photo with reason, updates AI online learning model, reopens room, and sends rich push notification with DeepLink to the assigned worker.
     """
     db = get_database()
     admin_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "admin_1")
@@ -328,10 +405,50 @@ async def reject_photo_review(
     )
 
     if r_doc:
-        await _sync_shift_room_approval(db, r_doc, is_approved=False)
+        await _sync_shift_room_approval(db, r_doc, is_approved=False, rejection_reason=reject_in.reason)
+
+        # Send Rich Push Notification & WebSocket Alert to Assigned Worker
+        try:
+            from app.services.notification_service import NotificationService
+            from app.api.chat import ws_manager
+
+            worker_id = str(r_doc.get("cleaner", {}).get("worker_id") or "")
+            shift_id = str(r_doc.get("shift_id") or "")
+            photo_name = r_doc.get("photo_name") or "Task Photo"
+            room_name = r_doc.get("room", {}).get("name") if isinstance(r_doc.get("room"), dict) else "Room"
+
+            notif_service = NotificationService()
+            notif_payload = {
+                "shift_id": shift_id,
+                "review_id": review_id,
+                "photo_id": r_doc.get("photo_id"),
+                "photo_name": photo_name,
+                "room_name": room_name,
+                "rejection_reason": reject_in.reason,
+                "deeplink": f"cleaningone://worker/shifts/{shift_id}",
+                "route": f"/worker/shifts/{shift_id}"
+            }
+
+            if worker_id:
+                await notif_service.create_notification(
+                    user_id=worker_id,
+                    title=f"Photo Rejected: {photo_name}",
+                    message=f"Your photo for '{photo_name}' in {room_name} was rejected. Reason: '{reject_in.reason}'. Please resubmit photo.",
+                    notification_type="photo_rejected",
+                    recipient_type="worker",
+                    data=notif_payload
+                )
+
+                await ws_manager.broadcast_to_users({
+                    "type": "photo_rejected",
+                    **notif_payload
+                }, [worker_id])
+        except Exception as e:
+            print(f"Error sending photo rejection push notification: {e}")
 
     return {
         "review_id": review_id,
         "status": "rejected",
-        "message": "Photo review rejected. Linked room marked as rejected in shift."
+        "message": "Photo review rejected. Push notification with deep link sent to worker for resubmission."
     }
+

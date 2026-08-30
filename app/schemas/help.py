@@ -74,6 +74,43 @@ class SupportMessageResponse(BaseModel):
         populate_by_name = True
         from_attributes = True
 
+class ClientSupportMessageRequest(BaseModel):
+    subject: str = Field(..., json_schema_extra={"example": "Inquiry about weekend service schedule"})
+    category: Optional[str] = Field("general", json_schema_extra={"example": "general"})
+    description: str = Field(..., json_schema_extra={"example": "Could we schedule an additional deep clean next Saturday?"})
+
+class ClientSupportMessageResponse(BaseModel):
+    id: str
+    client_id: str
+    client_name: str
+    client_email: str
+    subject: str
+    category: str = "general"
+    description: str
+    status: str = "pending"
+    admin_reply: Optional[str] = None
+    created_at: datetime
+
+class ClientReviewCreate(BaseModel):
+    shift_id: Optional[str] = Field(None, json_schema_extra={"example": "shift_123"})
+    cleaner_name: Optional[str] = Field(None, json_schema_extra={"example": "Jan Jansen"})
+    rating: int = Field(5, ge=1, le=5, json_schema_extra={"example": 5})
+    quality_score: Optional[int] = Field(5, ge=1, le=5)
+    punctuality_score: Optional[int] = Field(5, ge=1, le=5)
+    review_text: str = Field(..., json_schema_extra={"example": "Excellent deep cleaning on the 3rd floor office."})
+
+class ClientReviewResponse(BaseModel):
+    id: str
+    client_id: str
+    client_name: str
+    shift_id: Optional[str] = None
+    cleaner_name: Optional[str] = None
+    rating: int
+    quality_score: Optional[int] = 5
+    punctuality_score: Optional[int] = 5
+    review_text: str
+    created_at: datetime
+
 class AdminSupportListResponse(BaseModel):
     total_count: int
     unread_count: int
@@ -83,12 +120,14 @@ class WorkerSupportListResponse(BaseModel):
     total_count: int
     messages: List[SupportMessageResponse]
 
+from typing import List, Optional, Union
+
 # ---- Legal Document Schemas ----
 class LegalDocumentResponse(BaseModel):
     type: str = "privacy_policy"
     title: str
     content: str
-    updated_at: str
+    updated_at: Optional[Union[str, datetime]] = None
 
 class LegalDocumentUpdate(BaseModel):
     title: Optional[str] = Field(default=None, json_schema_extra={"example": "Updated Privacy Policy"})

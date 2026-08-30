@@ -10,10 +10,10 @@ class ParticipantInfo(BaseModel):
     profile_picture: Optional[str] = None
 
 class LastMessageInfo(BaseModel):
-    text: str
-    sender_id: str
-    sender_name: str
-    timestamp: str
+    text: Optional[str] = ""
+    sender_id: Optional[str] = ""
+    sender_name: Optional[str] = "User"
+    timestamp: Optional[str] = None
 
 class ReadByInfo(BaseModel):
     user_id: str

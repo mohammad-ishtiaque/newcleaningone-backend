@@ -1,8 +1,14 @@
-from app.schemas.user import WorkerPersonalInformation
 from fastapi import APIRouter, Depends, status, HTTPException, UploadFile, File, Form
-from typing import List, Optional
-from datetime import date, datetime
-from app.schemas.user import WorkerSignup, UserResponse, WorkerOnboardingStep1, WorkerProfileResponse, WorkerDraftResponse, SignupResponse, WorkerProfileEdit, PushSettingsUpdate, PushSettingsResponse, WorkerPersonalInformation
+from typing import List, Optional, Union
+from datetime import date, datetime, timezone
+from bson import ObjectId
+from app.schemas.user import (
+    WorkerSignup, UserResponse, WorkerOnboardingStep1, WorkerProfileResponse,
+    WorkerDraftResponse, SignupResponse, WorkerProfileEdit, PushSettingsUpdate,
+    PushSettingsResponse, WorkerPersonalInformation,
+    WorkerWorkingDaysResponse, WorkerWorkingDaysUpdate
+)
+from app.api.worker_shift_utils import normalize_working_days
 from app.schemas.help import SupportMessageRequest, FAQListResponse, FAQDetailResponse, LegalDocumentResponse, SupportMessageResponse, WorkerSupportListResponse
 from app.models.support import SupportMessageDB
 from app.services.user_service import UserService
@@ -17,6 +23,25 @@ from app.services.faq_service import FAQService
 
 router = APIRouter(prefix="/worker", tags=["Worker Profile"])
 
+
+def user_id_query(user_id: str) -> dict:
+    """
+    Build a `users` filter that matches a worker by id.
+
+    `_id` is stored as an ObjectId, while the id carried on the authenticated
+    user is a plain string, so a filter of `{"_id": "<hex>"}` matches nothing.
+    Matching on the string alone made `find_one` return None (falling back to a
+    hardcoded default schedule) and `update_one` match zero documents while
+    still reporting success. Cover the ObjectId form plus the string/`id` forms
+    used by older documents.
+    """
+    clauses: List[dict] = []
+    if ObjectId.is_valid(user_id):
+        clauses.append({"_id": ObjectId(user_id)})
+    clauses.append({"_id": user_id})
+    clauses.append({"id": user_id})
+    return {"$or": clauses}
+
 def get_user_service(user_repo: UserRepository = Depends(UserRepository)) -> UserService:
     return UserService(user_repo)
 
@@ -24,7 +49,7 @@ def get_s3_service() -> S3Service:
     return S3Service()
 
 def require_worker(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
-    if current_user.role != RoleEnum.worker:
+    if current_user.role != RoleEnum.worker and current_user.role != "worker":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Worker role required")
     return current_user
 
@@ -297,6 +322,149 @@ async def patch_push_settings(
         onesignal_player_id=current_user.onesignal_player_id
     )
 
+
+@router.get(
+    "/profile/working-days",
+    response_model=WorkerWorkingDaysResponse,
+    summary="Get Worker Working Days & Availability Schedule",
+    description="""
+### Get Worker Working Days & Availability Schedule
+Returns the worker's active weekly working days (e.g. `['mon', 'tue', 'wed', 'thu', 'fri', 'sat']`) and calculated off-duty days (e.g. `['sun']`).
+
+When a manager assigns shifts or views worker availability dropdowns, the system automatically checks these working days to determine if a worker is available or off-duty.
+"""
+)
+async def get_worker_working_days(
+    current_user: UserInDB = Depends(require_worker)
+):
+    from app.core.database import get_database
+    db = get_database()
+    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "")
+    worker_name = getattr(current_user, "full_name", "Worker")
+
+    # Fetch from database to ensure freshest state
+    u_doc = await db["users"].find_one(user_id_query(worker_id)) or {}
+    raw_days = u_doc.get("working_days") or getattr(current_user, "working_days", None) or ["mon", "tue", "wed", "thu", "fri", "sat"]
+
+    working_days, off_days = normalize_working_days(raw_days)
+    uat = u_doc.get("updated_at") if isinstance(u_doc.get("updated_at"), datetime) else None
+
+    return WorkerWorkingDaysResponse(
+        worker_id=worker_id,
+        worker_name=worker_name,
+        working_days=working_days,
+        off_days=off_days,
+        total_working_days=len(working_days),
+        updated_at=uat
+    )
+
+
+@router.patch(
+    "/profile/working-days",
+    response_model=WorkerWorkingDaysResponse,
+    summary="Update Worker Working Days Schedule",
+    description="""
+### Update Worker Working Days Schedule
+Updates the worker's active working days. Days not included in `working_days` are treated as worker off-days.
+
+#### Supported Values for `working_days`:
+- **3-letter Abbreviations**: `['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']`
+- **Full Day Names**: `['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']`
+
+#### Example Request:
+```json
+{
+  "working_days": ["mon", "tue", "wed", "thu", "fri"]
+}
+```
+"""
+)
+async def update_worker_working_days(
+    days_in: WorkerWorkingDaysUpdate,
+    current_user: UserInDB = Depends(require_worker)
+):
+    from app.core.database import get_database
+    db = get_database()
+    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "")
+    worker_name = getattr(current_user, "full_name", "Worker")
+    worker_email = getattr(current_user, "email", None)
+
+    working_days, off_days = normalize_working_days(days_in.working_days)
+    now = datetime.now(timezone.utc)
+
+    # 1. Update in users collection
+    result = await db["users"].update_one(
+        user_id_query(worker_id),
+        {"$set": {"working_days": working_days, "updated_at": now}}
+    )
+    # update_one is silent when the filter matches nothing, which previously let
+    # this endpoint echo the requested schedule back as if it had been saved.
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Worker account not found; working days were not saved")
+
+    # 2. Sync to admin_workers collection
+    if worker_email:
+        await db["admin_workers"].update_one(
+            {"email": worker_email},
+            {"$set": {"working_days": working_days, "updated_at": now}},
+            upsert=True
+        )
+
+    # 3. Sync to worker_availability collection
+    DAY_TO_FULL = {
+        "mon": "monday", "tue": "tuesday", "wed": "wednesday",
+        "thu": "thursday", "fri": "friday", "sat": "saturday", "sun": "sunday"
+    }
+    weekly_slots = [
+        {"day": DAY_TO_FULL.get(d, d), "is_available": (d in working_days), "start_time": "08:00 AM", "end_time": "05:00 PM"}
+        for d in ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    ]
+    await db["worker_availability"].update_one(
+        {"worker_id": worker_id},
+        {"$set": {"weekly_availability": weekly_slots, "updated_at": now}, "$setOnInsert": {"created_at": now}},
+        upsert=True
+    )
+
+    current_user.working_days = working_days
+
+    return WorkerWorkingDaysResponse(
+        worker_id=worker_id,
+        worker_name=worker_name,
+        working_days=working_days,
+        off_days=off_days,
+        total_working_days=len(working_days),
+        updated_at=now
+    )
+
+
+@router.get(
+    "/working-days",
+    response_model=WorkerWorkingDaysResponse,
+    summary="Get Worker Working Days (Alias)",
+    description="Alias for GET /worker/profile/working-days",
+    include_in_schema=False
+)
+async def get_worker_working_days_alias(
+    current_user: UserInDB = Depends(require_worker)
+):
+    return await get_worker_working_days(current_user=current_user)
+
+
+@router.patch(
+    "/working-days",
+    response_model=WorkerWorkingDaysResponse,
+    summary="Update Worker Working Days (Alias)",
+    description="Alias for PATCH /worker/profile/working-days",
+    include_in_schema=False
+)
+async def update_worker_working_days_alias(
+    days_in: WorkerWorkingDaysUpdate,
+    current_user: UserInDB = Depends(require_worker)
+):
+    return await update_worker_working_days(days_in=days_in, current_user=current_user)
+
+
+
 @router.get("/profile", response_model=WorkerProfileResponse)
 async def get_worker_profile(current_user: UserInDB = Depends(require_worker)):
     return await _build_worker_response(current_user)
@@ -393,12 +561,16 @@ async def get_privacy_policy():
     db = get_database()
     doc = await db["legal_documents"].find_one({"type": "privacy_policy"})
     if doc:
+        u_at = doc.get("updated_at")
+        u_str = u_at.isoformat() if hasattr(u_at, "isoformat") else str(u_at or datetime.now().isoformat())
         return LegalDocumentResponse(
+            type="privacy_policy",
             title=doc.get("title", "Privacy Policy"),
             content=doc.get("content", ""),
-            updated_at=doc.get("updated_at", datetime.now().isoformat())
+            updated_at=u_str
         )
     return LegalDocumentResponse(
+        type="privacy_policy",
         title="Privacy Policy",
         content="Our Privacy Policy is currently being drafted and will be updated soon.",
         updated_at=datetime.now().isoformat()
@@ -410,12 +582,16 @@ async def get_terms_and_conditions():
     db = get_database()
     doc = await db["legal_documents"].find_one({"type": "terms_and_conditions"})
     if doc:
+        u_at = doc.get("updated_at")
+        u_str = u_at.isoformat() if hasattr(u_at, "isoformat") else str(u_at or datetime.now().isoformat())
         return LegalDocumentResponse(
+            type="terms_and_conditions",
             title=doc.get("title", "Terms & Conditions"),
             content=doc.get("content", ""),
-            updated_at=doc.get("updated_at", datetime.now().isoformat())
+            updated_at=u_str
         )
     return LegalDocumentResponse(
+        type="terms_and_conditions",
         title="Terms & Conditions",
         content="Our Terms & Conditions are currently being drafted and will be updated soon.",
         updated_at=datetime.now().isoformat()
@@ -427,8 +603,9 @@ async def get_worker_notifications(
     limit: int = 10,
     current_user: UserInDB = Depends(require_worker)
 ):
+    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "")
     service = NotificationService()
-    return await service.get_user_notifications(user_id=current_user.id, recipient_type="worker", page=page, limit=limit)
+    return await service.get_user_notifications(user_id=worker_id, recipient_type="worker", page=page, limit=limit)
 
 
 @router.get("/notifications/{notification_id}", response_model=NotificationResponse, summary="Get Single Notification Details")
@@ -436,21 +613,23 @@ async def get_worker_notification_detail(
     notification_id: str,
     current_user: UserInDB = Depends(require_worker)
 ):
+    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "")
     service = NotificationService()
-    doc = await service.get_notification_detail(notification_id=notification_id, user_id=current_user.id)
+    doc = await service.get_notification_detail(notification_id=notification_id, user_id=worker_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Notification not found")
     return doc
 
 @router.patch("/notifications/{notification_id}/read")
-async def mark_worker_notification_read(
+async def mark_worker_notification_as_read(
     notification_id: str,
     current_user: UserInDB = Depends(require_worker)
 ):
+    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "")
     service = NotificationService()
-    success = await service.mark_notification_as_read(notification_id=notification_id, user_id=current_user.id)
+    success = await service.mark_notification_as_read(notification_id=notification_id, user_id=worker_id)
     if not success:
-        raise HTTPException(status_code=404, detail="Notification not found")
+        raise HTTPException(status_code=404, detail="Notification not found or cannot be updated")
     return {"message": "Notification marked as read"}
 
 @router.delete("/notifications/{notification_id}")
@@ -458,14 +637,19 @@ async def delete_worker_notification(
     notification_id: str,
     current_user: UserInDB = Depends(require_worker)
 ):
+    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "")
     service = NotificationService()
-    success = await service.delete_user_notification(notification_id=notification_id, user_id=current_user.id)
+    success = await service.delete_notification(notification_id=notification_id, user_id=worker_id)
     if not success:
-        raise HTTPException(status_code=404, detail="Notification not found")
+        raise HTTPException(status_code=404, detail="Notification not found or cannot be deleted")
     return {"message": "Notification deleted successfully"}
 
 async def _build_worker_response(user: UserInDB) -> WorkerProfileResponse:
     user_data = user.model_dump()
+    raw_days = user_data.get("working_days") or getattr(user, "working_days", None) or ["mon", "tue", "wed", "thu", "fri", "sat"]
+    working_days, off_days = normalize_working_days(raw_days)
+    user_data["working_days"] = working_days
+    user_data["off_days"] = off_days
     user_data["id_uploaded"] = bool(user.id_card_front and user.id_card_back)
     user_data["id_card_front_link"] = user.id_card_front
     user_data["id_card_back_link"] = user.id_card_back

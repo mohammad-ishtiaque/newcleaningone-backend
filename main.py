@@ -1,16 +1,17 @@
+import os
 import sys
 import uvicorn
 from app.app_builder import create_app
 from app.core.config import settings
 
-# Determine service name from command line arguments (e.g., python main.py admin)
-service_name = sys.argv[1].lower().strip() if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "all"
+# Determine service name from env var or CLI arguments
+cli_arg = sys.argv[1].lower().strip() if len(sys.argv) > 1 and not sys.argv[1].startswith("-") and sys.argv[1] not in ("main:app",) else None
+service_name = cli_arg or os.environ.get("SERVICE_NAME", "all").lower().strip()
 
 if service_name not in ("manager", "admin", "client", "worker", "all"):
-    print(f"Unknown service '{service_name}'. Valid options: manager, admin, client, worker, all")
-    print("Defaulting to 'all'...")
     service_name = "all"
 
+os.environ["SERVICE_NAME"] = service_name
 app = create_app(service_name)
 
 def get_port(service: str) -> int:
@@ -35,3 +36,4 @@ if __name__ == "__main__":
         access_log=True,
         log_level="info"
     )
+

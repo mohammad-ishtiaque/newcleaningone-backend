@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from fastapi import APIRouter, Depends, status, HTTPException
@@ -57,12 +58,16 @@ async def get_client_privacy_policy():
     db = get_database()
     doc = await db["legal_documents"].find_one({"type": "privacy_policy"})
     if doc:
+        u_at = doc.get("updated_at")
+        u_str = u_at.isoformat() if hasattr(u_at, "isoformat") else str(u_at or datetime.now().isoformat())
         return LegalDocumentResponse(
+            type="privacy_policy",
             title=doc.get("title", "Privacy Policy"),
             content=doc.get("content", ""),
-            updated_at=doc.get("updated_at", datetime.now().isoformat())
+            updated_at=u_str
         )
     return LegalDocumentResponse(
+        type="privacy_policy",
         title="Privacy Policy",
         content="Our Privacy Policy is currently being drafted and will be updated soon.",
         updated_at=datetime.now().isoformat()
@@ -73,12 +78,16 @@ async def get_client_terms_and_conditions():
     db = get_database()
     doc = await db["legal_documents"].find_one({"type": "terms_and_conditions"})
     if doc:
+        u_at = doc.get("updated_at")
+        u_str = u_at.isoformat() if hasattr(u_at, "isoformat") else str(u_at or datetime.now().isoformat())
         return LegalDocumentResponse(
+            type="terms_and_conditions",
             title=doc.get("title", "Terms & Conditions"),
             content=doc.get("content", ""),
-            updated_at=doc.get("updated_at", datetime.now().isoformat())
+            updated_at=u_str
         )
     return LegalDocumentResponse(
+        type="terms_and_conditions",
         title="Terms & Conditions",
         content="Our Terms & Conditions are currently being drafted and will be updated soon.",
         updated_at=datetime.now().isoformat()
@@ -455,3 +464,164 @@ async def get_client_overview(
             description=f"Service scheduled • approximately {tot_hours} hours" if tot_hours > 0 else "No scheduled visits"
         )
     )
+
+from app.schemas.help import (
+    FAQListResponse, FAQListItem, FAQDetailResponse,
+    ClientSupportMessageRequest, ClientSupportMessageResponse,
+    ClientReviewCreate, ClientReviewResponse
+)
+
+@router.get("/faq", response_model=FAQListResponse, summary="List FAQs for Clients")
+async def get_client_faqs():
+    db = get_database()
+    raw = await db["faqs"].find({}).sort("serial_no", 1).to_list(length=100)
+    items = []
+    for idx, f in enumerate(raw, start=1):
+        items.append(FAQListItem(
+            serial_no=f.get("serial_no", idx),
+            question=f.get("question", "")
+        ))
+    if not items:
+        # Default helpful client FAQs
+        default_faqs = [
+            {"serial_no": 1, "question": "How do I request an extra cleaning service?", "answer": "Go to Extra Services in your client portal or tap 'Request a service' on your dashboard."},
+            {"serial_no": 2, "question": "How can I monitor live cleaning progress?", "answer": "Open your Location Monitoring page to view real-time task progress and verified room photos."},
+            {"serial_no": 3, "question": "How do I communicate with assigned cleaning specialists?", "answer": "Use the built-in Chat tab to message your cleaning team or manager directly."},
+            {"serial_no": 4, "question": "How do I add special access instructions or keycard notes?", "answer": "Use the Notes tab on your client dashboard to record special instructions for your cleaner."},
+            {"serial_no": 5, "question": "What happens if a cleaner is late or misses a shift?", "answer": "Our live operations team automatically detects delays and dispatches standby replacements."}
+        ]
+        for f in default_faqs:
+            items.append(FAQListItem(serial_no=f["serial_no"], question=f["question"]))
+    return FAQListResponse(faqs=items, total_count=len(items), page=1, limit=50, has_more=False)
+
+
+@router.get("/faq/{serial_no}", response_model=FAQDetailResponse, summary="Get Single Client FAQ with Answer")
+async def get_client_faq_detail(serial_no: int):
+    db = get_database()
+    faq = await db["faqs"].find_one({"serial_no": serial_no})
+    if faq:
+        return FAQDetailResponse(
+            serial_no=faq.get("serial_no", serial_no),
+            question=faq.get("question", ""),
+            answer=faq.get("answer", "")
+        )
+    # Default lookup
+    default_answers = {
+        1: ("How do I request an extra cleaning service?", "Go to Extra Services in your client portal or tap 'Request a service' on your dashboard."),
+        2: ("How can I monitor live cleaning progress?", "Open your Location Monitoring page to view real-time task progress and verified room photos."),
+        3: ("How do I communicate with assigned cleaning specialists?", "Use the built-in Chat tab to message your cleaning team or manager directly."),
+        4: ("How do I add special access instructions or keycard notes?", "Use the Notes tab on your client dashboard to record special instructions for your cleaner."),
+        5: ("What happens if a cleaner is late or misses a shift?", "Our live operations team automatically detects delays and dispatches standby replacements.")
+    }
+    if serial_no in default_answers:
+        q, a = default_answers[serial_no]
+        return FAQDetailResponse(serial_no=serial_no, question=q, answer=a)
+    raise HTTPException(status_code=404, detail="FAQ not found")
+
+@router.post("/support/messages", response_model=ClientSupportMessageResponse, status_code=status.HTTP_201_CREATED, summary="Submit Client Support Inquiry")
+async def submit_client_support_message(
+    msg_in: ClientSupportMessageRequest,
+    current_user: UserInDB = Depends(require_client)
+):
+    db = get_database()
+    now = datetime.now(timezone.utc)
+    sup_id = f"sup_{uuid.uuid4().hex[:10]}"
+    cid = str(current_user.id)
+
+    doc = {
+        "_id": sup_id,
+        "id": sup_id,
+        "client_id": cid,
+        "client_name": current_user.full_name,
+        "client_email": getattr(current_user, "email", "client@cleaningone.com"),
+        "subject": msg_in.subject,
+        "category": msg_in.category or "general",
+        "description": msg_in.description,
+        "status": "pending",
+        "admin_reply": None,
+        "created_at": now,
+        "updated_at": now
+    }
+    await db["support_messages"].insert_one(doc)
+
+    notif_service = NotificationService()
+    await notif_service.create_notification(
+        title=f"New Client Support Ticket: {msg_in.subject}",
+        message=f"{current_user.full_name} sent an inquiry: {msg_in.description[:100]}",
+        notification_type="support",
+        recipient_type="manager"
+    )
+
+    return ClientSupportMessageResponse(
+        id=sup_id,
+        client_id=cid,
+        client_name=current_user.full_name,
+        client_email=getattr(current_user, "email", "client@cleaningone.com"),
+        subject=msg_in.subject,
+        category=msg_in.category or "general",
+        description=msg_in.description,
+        status="pending",
+        admin_reply=None,
+        created_at=now
+    )
+
+@router.get("/support/messages", summary="List Client Support Inquiries")
+async def get_client_support_messages(
+    current_user: UserInDB = Depends(require_client)
+):
+    db = get_database()
+    cid = str(current_user.id)
+    raw = await db["support_messages"].find({"client_id": cid}).sort("created_at", -1).to_list(length=100)
+    for r in raw:
+        r["id"] = str(r.get("_id") or r.get("id"))
+    return {"total_count": len(raw), "messages": raw}
+
+@router.post("/reviews", response_model=ClientReviewResponse, status_code=status.HTTP_201_CREATED, summary="Submit Client Review / Rating")
+async def submit_client_review(
+    rev_in: ClientReviewCreate,
+    current_user: UserInDB = Depends(require_client)
+):
+    db = get_database()
+    now = datetime.now(timezone.utc)
+    rev_id = f"rev_{uuid.uuid4().hex[:10]}"
+    cid = str(current_user.id)
+
+    doc = {
+        "_id": rev_id,
+        "id": rev_id,
+        "client_id": cid,
+        "client_name": current_user.full_name,
+        "shift_id": rev_in.shift_id,
+        "cleaner_name": rev_in.cleaner_name,
+        "rating": rev_in.rating,
+        "quality_score": rev_in.quality_score or 5,
+        "punctuality_score": rev_in.punctuality_score or 5,
+        "review_text": rev_in.review_text,
+        "created_at": now,
+        "updated_at": now
+    }
+    await db["client_reviews"].insert_one(doc)
+
+    return ClientReviewResponse(
+        id=rev_id,
+        client_id=cid,
+        client_name=current_user.full_name,
+        shift_id=rev_in.shift_id,
+        cleaner_name=rev_in.cleaner_name,
+        rating=rev_in.rating,
+        quality_score=rev_in.quality_score or 5,
+        punctuality_score=rev_in.punctuality_score or 5,
+        review_text=rev_in.review_text,
+        created_at=now
+    )
+
+@router.get("/reviews", summary="List Client Reviews")
+async def get_client_reviews(
+    current_user: UserInDB = Depends(require_client)
+):
+    db = get_database()
+    cid = str(current_user.id)
+    raw = await db["client_reviews"].find({"client_id": cid}).sort("created_at", -1).to_list(length=100)
+    for r in raw:
+        r["id"] = str(r.get("_id") or r.get("id"))
+    return {"total_count": len(raw), "reviews": raw}

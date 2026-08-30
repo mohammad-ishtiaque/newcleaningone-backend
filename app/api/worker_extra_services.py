@@ -7,7 +7,7 @@ from app.core.database import get_database
 from app.dependencies.auth import get_current_user
 from app.models.user import UserInDB, RoleEnum
 from app.services.s3_service import S3Service
-from app.services.extra_services_helper import format_extra_service_response
+from app.services.extra_services_helper import format_extra_service_response, format_extra_service_list_item
 from app.schemas.extra_services import ExtraServiceResponse, ExtraServicePaginatedResponse
 
 router = APIRouter(prefix="/worker/extra-services", tags=["Worker Extra Service Management"])
@@ -43,7 +43,7 @@ async def list_worker_extra_services(
     cursor = db["extra_services"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     raw_docs = await cursor.to_list(length=limit)
 
-    requests_res = [format_extra_service_response(d) for d in raw_docs]
+    requests_res = [format_extra_service_list_item(d) for d in raw_docs]
     return ExtraServicePaginatedResponse(total_count=total_count, page=page, limit=limit, requests=requests_res)
 
 
@@ -217,7 +217,7 @@ async def upload_extra_service_photo(
         "shift_id": str(doc.get("_id") or doc.get("id")),
         "service_kind": "extra_service",
         "cleaner": {
-            "worker_id": str(current_user.id or current_user.mongo_id),
+            "worker_id": str(getattr(current_user, "id", None) or getattr(current_user, "mongo_id", None) or getattr(current_user, "_id", None) or "worker_1"),
             "name": getattr(current_user, "full_name", "Worker"),
             "profile_picture": getattr(current_user, "profile_photo", None)
         },

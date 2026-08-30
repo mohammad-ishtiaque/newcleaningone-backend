@@ -121,13 +121,18 @@ async def list_admin_conversations(
     )
 
 
-@base_chat_router.get("/conversations/clients", response_model=PaginatedConversationsResponse, include_in_schema=False)
+@base_chat_router.get("/conversations/clients", response_model=PaginatedConversationsResponse, summary="List Client Conversations")
 async def admin_list_client_conversations(page: int = 1, limit: int = 20, current_user: UserInDB = Depends(require_manager)):
     return await list_admin_conversations(type="Direct clients", search=None, page=page, limit=limit, current_user=current_user)
 
+@base_chat_router.get("/conversations/workers", response_model=PaginatedConversationsResponse, summary="List Worker Conversations")
 @base_chat_router.get("/conversations/employees", response_model=PaginatedConversationsResponse, include_in_schema=False)
 async def admin_list_employee_conversations(page: int = 1, limit: int = 20, current_user: UserInDB = Depends(require_manager)):
     return await list_admin_conversations(type="direct worker", search=None, page=page, limit=limit, current_user=current_user)
+
+@base_chat_router.get("/conversations/groups", response_model=PaginatedConversationsResponse, summary="List Group Conversations")
+async def admin_list_group_conversations(page: int = 1, limit: int = 20, current_user: UserInDB = Depends(require_manager)):
+    return await list_admin_conversations(type="Group", search=None, page=page, limit=limit, current_user=current_user)
 
 
 @base_chat_router.post(

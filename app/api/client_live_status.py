@@ -185,8 +185,48 @@ def _build_client_live_status(
     else:
         status_lbl = "SCHEDULED"
 
+    # Calculate checkout blockers
+    pending_approvals = 0
+    rejected_photos = 0
+    uncompleted_tasks = 0
+    pending_photos = 0
+    blocker_reasons = []
+
+    for r in rooms:
+        for t in r.get("tasks", []):
+            if not t.get("is_completed"):
+                uncompleted_tasks += 1
+            for p in t.get("photo", []) + t.get("required_photos", []):
+                p_st = p.get("status", "not_uploaded")
+                if p_st == "pending_review":
+                    pending_approvals += 1
+                    pending_photos += 1
+                elif p_st == "rejected":
+                    rejected_photos += 1
+                    pending_photos += 1
+                elif p_st == "not_uploaded":
+                    pending_photos += 1
+        for p in r.get("required_photos", []):
+            p_st = p.get("status", "not_uploaded")
+            if p_st == "pending_review":
+                pending_approvals += 1
+            elif p_st == "rejected":
+                rejected_photos += 1
+
+    if uncompleted_tasks > 0:
+        blocker_reasons.append(f"{uncompleted_tasks} task(s) uncompleted")
+    if pending_approvals > 0:
+        blocker_reasons.append(f"{pending_approvals} photo(s) pending approval")
+    if rejected_photos > 0:
+        blocker_reasons.append(f"{rejected_photos} photo(s) rejected")
+
+    checkout_blocked_reason = ", ".join(blocker_reasons) if blocker_reasons else None
+    can_checkout = (uncompleted_tasks == 0 and pending_approvals == 0 and rejected_photos == 0)
+
     return ClientLiveStatusResponse(
         shift_id=shift_id,
+        date=str(date_val),
+        shift_date=str(date_val),
         status_label=status_lbl,
         active_room_location_text=active_location_text,
         overall_progress_percentage=overall_pct,
@@ -196,16 +236,29 @@ def _build_client_live_status(
         arrival_time_info=arrival_time_info,
         current_active_room=active_room_progress,
         all_rooms_progress=all_rooms_progress,
-        active_sessions=active_sessions or []
+        active_sessions=active_sessions or [],
+        pending_approval_count=pending_approvals,
+        pending_photos_count=pending_photos,
+        rejected_photos_count=rejected_photos,
+        uncompleted_tasks_count=uncompleted_tasks,
+        checkout_blocked_reason=checkout_blocked_reason,
+        can_checkout=can_checkout
     )
 
 
 async def _resolve_client_id_aliases(current_user: UserInDB, db) -> List[str]:
-    """Collects all possible identifiers for the logged-in client."""
     client_ids = set()
-    uid = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "")
-    if uid:
-        client_ids.add(uid)
+    cid = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "")
+    if cid:
+        client_ids.add(cid)
+
+    if getattr(current_user, "company_name", None):
+        client_cursor = db["client_list"].find({"company_name": current_user.company_name})
+        async for c in client_cursor:
+            if "_id" in c:
+                client_ids.add(str(c["_id"]))
+            if "id" in c and c["id"]:
+                client_ids.add(str(c["id"]))
 
     if getattr(current_user, "email", None):
         c_doc = await db["client_list"].find_one({"email": current_user.email})
@@ -242,16 +295,28 @@ async def get_client_live_status_dashboard(
     if shift_id:
         shift_doc, _ = await resolve_shift_execution(shift_id, db)
     else:
-        # 1. Search shift_executions for active sessions for this client
+        # 1. Search shift_executions for IN_PROGRESS / RUNNING sessions on today_str
         shift_doc = await db["shift_executions"].find_one({
             "client_id": {"$in": client_aliases},
-            "status": {"$in": ["in_progress", "running", "photo_submitted", "scheduled"]}
+            "date": today_str,
+            "status": {"$in": ["in_progress", "running", "photo_submitted"]}
         }, sort=[("updated_at", -1)])
 
-        # 2. Check active cleaning plans for today
+        # 2. If none, search shift_executions for SCHEDULED / ASSIGNED sessions on today_str
+        if not shift_doc:
+            shift_doc = await db["shift_executions"].find_one({
+                "client_id": {"$in": client_aliases},
+                "date": today_str,
+                "status": {"$in": ["scheduled", "assigned", "draft"]}
+            }, sort=[("start_time", 1)])
+
+        # 3. Check active cleaning plans for today_str
         if not shift_doc:
             cursor_p = db["cleaning_plans"].find({
-                "client_id": {"$in": client_aliases},
+                "$or": [
+                    {"client_id": {"$in": client_aliases}},
+                    {"client_ids": {"$in": client_aliases}}
+                ],
                 "status": {"$ne": "cancelled"}
             })
             plans = await cursor_p.to_list(length=50)
@@ -260,23 +325,23 @@ async def get_client_live_status_dashboard(
                     shift_doc = await get_or_create_shift_execution(p, today_str, db)
                     break
 
-        # 3. Fallback to shifts collection
+        # 4. Fallback to any recent in-progress execution
         if not shift_doc:
-            shift_doc = await db["shifts"].find_one({
+            shift_doc = await db["shift_executions"].find_one({
                 "client_id": {"$in": client_aliases},
-                "status": {"$in": ["running", "in_progress", "published", "scheduled"]}
-            }, sort=[("created_at", -1)])
+                "status": {"$in": ["in_progress", "running", "photo_submitted"]}
+            }, sort=[("updated_at", -1)])
 
-        # 4. Fallback to any recent execution or shift
+        # 5. Fallback to any recent or upcoming execution or shift
         if not shift_doc:
             shift_doc = await db["shift_executions"].find_one(
-                {"client_id": {"$in": client_aliases}},
-                sort=[("created_at", -1)]
+                {"client_id": {"$in": client_aliases}, "status": {"$ne": "cancelled"}},
+                sort=[("date", -1), ("start_time", 1)]
             )
         if not shift_doc:
             shift_doc = await db["shifts"].find_one(
-                {"client_id": {"$in": client_aliases}},
-                sort=[("created_at", -1)]
+                {"client_id": {"$in": client_aliases}, "status": {"$ne": "cancelled"}},
+                sort=[("date", -1), ("created_at", -1)]
             )
 
     if not shift_doc:
@@ -297,10 +362,12 @@ async def get_client_live_status_dashboard(
         if isinstance(w0, dict):
             w_id = str(w0.get("worker_id") or w0.get("id") or "")
             if w_id:
-                w_query = {"_id": ObjectId(w_id)} if ObjectId.is_valid(w_id) else {"_id": w_id}
-                cleaner_doc = await db["users"].find_one(w_query)
+                w_queries = [{"_id": w_id}, {"id": w_id}]
+                if ObjectId.is_valid(w_id):
+                    w_queries.append({"_id": ObjectId(w_id)})
+                cleaner_doc = await db["users"].find_one({"$or": w_queries})
 
-    # 5. Build active_sessions for all today's sessions for this client
+    # Build active_sessions for all today's sessions for this client
     from app.api.worker_shift_utils import calculate_cleaning_plan_progress
     active_sessions = []
     seen_session_ids = set()
@@ -317,8 +384,11 @@ async def get_client_live_status_dashboard(
             seen_session_ids.add(ex_id)
             ex_prog = calculate_cleaning_plan_progress(ex)
             r_name = ex.get("rooms", [{}])[0].get("room_name") if ex.get("rooms") else None
+            ex_date = ex.get("date") or today_str
             active_sessions.append(ClientLiveStatusSessionSummary(
                 shift_id=ex_id,
+                date=ex_date,
+                shift_date=ex_date,
                 location_name=ex.get("location_name") or "Location",
                 room_name=r_name,
                 status=str(ex.get("status", "scheduled")),

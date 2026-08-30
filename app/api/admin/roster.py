@@ -55,8 +55,16 @@ async def get_daily_roster(
 
     date_str_formatted = dt_obj.strftime("%A, %d %B %Y")
 
-    # Fetch all workers
-    workers_raw = await db["users"].find({"role": "worker"}).sort("full_name", 1).to_list(length=200)
+    # Fetch all approved or admin-created workers
+    workers_raw = await db["users"].find({
+        "role": "worker",
+        "account_status": {"$ne": "deleted"},
+        "$or": [
+            {"is_approved": True},
+            {"approval_status": "approved"},
+            {"is_admin_created": True}
+        ]
+    }).sort("full_name", 1).to_list(length=200)
 
     # 1. Fetch direct shifts for target_date
     shifts_raw = await db["shifts"].find({"date": target_date, "status": {"$ne": "cancelled"}}).sort("start_time", 1).to_list(length=300)
@@ -231,7 +239,15 @@ async def get_weekly_roster(
     range_banner_str = f"{start_dt.strftime('%d %B')} – {end_dt.strftime('%d %B, %Y')}"
 
     # Fetch workers, shifts, and cleaning plans
-    workers_raw = await db["users"].find({"role": "worker"}).sort("full_name", 1).to_list(length=200)
+    workers_raw = await db["users"].find({
+        "role": "worker",
+        "account_status": {"$ne": "deleted"},
+        "$or": [
+            {"is_approved": True},
+            {"approval_status": "approved"},
+            {"is_admin_created": True}
+        ]
+    }).sort("full_name", 1).to_list(length=200)
     shifts_raw = await db["shifts"].find({
         "date": {"$gte": start_date_str, "$lte": end_date_str},
         "status": {"$ne": "cancelled"}
@@ -383,7 +399,15 @@ async def get_monthly_roster(
     dt_first = datetime(target_y, target_m, 1)
     month_name_banner = f"{dt_first.strftime('%B %Y')}"
 
-    workers_raw = await db["users"].find({"role": "worker"}).sort("full_name", 1).to_list(length=200)
+    workers_raw = await db["users"].find({
+        "role": "worker",
+        "account_status": {"$ne": "deleted"},
+        "$or": [
+            {"is_approved": True},
+            {"approval_status": "approved"},
+            {"is_admin_created": True}
+        ]
+    }).sort("full_name", 1).to_list(length=200)
     shifts_raw = await db["shifts"].find({
         "date": {"$gte": start_date_str, "$lte": end_date_str},
         "status": {"$ne": "cancelled"}

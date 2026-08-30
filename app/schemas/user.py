@@ -1,8 +1,14 @@
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
+from typing import Optional, List, Literal
 from datetime import datetime, date
 from app.models.user import RoleEnum, WorkerTypeEnum
 from app.schemas.common import BasePaginatedResponse
+from app.services.worker_salary import (
+    DEFAULT_HOURLY_RATE,
+    RATE_FIELD_DESCRIPTION,
+    reject_legacy_salary_field,
+    validate_hourly_rate,
+)
 
 # ---- Auth Requests ----
 class LoginRequest(BaseModel):
@@ -83,6 +89,31 @@ class WorkerProfileResponse(UserResponse):
     is_profile_completed: bool = False
     isagree_condition: Optional[bool] = False
     location: Optional[str] = None
+    working_days: List[str] = Field(default_factory=lambda: ["mon", "tue", "wed", "thu", "fri", "sat"])
+    off_days: List[str] = Field(default_factory=lambda: ["sun"])
+
+class WorkerWorkingDaysResponse(BaseModel):
+    worker_id: str = Field(..., json_schema_extra={"example": "6a8d6190b230abb1f64db3c2"})
+    worker_name: str = Field(..., json_schema_extra={"example": "Jahid Hasan"})
+    working_days: List[str] = Field(
+        default=["mon", "tue", "wed", "thu", "fri", "sat"],
+        json_schema_extra={"example": ["mon", "tue", "wed", "thu", "fri", "sat"]},
+        description="List of active working days (e.g. ['mon', 'tue', 'wed', 'thu', 'fri', 'sat'])"
+    )
+    off_days: List[str] = Field(
+        default=["sun"],
+        json_schema_extra={"example": ["sun"]},
+        description="List of off-duty days when worker is unavailable (e.g. ['sun'])"
+    )
+    total_working_days: int = Field(default=6, json_schema_extra={"example": 6})
+    updated_at: Optional[datetime] = None
+
+class WorkerWorkingDaysUpdate(BaseModel):
+    working_days: List[str] = Field(
+        ...,
+        json_schema_extra={"example": ["mon", "tue", "wed", "thu", "fri", "sat"]},
+        description="List of working days. Accepts 3-letter abbreviations ('mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun') or full day names ('monday', 'tuesday', etc.)."
+    )
 
 class WorkerProfileEdit(BaseModel):
     full_name: Optional[str] = None
@@ -168,30 +199,66 @@ class AdminUpdate(BaseModel):
 
 # ---- Admin Worker Management Schemas ----
 class AdminWorkerCreate(BaseModel):
-    name: str = Field(..., json_schema_extra={"example": "Rahim Ahmed"})
-    worker_type: str = Field(..., json_schema_extra={"example": "employee"})  # freelancer, employee
-    position: str = Field(..., json_schema_extra={"example": "senior cleaner"})  # cleaner, senior cleaner, team leader, special cleaner
+    full_name: str = Field(..., json_schema_extra={"example": "Rahim Ahmed"})
+    name: Optional[str] = None
+    worker_type: Literal["employee", "freelancer"] = Field(default="employee", json_schema_extra={"example": "employee"})
+    position: Optional[str] = Field(default="Cleaner", json_schema_extra={"example": "Cleaner"})
     email: EmailStr = Field(..., json_schema_extra={"example": "rahim.worker@yopmail.com"})
     phone: str = Field(..., json_schema_extra={"example": "+8801700000000"})
-    status: Optional[str] = Field(default="active", json_schema_extra={"example": "active"})  # active, onshift, offshift
-    base_location: Optional[str] = Field(default=None, json_schema_extra={"example": "Aqua Tower"})
-    languages: Optional[List[str]] = Field(default_factory=list, json_schema_extra={"example": ["bangla", "english"]})
-    national_id_front: Optional[str] = Field(default=None)
-    national_id_back: Optional[str] = Field(default=None)
-    employee_contract_pdf: Optional[str] = Field(default=None)
-
-class AdminWorkerUpdate(BaseModel):
-    name: Optional[str] = None
-    worker_type: Optional[str] = None
-    position: Optional[str] = None
-    email: Optional[EmailStr] = None
-    phone: Optional[str] = None
-    status: Optional[str] = None
-    base_location: Optional[str] = None
-    languages: Optional[List[str]] = None
+    status: Literal["active", "suspended", "banned"] = Field(default="active", json_schema_extra={"example": "active"})
+    base_location: Optional[str] = Field(default="Amsterdam-Centrum", json_schema_extra={"example": "Amsterdam-Centrum"})
+    hourly_rate: float = Field(default=DEFAULT_HOURLY_RATE, description=RATE_FIELD_DESCRIPTION, json_schema_extra={"example": 25.5})
+    languages: List[str] = Field(default_factory=lambda: ["Nederlands", "English"], json_schema_extra={"example": ["Nederlands", "English"]})
+    national_id: Optional[str] = Field(default=None, json_schema_extra={"example": "NID-12345678"})
+    certificates: List[str] = Field(default_factory=list, json_schema_extra={"example": ["Certificate in Professional Cleaning"]})
     national_id_front: Optional[str] = None
     national_id_back: Optional[str] = None
     employee_contract_pdf: Optional[str] = None
+
+    def __init__(self, **data):
+        if "full_name" not in data and "name" in data:
+            data["full_name"] = data["name"]
+        elif "name" not in data and "full_name" in data:
+            data["name"] = data["full_name"]
+        super().__init__(**data)
+
+    _reject_legacy_salary = model_validator(mode="before")(reject_legacy_salary_field)
+
+    @field_validator("hourly_rate", mode="before")
+    @classmethod
+    def _check_hourly_rate(cls, v):
+        return validate_hourly_rate(v)
+
+class AdminWorkerUpdate(BaseModel):
+    full_name: Optional[str] = Field(default=None, json_schema_extra={"example": "Rahim Ahmed"})
+    name: Optional[str] = None
+    email: Optional[EmailStr] = Field(default=None, json_schema_extra={"example": "rahim.worker@yopmail.com"})
+    phone: Optional[str] = Field(default=None, json_schema_extra={"example": "+8801700000000"})
+    worker_type: Optional[Literal["employee", "freelancer"]] = Field(default=None, json_schema_extra={"example": "employee"})
+    position: Optional[str] = Field(default=None, json_schema_extra={"example": "Senior Cleaner"})
+    base_location: Optional[str] = Field(default=None, json_schema_extra={"example": "Amsterdam-Centrum"})
+    hourly_rate: Optional[float] = Field(default=None, description=RATE_FIELD_DESCRIPTION + " Omit to leave the worker's current rate unchanged.", json_schema_extra={"example": 30.5})
+    languages: Optional[List[str]] = Field(default=None, json_schema_extra={"example": ["Nederlands", "English"]})
+    status: Optional[Literal["active", "suspended", "banned", "on_shift", "off_duty"]] = Field(default=None, json_schema_extra={"example": "active"})
+    national_id: Optional[str] = Field(default=None, json_schema_extra={"example": "NID-12345678"})
+    certificates: Optional[List[str]] = Field(default=None, json_schema_extra={"example": ["Advanced Cleaning Cert"]})
+    national_id_front: Optional[str] = None
+    national_id_back: Optional[str] = None
+    employee_contract_pdf: Optional[str] = None
+
+    def __init__(self, **data):
+        if "full_name" not in data and "name" in data:
+            data["full_name"] = data["name"]
+        elif "name" not in data and "full_name" in data:
+            data["name"] = data["full_name"]
+        super().__init__(**data)
+
+    _reject_legacy_salary = model_validator(mode="before")(reject_legacy_salary_field)
+
+    @field_validator("hourly_rate", mode="before")
+    @classmethod
+    def _check_hourly_rate(cls, v):
+        return v if v is None else validate_hourly_rate(v)
 
 class AdminWorkerResponse(BaseModel):
     id: str
@@ -203,6 +270,7 @@ class AdminWorkerResponse(BaseModel):
     phone: str
     status: str
     base_location: Optional[str] = None
+    hourly_rate: float = 25.0
     languages: List[str] = Field(default_factory=list)
     national_id_front: Optional[str] = None
     national_id_back: Optional[str] = None
@@ -225,6 +293,14 @@ class WorkerApproveRequest(BaseModel):
     worker_type: Optional[Literal["employee", "freelancer"]] = Field(default="employee", json_schema_extra={"example": "employee"})
     position: Optional[str] = Field(default="Cleaner", json_schema_extra={"example": "Cleaner"})
     base_location: Optional[str] = Field(default="Amsterdam-Centrum", json_schema_extra={"example": "Amsterdam-Centrum"})
+    hourly_rate: Optional[float] = Field(default=None, description=RATE_FIELD_DESCRIPTION + " Omit to keep the rate already on the worker's account.", json_schema_extra={"example": 25.5})
+
+    _reject_legacy_salary = model_validator(mode="before")(reject_legacy_salary_field)
+
+    @field_validator("hourly_rate", mode="before")
+    @classmethod
+    def _check_hourly_rate(cls, v):
+        return v if v is None else validate_hourly_rate(v)
 
 class WorkerRejectRequest(BaseModel):
     reject_reason: Optional[str] = Field(default=None, json_schema_extra={"example": "Incomplete documentation or identity verification failed"})
@@ -241,7 +317,14 @@ class WorkerApprovalResponse(BaseModel):
     worker_type: Optional[str] = None
     approval_status: str
     is_approved: bool
+    hourly_rate: Optional[float] = 25.0
     rejection_reason: Optional[str] = None
+    id_card_front: Optional[str] = None
+    id_card_back: Optional[str] = None
+    profile_photo: Optional[str] = None
+    certificates: Optional[List[str]] = Field(default_factory=list)
+    dob: Optional[str] = None
+    nationality: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -251,6 +334,36 @@ class WorkerApprovalResponse(BaseModel):
 
 class WorkerApprovalPaginatedResponse(BasePaginatedResponse):
     pending_approvals: List[WorkerApprovalResponse]
+
+class WorkerDetailResponse(BaseModel):
+    id: str
+    worker_id: str
+    full_name: str
+    email: EmailStr
+    phone: Optional[str] = None
+    worker_type: Optional[str] = "employee"
+    position: Optional[str] = "Cleaner"
+    base_location: Optional[str] = "Amsterdam-Centrum"
+    profile_photo: Optional[str] = None
+    id_card_front: Optional[str] = None
+    id_card_back: Optional[str] = None
+    certificates: Optional[List[str]] = Field(default_factory=list)
+    dob: Optional[str] = None
+    nationality: Optional[str] = None
+    status: str = "active"
+    account_status: str = "active"
+    is_approved: bool = True
+    approval_status: str = "approved"
+    is_profile_completed: bool = True
+    temp_password_changed: bool = True
+    is_signup: bool = True
+    last_login_at: Optional[datetime] = None
+    total_shifts_count: int = 0
+    completed_shifts_count: int = 0
+    rating: float = 5.0
+    hourly_rate: float = 25.0
+    created_at: datetime
+    updated_at: datetime
 
 class WorkerCountResponse(BaseModel):
     total_workers: int = Field(..., json_schema_extra={"example": 15})
@@ -266,24 +379,15 @@ class WorkerListItem(BaseModel):
     phone: Optional[str] = None
     status: Optional[str] = "active"
     is_signup: bool = True
+    is_profile_completed: bool = True
+    temp_password_changed: bool = True
+    last_login_at: Optional[datetime] = None
 
 class WorkerListPaginatedResponse(BasePaginatedResponse):
     workers: List[WorkerListItem] = Field(default_factory=list)
 
 
 # --- Admin Worker Management Table & Modals Schemas (Image 1, 2, 3) ---
-class AdminWorkerCreate(BaseModel):
-    full_name: str
-    email: EmailStr
-    phone: str
-    worker_type: Literal["employee", "freelancer"] = "employee"
-    position: Optional[str] = "Cleaner"
-    base_location: Optional[str] = "Amsterdam-Centrum"
-    languages: List[str] = Field(default_factory=lambda: ["Nederlands", "English"])
-    status: Literal["active", "suspended", "banned"] = "active"
-    national_id: Optional[str] = None
-    certificates: List[str] = Field(default_factory=list)
-
 class AdminWorkerStatusUpdate(BaseModel):
     status: Literal["active", "suspended", "banned"]
     reason: Optional[str] = None
@@ -298,6 +402,7 @@ class AdminWorkerTableItem(BaseModel):
     worker_type: str
     position: Optional[str] = None
     location: Optional[str] = None
+    hourly_rate: float = 25.0
     languages: List[str] = Field(default_factory=list)
     hours_worked: str = "0h"
     hours_worked_numeric: float = 0.0
@@ -305,6 +410,10 @@ class AdminWorkerTableItem(BaseModel):
     account_status: str = "active"
     approval_status: str = "approved"
     is_active: bool = True
+    is_profile_completed: bool = True
+    temp_password_changed: bool = True
+    is_signup: bool = True
+    last_login_at: Optional[datetime] = None
 
     def __init__(self, **data):
         if "name" not in data and "full_name" in data:

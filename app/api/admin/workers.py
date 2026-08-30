@@ -4,12 +4,18 @@ from fastapi import APIRouter, Depends, status, HTTPException, File, UploadFile,
 from typing import List, Optional
 from bson import ObjectId
 from app.core.database import get_database
+from app.services.worker_salary import resolve_hourly_rate
+from app.api.admin.workers_docs import (
+    AVAILABLE_WORKERS_DESCRIPTION,
+    CREATE_WORKER_DESCRIPTION,
+    UPDATE_WORKER_DESCRIPTION,
+)
 from app.security.password import get_password_hash, generate_temporary_password
 from app.schemas.user import (
     WorkerApprovalUpdate, WorkerApprovalResponse, WorkerApprovalPaginatedResponse,
     WorkerApproveRequest, WorkerRejectRequest,
     WorkerListItem, WorkerListPaginatedResponse,
-    AdminWorkerCreate, AdminWorkerStatusUpdate, AdminWorkerTableItem, AdminWorkerTablePaginatedResponse,
+    AdminWorkerCreate, AdminWorkerUpdate, AdminWorkerStatusUpdate, AdminWorkerTableItem, AdminWorkerTablePaginatedResponse,
     WorkerBulkImportResult
 )
 from app.models.user import UserInDB
@@ -37,7 +43,16 @@ async def get_admin_workers_table(
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"role": "worker", "account_status": {"$ne": "deleted"}}
+    base_approved_filter = {
+        "role": "worker",
+        "account_status": {"$ne": "deleted"},
+        "$or": [
+            {"is_approved": True},
+            {"approval_status": "approved"},
+            {"is_admin_created": True}
+        ]
+    }
+    query = dict(base_approved_filter)
 
     # Worker type filter
     if worker_type and worker_type.lower() != "all":
@@ -49,73 +64,82 @@ async def get_admin_workers_table(
             {"full_name": {"$regex": search, "$options": "i"}},
             {"position": {"$regex": search, "$options": "i"}},
             {"location": {"$regex": search, "$options": "i"}},
+            {"base_location": {"$regex": search, "$options": "i"}},
+            {"phone": {"$regex": search, "$options": "i"}},
             {"email": {"$regex": search, "$options": "i"}}
         ]
-        if "$or" in query:
-            query = {"$and": [query, {"$or": search_filter}]}
-        else:
-            query["$or"] = search_filter
+        query = {"$and": [query, {"$or": search_filter}]}
 
-    # Overall Summary Counters
-    total_workers_cnt = await db["users"].count_documents({"role": "worker", "account_status": {"$ne": "deleted"}})
-    employees_cnt = await db["users"].count_documents({"role": "worker", "worker_type": "employee", "account_status": {"$ne": "deleted"}})
-    freelancers_cnt = await db["users"].count_documents({"role": "worker", "worker_type": "freelancer", "account_status": {"$ne": "deleted"}})
+    # Status filter
+    if status_filter and status_filter.lower() != "all":
+        if status_filter.lower() == "active":
+            query["is_active"] = True
+            query["account_status"] = "active"
+        elif status_filter.lower() == "on_shift":
+            query["account_status"] = "on_shift"
+        elif status_filter.lower() == "off_duty":
+            query["account_status"] = "off_duty"
+        elif status_filter.lower() in ["suspended", "banned"]:
+            query["account_status"] = status_filter.lower()
 
-    # Fetch currently active shifts for On Shift status
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    running_shifts = await db["shifts"].find({"date": today_str, "status": {"$ne": "cancelled"}}).to_list(length=300)
-    on_shift_worker_ids = set()
-    for s in running_shifts:
-        for w in s.get("workers", []):
-            on_shift_worker_ids.add(str(w.get("worker_id") or w.get("id")))
+    # Worker type counters
+    total_workers_cnt = await db["users"].count_documents(base_approved_filter)
+    employees_cnt = await db["users"].count_documents({**base_approved_filter, "worker_type": "employee"})
+    freelancers_cnt = await db["users"].count_documents({**base_approved_filter, "worker_type": "freelancer"})
 
-    raw_workers = await db["users"].find(query).sort("full_name", 1).to_list(length=1000)
+    cursor = db["users"].find(query).sort("created_at", -1)
+    all_matched = await cursor.to_list(length=1000)
+
+    # Compute live total hours worked for each worker from shift_executions
+    worker_ids_str = [str(w["_id"]) for w in all_matched]
+    hours_map = {}
+    if worker_ids_str:
+        exec_cursor = db["shift_executions"].find({
+            "$or": [
+                {"assigned_workers.worker_id": {"$in": worker_ids_str}},
+                {"workers.worker_id": {"$in": worker_ids_str}},
+                {"worker_ids": {"$in": worker_ids_str}}
+            ]
+        })
+        async for ex in exec_cursor:
+            w_list = ex.get("assigned_workers") or ex.get("workers") or []
+            for w_rec in w_list:
+                wid = str(w_rec.get("worker_id") or "")
+                if wid in worker_ids_str:
+                    hw = float(w_rec.get("hours_worked") or 0.0)
+                    hours_map[wid] = hours_map.get(wid, 0.0) + hw
 
     formatted_workers = []
-    for w in raw_workers:
-        wid = str(w.get("_id"))
-        w_acct_status = w.get("account_status") or "active"
-        w_is_active = bool(w.get("is_active", True))
-
-        # Status determination
-        if w_acct_status == "banned":
-            w_status_label = "Banned"
-        elif w_acct_status == "suspended":
-            w_status_label = "Suspended"
-        elif wid in on_shift_worker_ids:
-            w_status_label = "On Shift"
-        elif w_is_active:
-            w_status_label = "Active"
-        else:
-            w_status_label = "Off Duty"
-
-        # Apply status filter
-        if status_filter and status_filter.lower() != "all":
-            sf = status_filter.lower().replace("_", " ")
-            if w_status_label.lower() != sf and w_acct_status.lower() != sf:
-                continue
-
-        # Calculate worked hours
-        w_shifts = await db["shifts"].find({"workers.worker_id": wid, "status": {"$ne": "cancelled"}}).to_list(length=500)
-        hw_total = 0.0
-        for s in w_shifts:
-            for item in s.get("workers", []):
-                if str(item.get("worker_id") or item.get("id")) == wid:
-                    hw_total += float(item.get("hours_worked", 8.0) or 8.0)
-                    break
-
-        formatted_hw = f"{int(hw_total)}h" if hw_total.is_integer() else f"{hw_total:.1f}h"
-
-        langs = w.get("languages") or ["Nederlands", "English"]
+    for w in all_matched:
+        wid = str(w["_id"])
         loc = w.get("location") or w.get("base_location") or "Amsterdam-Centrum"
+        langs = w.get("languages") or ["Nederlands", "English"]
+        hw_total = hours_map.get(wid, 0.0)
+
+        hours_int = int(hw_total)
+        mins_int = int((hw_total - hours_int) * 60)
+        formatted_hw = f"{hours_int}h {mins_int}m" if mins_int > 0 else f"{hours_int}h"
+
+        w_acct_status = w.get("account_status", "active").lower()
+        w_is_active = w.get("is_active", True)
+        if not w_is_active or w_acct_status in ["suspended", "banned"]:
+            w_status_label = w_acct_status.capitalize() if w_acct_status in ["suspended", "banned"] else "Inactive"
+        else:
+            w_status_label = "Active"
+
+        hourly_r = resolve_hourly_rate(w)
 
         formatted_workers.append(AdminWorkerTableItem(
             worker_id=wid,
             full_name=w.get("full_name") or "Worker",
+            name=w.get("full_name") or "Worker",
+            email=w.get("email"),
+            phone=w.get("phone"),
             profile_photo=w.get("profile_photo"),
             worker_type=str(w.get("worker_type") or "employee").capitalize(),
             position=w.get("position") or "Cleaner",
             location=loc,
+            hourly_rate=hourly_r,
             languages=langs,
             hours_worked=formatted_hw,
             hours_worked_numeric=round(hw_total, 1),
@@ -140,14 +164,15 @@ async def get_admin_workers_table(
 
 
 # ============================================================================
-# 2. Add New Worker (Image 2 Modal)
+# 2. Add New Worker & Update Worker (Image 2 Modal)
 # ============================================================================
 
 @worker_mgmt_router.post(
     "/workers",
     response_model=AdminWorkerTableItem,
     status_code=status.HTTP_201_CREATED,
-    summary="Add New Worker (Image 2 Modal)"
+    summary="Add New Worker (Image 2 Modal)",
+    description=CREATE_WORKER_DESCRIPTION
 )
 async def create_new_worker(
     worker_in: AdminWorkerCreate,
@@ -163,6 +188,9 @@ async def create_new_worker(
     temp_pwd = generate_temporary_password()
     hashed_pwd = get_password_hash(temp_pwd)
 
+    # Schema validated and defaulted this already (see AdminWorkerCreate.hourly_rate).
+    hourly_r = worker_in.hourly_rate
+
     doc = {
         "full_name": worker_in.full_name,
         "email": email_clean,
@@ -173,6 +201,7 @@ async def create_new_worker(
         "position": worker_in.position or "Cleaner",
         "location": worker_in.base_location or "Amsterdam-Centrum",
         "base_location": worker_in.base_location or "Amsterdam-Centrum",
+        "hourly_rate": hourly_r,
         "languages": worker_in.languages or ["Nederlands", "English"],
         "account_status": worker_in.status.lower(),
         "approval_status": "approved",
@@ -201,6 +230,7 @@ async def create_new_worker(
             "worker_type": worker_in.worker_type.lower(),
             "position": worker_in.position or "Cleaner",
             "base_location": worker_in.base_location or "Amsterdam-Centrum",
+            "hourly_rate": hourly_r,
             "languages": worker_in.languages or ["Nederlands", "English"],
             "created_at": now
         }},
@@ -226,6 +256,7 @@ async def create_new_worker(
         worker_type=worker_in.worker_type.capitalize(),
         position=worker_in.position or "Cleaner",
         location=worker_in.base_location or "Amsterdam-Centrum",
+        hourly_rate=hourly_r,
         languages=worker_in.languages or ["Nederlands", "English"],
         hours_worked="0h",
         hours_worked_numeric=0.0,
@@ -236,74 +267,107 @@ async def create_new_worker(
     )
 
 
-# ============================================================================
-# 3. Worker Status, Soft Delete & Restore Lifecycle
-# ============================================================================
-
 @worker_mgmt_router.patch(
-    "/workers/{worker_id}/status",
-    summary="Ban, Suspend, or Activate Worker"
-)
-async def update_worker_status(
-    worker_id: str,
-    status_in: AdminWorkerStatusUpdate,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"_id": worker_id}
-    wdoc = await db["users"].find_one(query)
-    if not wdoc:
-        raise HTTPException(status_code=404, detail="Worker not found")
-
-    new_st = status_in.status.lower()
-    is_active = (new_st == "active")
-
-    update_fields = {
-        "account_status": new_st,
-        "is_active": is_active,
-        "updated_at": datetime.now(timezone.utc)
-    }
-    if status_in.reason:
-        update_fields["status_reason"] = status_in.reason
-
-    await db["users"].update_one(query, {"$set": update_fields})
-    return {"message": f"Worker account status updated to '{new_st}' successfully"}
-
-
-@worker_mgmt_router.delete(
     "/workers/{worker_id}",
-    status_code=status.HTTP_200_OK,
-    summary="Delete Worker"
+    response_model=AdminWorkerTableItem,
+    summary="Update Worker Details (Manager)",
+    description=UPDATE_WORKER_DESCRIPTION
 )
-async def delete_worker(
+async def update_worker_details(
     worker_id: str,
+    update_in: AdminWorkerUpdate,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"$or": [{"_id": worker_id}, {"id": worker_id}]}
-    wdoc = await db["users"].find_one({"$and": [query, {"role": "worker"}]})
-    if not wdoc:
+    user_doc = await db["users"].find_one({"$and": [query, {"role": "worker"}]})
+    if not user_doc:
         raise HTTPException(status_code=404, detail="Worker not found")
 
     now = datetime.now(timezone.utc)
-    await db["users"].update_one(
-        {"_id": wdoc["_id"]},
-        {"$set": {
-            "account_status": "deleted",
-            "status": "deleted",
-            "is_active": False,
-            "updated_at": now
-        }}
-    )
-    email = wdoc.get("email")
-    if email:
+    set_fields = {"updated_at": now}
+
+    if update_in.full_name is not None:
+        set_fields["full_name"] = update_in.full_name
+    if update_in.email is not None:
+        email_clean = update_in.email.lower().strip()
+        existing = await db["users"].find_one({"email": email_clean, "_id": {"$ne": user_doc["_id"]}})
+        if existing:
+            raise HTTPException(status_code=400, detail="Another user with this email already exists")
+        set_fields["email"] = email_clean
+    if update_in.phone is not None:
+        set_fields["phone"] = update_in.phone
+    if update_in.worker_type is not None:
+        set_fields["worker_type"] = update_in.worker_type.lower()
+    if update_in.position is not None:
+        set_fields["position"] = update_in.position
+    if update_in.base_location is not None:
+        set_fields["base_location"] = update_in.base_location
+        set_fields["location"] = update_in.base_location
+    if update_in.hourly_rate is not None:
+        set_fields["hourly_rate"] = update_in.hourly_rate
+    if update_in.languages is not None:
+        set_fields["languages"] = update_in.languages
+    if update_in.status is not None:
+        st_clean = update_in.status.lower()
+        set_fields["account_status"] = st_clean
+        set_fields["is_active"] = (st_clean == "active")
+    if update_in.national_id is not None:
+        set_fields["national_id"] = update_in.national_id
+    if update_in.certificates is not None:
+        set_fields["certificates"] = update_in.certificates
+
+    await db["users"].update_one({"_id": user_doc["_id"]}, {"$set": set_fields})
+    updated = await db["users"].find_one({"_id": user_doc["_id"]})
+
+    # Sync to admin_workers
+    admin_w_set = {}
+    if "full_name" in set_fields:
+        admin_w_set["name"] = set_fields["full_name"]
+    if "phone" in set_fields:
+        admin_w_set["phone"] = set_fields["phone"]
+    if "worker_type" in set_fields:
+        admin_w_set["worker_type"] = set_fields["worker_type"]
+    if "position" in set_fields:
+        admin_w_set["position"] = set_fields["position"]
+    if "base_location" in set_fields:
+        admin_w_set["base_location"] = set_fields["base_location"]
+    if "hourly_rate" in set_fields:
+        admin_w_set["hourly_rate"] = set_fields["hourly_rate"]
+    if admin_w_set:
+        admin_w_set["updated_at"] = now
         await db["admin_workers"].update_one(
-            {"email": email},
-            {"$set": {"status": "deleted", "is_active": False, "updated_at": now}}
+            {"email": updated.get("email")},
+            {"$set": admin_w_set},
+            upsert=True
         )
 
-    return {"message": "Worker deleted successfully"}
+    hourly_r = resolve_hourly_rate(updated)
 
+    return AdminWorkerTableItem(
+        worker_id=str(updated["_id"]),
+        full_name=updated.get("full_name") or "Worker",
+        name=updated.get("full_name") or "Worker",
+        email=updated.get("email"),
+        phone=updated.get("phone"),
+        profile_photo=updated.get("profile_photo"),
+        worker_type=str(updated.get("worker_type") or "employee").capitalize(),
+        position=updated.get("position") or "Cleaner",
+        location=updated.get("location") or updated.get("base_location") or "Amsterdam-Centrum",
+        hourly_rate=hourly_r,
+        languages=updated.get("languages") or ["Nederlands", "English"],
+        hours_worked="0h",
+        hours_worked_numeric=0.0,
+        status="Active" if updated.get("is_active", True) else "Inactive",
+        account_status=updated.get("account_status", "active"),
+        approval_status=updated.get("approval_status", "approved"),
+        is_active=updated.get("is_active", True)
+    )
+
+
+# ============================================================================
+# 3. Bulk CSV Import Template, Upload & Export
+# ============================================================================
 
 @worker_mgmt_router.get(
     "/workers/deleted-list",
@@ -363,6 +427,104 @@ async def list_deleted_workers(
         workers=formatted_workers
     )
 
+@worker_mgmt_router.get(
+    "/workers/bulk-import/template",
+    summary="Download CSV Bulk Import Template (Image 3)"
+)
+async def download_worker_import_template(
+    current_user: UserInDB = Depends(require_manager)
+):
+    template_content = generate_csv_template()
+    return Response(
+        content=template_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=import_workers_template.csv"}
+    )
+
+@worker_mgmt_router.post(
+    "/workers/bulk-import",
+    response_model=WorkerBulkImportResult,
+    summary="Validate & Bulk Import CSV Worker Data (Image 3 Modal)"
+)
+async def bulk_import_workers_csv(
+    file: UploadFile = File(...),
+    current_user: UserInDB = Depends(require_manager)
+):
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported for bulk import")
+
+    db = get_database()
+    file_bytes = await file.read()
+    result = await parse_and_validate_worker_csv(file_bytes, db)
+    return result
+
+
+# ============================================================================
+# 4. Worker Status, Soft Delete & Restore Lifecycle
+# ============================================================================
+
+@worker_mgmt_router.patch(
+    "/workers/{worker_id}/status",
+    summary="Ban, Suspend, or Activate Worker"
+)
+async def update_worker_status(
+    worker_id: str,
+    status_in: AdminWorkerStatusUpdate,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"_id": worker_id}
+    wdoc = await db["users"].find_one(query)
+    if not wdoc:
+        raise HTTPException(status_code=404, detail="Worker not found")
+
+    new_st = status_in.status.lower()
+    is_active = (new_st == "active")
+
+    update_fields = {
+        "account_status": new_st,
+        "is_active": is_active,
+        "updated_at": datetime.now(timezone.utc)
+    }
+    if status_in.reason:
+        update_fields["status_reason"] = status_in.reason
+
+    await db["users"].update_one(query, {"$set": update_fields})
+    return {"message": f"Worker account status updated to '{new_st}' successfully"}
+
+@worker_mgmt_router.delete(
+    "/workers/{worker_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Delete Worker"
+)
+async def delete_worker(
+    worker_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"$or": [{"_id": worker_id}, {"id": worker_id}]}
+    wdoc = await db["users"].find_one({"$and": [query, {"role": "worker"}]})
+    if not wdoc:
+        raise HTTPException(status_code=404, detail="Worker not found")
+
+    now = datetime.now(timezone.utc)
+    await db["users"].update_one(
+        {"_id": wdoc["_id"]},
+        {"$set": {
+            "account_status": "deleted",
+            "status": "deleted",
+            "is_active": False,
+            "updated_at": now
+        }}
+    )
+    email = wdoc.get("email")
+    if email:
+        await db["admin_workers"].update_one(
+            {"email": email},
+            {"$set": {"status": "deleted", "is_active": False, "updated_at": now}}
+        )
+
+    return {"message": "Worker deleted successfully"}
 
 @worker_mgmt_router.post(
     "/workers/{worker_id}/restore",
@@ -399,57 +561,21 @@ async def restore_worker(
     return {"message": "Worker restored successfully"}
 
 
-# ============================================================================
-# 4. Bulk CSV Import Template & Upload (Image 3)
-# ============================================================================
-
-@worker_mgmt_router.get(
-    "/workers/bulk-import/template",
-    summary="Download CSV Bulk Import Template (Image 3)"
-)
-async def download_worker_import_template(
-    current_user: UserInDB = Depends(require_manager)
-):
-    template_content = generate_csv_template()
-    return Response(
-        content=template_content,
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=import_workers_template.csv"}
-    )
-
-
-@worker_mgmt_router.post(
-    "/workers/bulk-import",
-    response_model=WorkerBulkImportResult,
-    summary="Validate & Bulk Import CSV Worker Data (Image 3 Modal)"
-)
-async def bulk_import_workers_csv(
-    file: UploadFile = File(...),
-    current_user: UserInDB = Depends(require_manager)
-):
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files are supported for bulk import")
-
-    db = get_database()
-    file_bytes = await file.read()
-    result = await parse_and_validate_worker_csv(file_bytes, db)
-    return result
-
-
-# ============================================================================
-# 5. Worker CSV Export
-# ============================================================================
-
-@worker_mgmt_router.get(
-    "/workers/export",
-    summary="Export Workers Data to CSV"
-)
+@worker_mgmt_router.get("/workers/export", summary="Export Workers CSV")
 async def export_workers_csv(
     worker_type: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"role": "worker", "account_status": {"$ne": "deleted"}}
+    query = {
+        "role": "worker",
+        "account_status": {"$ne": "deleted"},
+        "$or": [
+            {"is_approved": True},
+            {"approval_status": "approved"},
+            {"is_admin_created": True}
+        ]
+    }
     if worker_type and worker_type.lower() != "all":
         query["worker_type"] = worker_type.lower()
 
@@ -471,7 +597,8 @@ worker_mgmt_router.include_router(worker_approvals_router)
 @worker_mgmt_router.get(
     "/workers-list",
     response_model=WorkerListPaginatedResponse,
-    summary="List Available Workers"
+    summary="List Available Workers",
+    description=AVAILABLE_WORKERS_DESCRIPTION
 )
 async def list_available_workers(
     page: int = 1,
@@ -480,13 +607,24 @@ async def list_available_workers(
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"role": "worker", "is_active": True, "account_status": {"$ne": "deleted"}}
+    query = {
+        "role": "worker",
+        "is_active": True,
+        "account_status": {"$ne": "deleted"},
+        "$or": [
+            {"is_approved": True},
+            {"approval_status": "approved"},
+            {"is_admin_created": True}
+        ]
+    }
 
     if search:
-        query["$or"] = [
+        search_filter = [
             {"full_name": {"$regex": search, "$options": "i"}},
-            {"email": {"$regex": search, "$options": "i"}}
+            {"email": {"$regex": search, "$options": "i"}},
+            {"phone": {"$regex": search, "$options": "i"}}
         ]
+        query = {"$and": [query, {"$or": search_filter}]}
 
     total_count = await db["users"].count_documents(query)
     skip = (page - 1) * limit
@@ -507,9 +645,12 @@ async def list_available_workers(
             is_signup=True
         ))
 
+    has_more = (skip + len(items)) < total_count
+
     return WorkerListPaginatedResponse(
         total_count=total_count,
         page=page,
         limit=limit,
+        has_more=has_more,
         workers=items
     )

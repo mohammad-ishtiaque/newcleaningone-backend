@@ -35,6 +35,14 @@ class ExtraServiceCreate(BaseModel):
     task_list: Optional[List[str]] = None
 
     def __init__(self, **data):
+        if "priority" in data and data["priority"]:
+            p_val = str(data["priority"]).strip().lower()
+            if p_val in ["high", "high priority", "urgent"]:
+                data["priority"] = "High Priority"
+            elif p_val in ["low", "low priority"]:
+                data["priority"] = "Low Priority"
+            else:
+                data["priority"] = "Medium Priority"
         # Backward-compat: if task_list provided but no tasks, convert task_list strings to tasks
         if "task_list" in data and data["task_list"] and ("tasks" not in data or not data["tasks"]):
             data["tasks"] = [CleaningTaskCreate(name=t) for t in data["task_list"]]
@@ -81,6 +89,14 @@ class ExtraServiceUpdate(BaseModel):
     task_list: Optional[List[str]] = None
 
     def __init__(self, **data):
+        if "priority" in data and data["priority"]:
+            p_val = str(data["priority"]).strip().lower()
+            if p_val in ["high", "high priority", "urgent"]:
+                data["priority"] = "High Priority"
+            elif p_val in ["low", "low priority"]:
+                data["priority"] = "Low Priority"
+            elif p_val in ["medium", "medium priority"]:
+                data["priority"] = "Medium Priority"
         if "task_list" in data and data["task_list"] is not None and ("tasks" not in data or data["tasks"] is None):
             data["tasks"] = [CleaningTaskCreate(name=t) for t in data["task_list"]]
         super().__init__(**data)
@@ -150,7 +166,7 @@ class RoomInfo(BaseModel):
     id: Optional[str] = None
     name: Optional[str] = None
 
-class ExtraServiceResponse(BaseModel):
+class ExtraServiceListItem(BaseModel):
     id: str
     title: str
     preferred_date: str
@@ -169,10 +185,8 @@ class ExtraServiceResponse(BaseModel):
     date_submitted: str
     rejection_reason: Optional[str] = None
     assigned_workers: List[ExtraServiceWorkerDetail] = Field(default_factory=list)
-    tasks: List[ExtraServiceTaskItem] = Field(default_factory=list)
     total_tasks_count: int = 0
     total_photos_count: int = 0
-    required_photos: List[ExtraServicePhotoRequirement] = Field(default_factory=list)
     estimated_hours: float = 0.0
     actual_start_time: Optional[datetime] = None
     actual_finish_time: Optional[datetime] = None
@@ -180,8 +194,12 @@ class ExtraServiceResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+class ExtraServiceResponse(ExtraServiceListItem):
+    tasks: List[ExtraServiceTaskItem] = Field(default_factory=list)
+    required_photos: List[ExtraServicePhotoRequirement] = Field(default_factory=list)
+
 class ExtraServicePaginatedResponse(BasePaginatedResponse):
-    requests: List[ExtraServiceResponse] = Field(default_factory=list)
+    requests: List[ExtraServiceListItem] = Field(default_factory=list)
 
 class ExtraServiceWorkerDropdownPaginatedResponse(BasePaginatedResponse):
     request_id: str
@@ -196,7 +214,6 @@ class ExtraServiceWorkerDropdownPaginatedResponse(BasePaginatedResponse):
 # --- Client Room Dropdown Schemas ---
 class ClientRoomDropdownItem(BaseModel):
     id: str = ""
-    room_id: str = ""
     room_name: str = ""
     room_type: str = "standard"
     location_id: Optional[str] = None
@@ -212,8 +229,6 @@ class ClientRoomDropdownItem(BaseModel):
     def __init__(self, **data):
         if "room_id" in data and not data.get("id"):
             data["id"] = data["room_id"]
-        elif "id" in data and not data.get("room_id"):
-            data["room_id"] = data["id"]
         if "name" in data and not data.get("room_name"):
             data["room_name"] = data["name"]
         super().__init__(**data)
@@ -224,7 +239,6 @@ class ClientRoomDropdownItem(BaseModel):
         "json_schema_extra": {
             "example": {
                 "id": "room_a366ecf17c",
-                "room_id": "room_a366ecf17c",
                 "room_name": "Executive Boardroom",
                 "room_type": "conference_room",
                 "location_id": "loc_db28f5a3f6",
@@ -258,9 +272,7 @@ class ClientRoomDropdownPaginatedResponse(BasePaginatedResponse):
 # --- Client Location Dropdown Schemas ---
 class ClientLocationDropdownItem(BaseModel):
     id: str = ""
-    location_id: str = ""
     name: str = ""
-    location_name: str = ""
     address: Optional[str] = None
     city: Optional[str] = None
     postal_code: Optional[str] = None
@@ -270,12 +282,8 @@ class ClientLocationDropdownItem(BaseModel):
     def __init__(self, **data):
         if "location_id" in data and not data.get("id"):
             data["id"] = data["location_id"]
-        elif "id" in data and not data.get("location_id"):
-            data["location_id"] = data["id"]
         if "location_name" in data and not data.get("name"):
             data["name"] = data["location_name"]
-        elif "name" in data and not data.get("location_name"):
-            data["location_name"] = data["name"]
         super().__init__(**data)
 
     model_config = {
@@ -284,9 +292,7 @@ class ClientLocationDropdownItem(BaseModel):
         "json_schema_extra": {
             "example": {
                 "id": "loc_db28f5a3f6",
-                "location_id": "loc_db28f5a3f6",
                 "name": "Betopia HQ Main Tower",
-                "location_name": "Betopia HQ Main Tower",
                 "address": "Keizersgracht 421, 1016 EK Amsterdam",
                 "city": "Amsterdam",
                 "postal_code": "1016 EK",

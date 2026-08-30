@@ -17,7 +17,7 @@ class AccountDetails(BaseModel):
 class SecurityCardInfo(BaseModel):
     last_password_changed: str
 
-class ClientProfileResponse(BaseModel):
+class ClientProfileSettingsResponse(BaseModel):
     full_name: str
     account_type: str = "Client Account"
     company_name: str
@@ -25,6 +25,8 @@ class ClientProfileResponse(BaseModel):
     contact_information: ContactInformation
     account_details: AccountDetails
     security_info: SecurityCardInfo
+
+ClientProfileResponse = ClientProfileSettingsResponse
 
 class ClientProfileUpdate(BaseModel):
     company_name: Optional[str] = Field(None, json_schema_extra={"example": "Apex Tech Ltd."})

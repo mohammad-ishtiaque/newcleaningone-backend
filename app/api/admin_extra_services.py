@@ -6,7 +6,7 @@ from bson import ObjectId
 from app.core.database import get_database
 from app.dependencies.auth import get_current_user
 from app.models.user import UserInDB, RoleEnum
-from app.services.extra_services_helper import format_extra_service_response
+from app.services.extra_services_helper import format_extra_service_response, format_extra_service_list_item
 from app.schemas.extra_services import (
     ExtraServiceApproveRequest, ExtraServiceRejectRequest,
     ExtraServiceResponse, ExtraServicePaginatedResponse,
@@ -64,7 +64,7 @@ async def list_admin_extra_services(
     cursor = db["extra_services"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     raw_docs = await cursor.to_list(length=limit)
 
-    requests_res = [format_extra_service_response(d) for d in raw_docs]
+    requests_res = [format_extra_service_list_item(d) for d in raw_docs]
     return ExtraServicePaginatedResponse(total_count=total_count, page=page, limit=limit, requests=requests_res)
 
 
@@ -262,18 +262,26 @@ async def get_extra_service_worker_dropdown(
     start_mins = parse_time_to_minutes(start_time_str)
     end_mins = (start_mins + duration_minutes) % 1440
 
-    worker_filter = {"role": "worker"}
+    worker_filter = {
+        "role": "worker",
+        "account_status": {"$ne": "deleted"},
+        "$or": [
+            {"is_approved": True},
+            {"approval_status": "approved"},
+            {"is_admin_created": True}
+        ]
+    }
     if worker_type and worker_type.lower() != "all":
         worker_filter["worker_type"] = worker_type.lower()
 
     if search:
-        worker_filter["$or"] = [
+        search_filter = [
             {"full_name": {"$regex": search, "$options": "i"}},
             {"name": {"$regex": search, "$options": "i"}},
             {"email": {"$regex": search, "$options": "i"}},
-            {"phone": {"$regex": search, "$options": "i"}},
-            {"position": {"$regex": search, "$options": "i"}}
+            {"phone": {"$regex": search, "$options": "i"}}
         ]
+        worker_filter = {"$and": [worker_filter, {"$or": search_filter}]}
 
     worker_projection = {
         "_id": 1, "id": 1, "full_name": 1, "name": 1, "email": 1,
@@ -473,7 +481,138 @@ async def assign_workers_to_extra_service(
     await db["extra_services"].update_one(query, {"$set": update_data})
     updated_doc = await db["extra_services"].find_one(query)
 
+    # Fire rich push & in-app notifications to newly assigned workers
+    try:
+        newly_assigned_items = [{"worker_id": wid, "position": pos} for wid, pos in filtered_new_map.items()]
+        await send_extra_service_assignment_notifications(
+            es_doc=updated_doc,
+            assigned_workers=newly_assigned_items,
+            db=db
+        )
+    except Exception as e:
+        print(f"Error sending extra service assignment notifications: {e}")
+
     return format_extra_service_response(updated_doc)
+
+
+async def send_extra_service_assignment_notifications(
+    es_doc: dict,
+    assigned_workers: List[dict],
+    db
+) -> List[dict]:
+    """
+    Fires rich push notifications (via OneSignal), saves in-app notifications,
+    and broadcasts real-time WebSocket event for all workers assigned to an extra service.
+    """
+    from app.services.notification_service import NotificationService
+    notif_service = NotificationService()
+
+    req_id = str(es_doc.get("id") or es_doc.get("_id"))
+    es_title = es_doc.get("title") or "Extra Cleaning Service"
+    pref_date = es_doc.get("preferred_date") or ""
+    client_name = es_doc.get("client_name") or (es_doc.get("client", {}) or {}).get("name", "")
+    location_name = es_doc.get("location_name") or (es_doc.get("location", {}) or {}).get("name", "")
+    room_name = es_doc.get("room_name") or (es_doc.get("room", {}) or {}).get("name", "")
+    priority = es_doc.get("priority", "Medium Priority")
+    description = es_doc.get("description", "")
+    est_hours = float(es_doc.get("estimated_hours", 2.0))
+    tasks_count = len(es_doc.get("tasks", []))
+    photos_count = len(es_doc.get("required_photos", []))
+
+    start_time = "08:00 AM"
+    duration_mins = int(est_hours * 60)
+    start_mins = parse_time_to_minutes(start_time)
+    end_mins = (start_mins + duration_mins) % 1440
+    end_hour = end_mins // 60
+    end_ampm = "AM" if end_hour < 12 else "PM"
+    end_hour_12 = end_hour % 12 or 12
+    end_time_str = f"{end_hour_12:02d}:{end_mins % 60:02d} {end_ampm}"
+
+    sent_notifications = []
+
+    for w_entry in assigned_workers:
+        wid = str(w_entry.get("worker_id") or "")
+        if not wid:
+            continue
+        position = normalize_worker_position(w_entry.get("position"))
+        position_display = "Team Leader" if position == "teamleader" else ("Co-Leader" if position == "co_leader" else "Cleaner")
+
+        user_doc = await db["users"].find_one({"$or": [{"_id": wid}, {"id": wid}]})
+        if not user_doc and ObjectId.is_valid(wid):
+            try:
+                user_doc = await db["users"].find_one({"_id": ObjectId(wid)})
+            except Exception:
+                pass
+
+        player_ids = []
+        if user_doc:
+            p_id = user_doc.get("onesignal_player_id") or user_doc.get("onesignal_id") or user_doc.get("player_id")
+            if p_id:
+                player_ids.append(str(p_id))
+            for pid_item in user_doc.get("player_ids", []):
+                if pid_item and str(pid_item) not in player_ids:
+                    player_ids.append(str(pid_item))
+
+        title = f"New Extra Service Assigned: {es_title}"
+        message = (
+            f"You have been assigned as {position_display} for extra service '{es_title}' "
+            f"on {pref_date} ({start_time} - {end_time_str})."
+        )
+
+        rich_data = {
+            "request_id": req_id,
+            "extra_service_id": req_id,
+            "shift_id": req_id,
+            "service_kind": "extra_service",
+            "deeplink": f"cleaningone://worker/shifts/{req_id}",
+            "route": f"/worker/shifts/{req_id}",
+            "title": es_title,
+            "position": position,
+            "position_display": position_display,
+            "date": pref_date,
+            "preferred_date": pref_date,
+            "start_time": start_time,
+            "end_time": end_time_str,
+            "estimated_hours": est_hours,
+            "client_name": client_name,
+            "location_name": location_name,
+            "room_name": room_name,
+            "priority": priority,
+            "description": description,
+            "tasks_count": tasks_count,
+            "total_photos_count": photos_count
+        }
+
+        notif_doc = await notif_service.create_notification(
+            title=title,
+            message=message,
+            notification_type="extra_service_assignment",
+            recipient_type="worker",
+            user_id=wid,
+            player_ids=player_ids if player_ids else None,
+            plan_id=req_id,
+            data=rich_data
+        )
+        sent_notifications.append(notif_doc)
+
+        try:
+            from app.api.chat import ws_manager
+            await ws_manager.broadcast_to_users({
+                "type": "extra_service_assignment",
+                "request_id": req_id,
+                "extra_service_id": req_id,
+                "shift_id": req_id,
+                "service_kind": "extra_service",
+                "deeplink": f"cleaningone://worker/shifts/{req_id}",
+                "route": f"/worker/shifts/{req_id}",
+                "title": title,
+                "message": message,
+                "data": rich_data
+            }, [wid])
+        except Exception as ws_err:
+            print(f"Error broadcasting extra service websocket: {ws_err}")
+
+    return sent_notifications
 
 
 @router.post(

@@ -6,7 +6,6 @@ from app.schemas.client_list import CleaningTaskResponse
 
 class ClientRoomShortSummaryItem(BaseModel):
     id: str = ""
-    room_id: str = ""
     room_name: str = ""
     room_type: str = "standard"
     floor: Optional[int] = 1
@@ -19,8 +18,6 @@ class ClientRoomShortSummaryItem(BaseModel):
     def __init__(self, **data):
         if "room_id" in data and not data.get("id"):
             data["id"] = data["room_id"]
-        elif "id" in data and not data.get("room_id"):
-            data["room_id"] = data["id"]
         if "name" in data and not data.get("room_name"):
             data["room_name"] = data["name"]
         super().__init__(**data)
@@ -31,7 +28,6 @@ class ClientRoomShortSummaryItem(BaseModel):
         "json_schema_extra": {
             "example": {
                 "id": "room_a366ecf17c",
-                "room_id": "room_a366ecf17c",
                 "room_name": "Executive Boardroom",
                 "room_type": "conference_room",
                 "floor": 2,
@@ -46,9 +42,7 @@ class ClientRoomShortSummaryItem(BaseModel):
 
 class ClientLocationShortItem(BaseModel):
     id: str = ""
-    location_id: str = ""
     name: str = ""
-    location_name: str = ""
     type: str = "office"
     address: Optional[str] = None
     city: Optional[str] = None
@@ -66,12 +60,8 @@ class ClientLocationShortItem(BaseModel):
     def __init__(self, **data):
         if "location_id" in data and not data.get("id"):
             data["id"] = data["location_id"]
-        elif "id" in data and not data.get("location_id"):
-            data["location_id"] = data["id"]
         if "location_name" in data and not data.get("name"):
             data["name"] = data["location_name"]
-        elif "name" in data and not data.get("location_name"):
-            data["location_name"] = data["name"]
         super().__init__(**data)
 
     model_config = {
@@ -80,9 +70,7 @@ class ClientLocationShortItem(BaseModel):
         "json_schema_extra": {
             "example": {
                 "id": "loc_db28f5a3f6",
-                "location_id": "loc_db28f5a3f6",
                 "name": "Betopia Headquarters Tower",
-                "location_name": "Betopia Headquarters Tower",
                 "type": "office",
                 "address": "Keizersgracht 421",
                 "city": "Amsterdam",
@@ -94,7 +82,7 @@ class ClientLocationShortItem(BaseModel):
                 "is_active": True,
                 "rooms_summary": [
                     {
-                        "room_id": "room_a366ecf17c",
+                        "id": "room_a366ecf17c",
                         "room_name": "Executive Boardroom",
                         "room_type": "conference_room",
                         "floor": 2,
@@ -118,7 +106,6 @@ class ClientLocationMonitoringPaginatedResponse(BasePaginatedResponse):
 
 class ClientRoomDetailItem(BaseModel):
     id: str = ""
-    room_id: str = ""
     room_name: str = ""
     room_type: str = "standard"
     location_id: Optional[str] = None
@@ -136,8 +123,6 @@ class ClientRoomDetailItem(BaseModel):
     def __init__(self, **data):
         if "room_id" in data and not data.get("id"):
             data["id"] = data["room_id"]
-        elif "id" in data and not data.get("room_id"):
-            data["room_id"] = data["id"]
         if "name" in data and not data.get("room_name"):
             data["room_name"] = data["name"]
         super().__init__(**data)
@@ -148,7 +133,6 @@ class ClientRoomDetailItem(BaseModel):
         "json_schema_extra": {
             "example": {
                 "id": "room_a366ecf17c",
-                "room_id": "room_a366ecf17c",
                 "room_name": "Executive Boardroom",
                 "room_type": "conference_room",
                 "location_id": "loc_db28f5a3f6",
@@ -177,9 +161,7 @@ class ClientRoomDetailItem(BaseModel):
 
 class ClientLocationDetailResponse(BaseModel):
     id: str = ""
-    location_id: str = ""
     name: str = ""
-    location_name: str = ""
     type: str = "office"
     address: Optional[str] = None
     city: Optional[str] = None
@@ -201,12 +183,8 @@ class ClientLocationDetailResponse(BaseModel):
     def __init__(self, **data):
         if "location_id" in data and not data.get("id"):
             data["id"] = data["location_id"]
-        elif "id" in data and not data.get("location_id"):
-            data["location_id"] = data["id"]
         if "location_name" in data and not data.get("name"):
             data["name"] = data["location_name"]
-        elif "name" in data and not data.get("location_name"):
-            data["location_name"] = data["name"]
         super().__init__(**data)
 
     model_config = {
@@ -215,9 +193,7 @@ class ClientLocationDetailResponse(BaseModel):
         "json_schema_extra": {
             "example": {
                 "id": "loc_db28f5a3f6",
-                "location_id": "loc_db28f5a3f6",
                 "name": "Betopia Headquarters Tower",
-                "location_name": "Betopia Headquarters Tower",
                 "type": "office",
                 "address": "Keizersgracht 421",
                 "city": "Amsterdam",
@@ -248,7 +224,6 @@ class ClientLocationRoomsPaginatedResponse(BasePaginatedResponse):
 
 class ClientRoomFullDetailResponse(BaseModel):
     id: str = ""
-    room_id: str = ""
     room_name: str = ""
     room_type: str = "standard"
     location_id: Optional[str] = None
@@ -268,8 +243,6 @@ class ClientRoomFullDetailResponse(BaseModel):
     def __init__(self, **data):
         if "room_id" in data and not data.get("id"):
             data["id"] = data["room_id"]
-        elif "id" in data and not data.get("room_id"):
-            data["room_id"] = data["id"]
         if "name" in data and not data.get("room_name"):
             data["room_name"] = data["name"]
         super().__init__(**data)
@@ -280,7 +253,6 @@ class ClientRoomFullDetailResponse(BaseModel):
         "json_schema_extra": {
             "example": {
                 "id": "room_a366ecf17c",
-                "room_id": "room_a366ecf17c",
                 "room_name": "Executive Boardroom",
                 "room_type": "conference_room",
                 "location_id": "loc_db28f5a3f6",

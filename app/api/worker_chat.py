@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException, UploadFile, File
 from typing import Optional, List
+from pydantic import BaseModel
 from bson import ObjectId
 from app.core.database import get_database
 from app.dependencies.auth import get_current_user
@@ -408,3 +409,75 @@ async def upload_worker_chat_attachment(
         attachment_type=att_type,
         file_name=file.filename or filename
     )
+
+
+class WorkerGroupCreate(BaseModel):
+    title: str
+    participant_ids: List[str]
+    shift_id: Optional[str] = None
+    cleaning_plan_id: Optional[str] = None
+
+
+@router.post(
+    "/groups",
+    response_model=ConversationResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Worker Create Shift / Team Group Chat",
+    description="Creates a group conversation between worker team members and managers."
+)
+async def create_worker_group_conversation(
+    group_in: WorkerGroupCreate,
+    current_user: UserInDB = Depends(require_worker)
+):
+    db = get_database()
+    worker_id = get_user_id(current_user)
+    now = datetime.now(timezone.utc)
+    conv_id = f"conv_{uuid.uuid4().hex[:12]}"
+
+    all_uids = list(set([worker_id] + group_in.participant_ids))
+    participants = []
+    for uid in all_uids:
+        u_query = {"$or": [{"_id": ObjectId(uid)}, {"id": uid}, {"_id": uid}]} if ObjectId.is_valid(uid) else {"$or": [{"_id": uid}, {"id": uid}]}
+        u_doc = await db["users"].find_one(u_query)
+        if u_doc:
+            participants.append({
+                "user_id": str(u_doc.get("_id") or u_doc.get("id")),
+                "name": u_doc.get("full_name") or u_doc.get("name") or "User",
+                "role": str(u_doc.get("role", "worker")).lower(),
+                "profile_photo": u_doc.get("profile_photo") or u_doc.get("profile_picture")
+            })
+
+    conv_doc = {
+        "_id": conv_id,
+        "id": conv_id,
+        "title": group_in.title,
+        "type": "group",
+        "shift_id": group_in.shift_id,
+        "cleaning_plan_id": group_in.cleaning_plan_id,
+        "participants": participants,
+        "created_by": worker_id,
+        "unread_count": 0,
+        "last_message": None,
+        "created_at": now,
+        "updated_at": now
+    }
+
+    await db["conversations"].insert_one(conv_doc)
+    return format_conversation(conv_doc, current_user_id=worker_id, viewer_role="worker")
+
+
+from fastapi import WebSocket
+
+@router.websocket("/ws/{user_id}")
+async def worker_chat_ws(websocket: WebSocket, user_id: str):
+    from app.api.chat import ws_manager
+    await ws_manager.connect(user_id, websocket)
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if data.get("type") == "ping":
+                await websocket.send_json({"type": "pong", "timestamp": datetime.now(timezone.utc).isoformat()})
+    except Exception:
+        pass
+    finally:
+        ws_manager.disconnect(user_id, websocket)

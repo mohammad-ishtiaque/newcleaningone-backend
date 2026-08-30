@@ -147,18 +147,27 @@ async def get_cleaning_plan_worker_dropdown(
     plan_start_mins = parse_time_to_minutes(start_time_str)
     plan_end_mins = (plan_start_mins + duration_minutes) % 1440
 
-    worker_filter = {"role": "worker"}
+    worker_filter = {
+        "role": "worker",
+        "account_status": {"$ne": "deleted"},
+        "$or": [
+            {"is_approved": True},
+            {"approval_status": "approved"},
+            {"is_admin_created": True}
+        ]
+    }
     if worker_type and worker_type.lower() != "all":
         worker_filter["worker_type"] = worker_type.lower()
 
     if search:
-        worker_filter["$or"] = [
+        search_filter = [
             {"full_name": {"$regex": search, "$options": "i"}},
             {"name": {"$regex": search, "$options": "i"}},
             {"email": {"$regex": search, "$options": "i"}},
             {"phone": {"$regex": search, "$options": "i"}},
             {"position": {"$regex": search, "$options": "i"}}
         ]
+        worker_filter = {"$and": [worker_filter, {"$or": search_filter}]}
 
     worker_projection = {
         "_id": 1, "id": 1, "full_name": 1, "name": 1, "email": 1,

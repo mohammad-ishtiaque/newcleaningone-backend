@@ -408,3 +408,34 @@ async def upload_client_chat_attachment(
         attachment_type=att_type,
         file_name=file.filename or filename
     )
+
+
+@router.post(
+    "/start",
+    response_model=ConversationResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Client Cold Start Support Conversation",
+    description="Initiates or returns the active support conversation with managers for cold-start chat."
+)
+async def start_client_conversation(current_user: UserInDB = Depends(require_client)):
+    db = get_database()
+    doc = await get_or_create_client_admin_conversation(db, current_user)
+    client_id = get_user_id(current_user)
+    return format_conversation(doc, current_user_id=client_id, viewer_role="client")
+
+
+from fastapi import WebSocket
+
+@router.websocket("/ws/{user_id}")
+async def client_chat_ws(websocket: WebSocket, user_id: str):
+    from app.api.chat import ws_manager
+    await ws_manager.connect(user_id, websocket)
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if data.get("type") == "ping":
+                await websocket.send_json({"type": "pong", "timestamp": datetime.now(timezone.utc).isoformat()})
+    except Exception:
+        pass
+    finally:
+        ws_manager.disconnect(user_id, websocket)

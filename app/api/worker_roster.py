@@ -62,24 +62,32 @@ async def get_worker_roster_screen(
     worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "w_1")
 
     now = datetime.now(timezone.utc)
-    target_date = now
+    curr_year, curr_week, _ = now.isocalendar()
+    if year:
+        curr_year = year
+    if week:
+        curr_week = week
 
     if date_selected:
         try:
             target_date = datetime.strptime(date_selected, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            if not week:
+                _, curr_week, _ = target_date.isocalendar()
+            if not year:
+                curr_year, _, _ = target_date.isocalendar()
         except Exception:
-            pass
+            target_date = now
+    elif week or year:
+        try:
+            target_date = datetime.strptime(f"{curr_year}-W{curr_week:02d}-1", "%G-W%V-%u").replace(tzinfo=timezone.utc)
+        except Exception:
+            target_date = datetime.fromisocalendar(curr_year, curr_week, 1).replace(tzinfo=timezone.utc)
+    else:
+        target_date = now
 
-    curr_year, curr_week, curr_weekday = target_date.isocalendar()
-    if week:
-        curr_week = week
-    if year:
-        curr_year = year
-
-    # Calculate Sunday of that ISO week
-    start_of_week = target_date - timedelta(days=target_date.weekday() + 1)
-    if target_date.weekday() == 6:  # Sunday
-        start_of_week = target_date
+    # Calculate Sunday of that ISO week for date strip
+    days_to_sunday = (target_date.weekday() + 1) % 7
+    start_of_week = target_date - timedelta(days=days_to_sunday)
 
     admin_name, admin_phone = await _get_admin_contact(db)
 
@@ -101,16 +109,33 @@ async def get_worker_roster_screen(
 
     # 1. Fetch direct shifts for worker
     raw_shifts = await db["shifts"].find({
-        "workers.worker_id": worker_id,
+        "$or": [
+            {"workers.worker_id": worker_id},
+            {"assigned_workers.worker_id": worker_id},
+            {"worker_ids": worker_id}
+        ],
         "date": selected_date_str,
         "status": {"$ne": "cancelled"}
     }).sort("start_time", 1).to_list(length=100)
 
-    # 2. Fetch active cleaning plans on selected date
+    # 2. Fetch shift executions for worker on selected date
+    exec_shifts = await db["shift_executions"].find({
+        "$or": [
+            {"assigned_workers.worker_id": worker_id},
+            {"workers.worker_id": worker_id},
+            {"worker_ids": worker_id}
+        ],
+        "date": selected_date_str,
+        "status": {"$ne": "cancelled"}
+    }).to_list(length=100)
+    raw_shifts.extend(exec_shifts)
+
+    # 3. Fetch active cleaning plans on selected date
     cursor_p = db["cleaning_plans"].find({
         "$or": [
             {"worker_ids": worker_id},
-            {"assigned_workers.worker_id": worker_id}
+            {"assigned_workers.worker_id": worker_id},
+            {"workers.worker_id": worker_id}
         ],
         "status": {"$ne": "cancelled"}
     })
@@ -119,6 +144,18 @@ async def get_worker_roster_screen(
         if is_plan_active_on_date(p, selected_date_str):
             exec_doc = await get_or_create_shift_execution(p, selected_date_str, db)
             raw_shifts.append(exec_doc)
+
+    # 4. Fetch assigned extra services on selected date
+    es_cursor = db["extra_services"].find({
+        "$or": [
+            {"preferred_date": selected_date_str},
+            {"date": selected_date_str}
+        ],
+        "assigned_workers.worker_id": worker_id,
+        "status": {"$nin": ["cancelled", "rejected"]}
+    })
+    extra_services = await es_cursor.to_list(length=50)
+    raw_shifts.extend(extra_services)
 
     cards = []
     seen_ids = set()

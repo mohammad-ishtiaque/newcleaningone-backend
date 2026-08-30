@@ -53,17 +53,27 @@ class NotificationService:
 
     async def get_user_notifications(self, user_id: str, recipient_type: str, page: int = 1, limit: int = 10) -> dict:
         db = get_database()
+        u_str = str(user_id) if user_id else ""
+        user_matches = [
+            {"user_id": u_str},
+            {"user_ids": u_str}
+        ]
+        if ObjectId.is_valid(u_str):
+            user_matches.append({"user_id": ObjectId(u_str)})
+            user_matches.append({"user_ids": ObjectId(u_str)})
+
         query = {
             "$and": [
                 {
-                    "$or": [
-                        {"user_id": user_id},
-                        {"recipient_type": recipient_type},
-                        {"recipient_type": "all"}
+                    "$or": user_matches + [
+                        {"user_id": {"$in": [None, ""]}, "recipient_type": recipient_type},
+                        {"user_id": {"$in": [None, ""]}, "recipient_type": "all"},
+                        {"user_id": {"$exists": False}, "recipient_type": recipient_type},
+                        {"user_id": {"$exists": False}, "recipient_type": "all"}
                     ]
                 },
                 {
-                    "deleted_by": {"$ne": user_id}
+                    "deleted_by": {"$nin": [u_str, ObjectId(u_str)] if ObjectId.is_valid(u_str) else [u_str]}
                 }
             ]
         }
@@ -71,11 +81,16 @@ class NotificationService:
         all_notifications = []
         unread_count = 0
         async for doc in cursor:
+            doc_uid = str(doc.get("user_id") or "")
+            # Strict security isolation: If doc targets another specific user, reject immediately
+            if doc_uid and doc_uid != u_str and (not ObjectId.is_valid(u_str) or doc_uid != str(ObjectId(u_str))):
+                continue
+
             doc["_id"] = str(doc["_id"])
-            if doc.get("user_id") == user_id:
+            if doc_uid == u_str or (ObjectId.is_valid(u_str) and doc_uid == str(ObjectId(u_str))):
                 is_read = doc.get("is_read", False)
             else:
-                is_read = user_id in doc.get("read_by", [])
+                is_read = u_str in doc.get("read_by", [])
             
             doc["is_read"] = is_read
             if not is_read:
@@ -152,7 +167,7 @@ class NotificationService:
 
         rec_type = doc.get("recipient_type", "all")
         doc_user_id = doc.get("user_id")
-        if doc_user_id and doc_user_id != user_id and rec_type not in ["all", "worker"]:
+        if doc_user_id and str(doc_user_id) != str(user_id):
             return None
 
         doc["_id"] = str(doc.get("_id"))

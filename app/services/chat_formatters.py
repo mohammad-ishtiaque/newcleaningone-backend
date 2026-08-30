@@ -67,15 +67,24 @@ def resolve_conversation_type(doc: dict, current_user_id: Optional[str] = None) 
 
 def _extract_conv_base(doc: dict, current_user_id: str, viewer_role: Optional[str] = None):
     conv_id = str(doc.get("_id") or doc.get("id"))
-    unread_c = doc.get("unread_counts", {}).get(current_user_id, 0)
-    raw_participants = doc.get("participants", [])
+    unread_dict = doc.get("unread_counts") or {}
+    unread_c = unread_dict.get(current_user_id, 0) if isinstance(unread_dict, dict) else 0
+    raw_participants = doc.get("participants") or []
     last_msg = doc.get("last_message")
-    last_msg_res = LastMessageInfo(
-        text=last_msg.get("text", ""),
-        sender_id=str(last_msg.get("sender_id", "")),
-        sender_name=last_msg.get("sender_name", ""),
-        timestamp=last_msg.get("timestamp", "")
-    ) if last_msg else None
+    if last_msg and isinstance(last_msg, dict):
+        ts = last_msg.get("timestamp")
+        if isinstance(ts, datetime):
+            ts = ts.isoformat()
+        elif ts is not None:
+            ts = str(ts)
+        last_msg_res = LastMessageInfo(
+            text=str(last_msg.get("text") or last_msg.get("content") or ""),
+            sender_id=str(last_msg.get("sender_id", "")),
+            sender_name=str(last_msg.get("sender_name", "")),
+            timestamp=ts
+        )
+    else:
+        last_msg_res = None
 
     c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
     u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)

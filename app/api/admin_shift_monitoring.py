@@ -46,7 +46,9 @@ async def get_live_shift_monitoring(
     cursor_plans = db["cleaning_plans"].find({"status": {"$ne": "cancelled"}})
     all_plans = await cursor_plans.to_list(length=1000)
 
-    # Also load legacy shifts if present
+    # Also load existing shift executions and legacy shifts for target_date
+    exec_cursor = db["shift_executions"].find({"date": target_date, "status": {"$ne": "cancelled"}})
+    existing_execs = await exec_cursor.to_list(length=1000)
     legacy_shifts = await db["shifts"].find({"date": target_date, "status": {"$ne": "cancelled"}}).to_list(length=1000)
     seen_plan_ids = set()
 
@@ -58,9 +60,17 @@ async def get_live_shift_monitoring(
             seen_plan_ids.add(p_id)
             active_plans.append(p)
 
+    for ex in existing_execs:
+        ex_id = str(ex.get("id") or ex.get("_id"))
+        p_id = str(ex.get("plan_id") or "")
+        if ex_id not in seen_plan_ids and (not p_id or p_id not in seen_plan_ids):
+            seen_plan_ids.add(ex_id)
+            active_plans.append(ex)
+
     for ls in legacy_shifts:
         ls_id = str(ls.get("id") or ls.get("_id"))
         if ls_id not in seen_plan_ids:
+            seen_plan_ids.add(ls_id)
             active_plans.append(ls)
 
     # Collect all worker IDs to batch fetch user details
@@ -69,10 +79,10 @@ async def get_live_shift_monitoring(
         for wid in p.get("worker_ids", []):
             if str(wid).strip():
                 all_worker_ids.add(str(wid).strip())
-        for w_entry in p.get("assigned_workers", []):
+        for w_entry in (p.get("assigned_workers") or []):
             if isinstance(w_entry, dict) and w_entry.get("worker_id"):
                 all_worker_ids.add(str(w_entry["worker_id"]).strip())
-        for w_entry in p.get("workers", []):
+        for w_entry in (p.get("workers") or []):
             if isinstance(w_entry, dict):
                 wid = str(w_entry.get("worker_id") or w_entry.get("id") or "")
                 if wid:
@@ -81,10 +91,18 @@ async def get_live_shift_monitoring(
     worker_user_map = {}
     if all_worker_ids:
         w_list = list(all_worker_ids)
-        u_cursor = db["users"].find({"$or": [{"_id": {"$in": w_list}}, {"id": {"$in": w_list}}]})
+        oid_list = [ObjectId(x) for x in w_list if ObjectId.is_valid(x)]
+        or_clauses = [{"_id": {"$in": w_list}}, {"id": {"$in": w_list}}]
+        if oid_list:
+            or_clauses.append({"_id": {"$in": oid_list}})
+        u_cursor = db["users"].find({"$or": or_clauses})
         async for u in u_cursor:
-            uid = str(u.get("_id") or u.get("id"))
-            worker_user_map[uid] = u
+            uid_str = str(u.get("_id") or u.get("id"))
+            worker_user_map[uid_str] = u
+            if "id" in u and u["id"]:
+                worker_user_map[str(u["id"])] = u
+            if "_id" in u:
+                worker_user_map[str(u["_id"])] = u
 
     all_items = []
     ontime_cnt = 0
@@ -102,14 +120,59 @@ async def get_live_shift_monitoring(
         s_start = exec_doc.get("start_time", "08:00 AM")
         s_end = exec_doc.get("end_time", "04:00 PM")
         s_title = exec_doc.get("title") or s.get("title") or s.get("plan_name") or ""
+        s_date = exec_doc.get("date") or target_date
 
         # Calculate item-based progress %
         progress_info = calculate_cleaning_plan_progress(exec_doc)
         progress_pct = progress_info["overall_progress_percentage"]
 
-        worker_entries = exec_doc.get("assigned_workers", [])
-        if not worker_entries:
-            worker_entries = s.get("assigned_workers", [])
+        # Calculate checkout blockers
+        rooms = exec_doc.get("rooms", [])
+        pending_approvals = 0
+        rejected_photos = 0
+        uncompleted_tasks = 0
+        pending_photos = 0
+        blocker_reasons = []
+
+        for r in rooms:
+            for t in r.get("tasks", []):
+                if not t.get("is_completed"):
+                    uncompleted_tasks += 1
+                for p in t.get("photo", []) + t.get("required_photos", []):
+                    p_st = p.get("status", "not_uploaded")
+                    if p_st == "pending_review":
+                        pending_approvals += 1
+                        pending_photos += 1
+                    elif p_st == "rejected":
+                        rejected_photos += 1
+                        pending_photos += 1
+                    elif p_st == "not_uploaded":
+                        pending_photos += 1
+            for p in r.get("required_photos", []):
+                p_st = p.get("status", "not_uploaded")
+                if p_st == "pending_review":
+                    pending_approvals += 1
+                elif p_st == "rejected":
+                    rejected_photos += 1
+
+        if uncompleted_tasks > 0:
+            blocker_reasons.append(f"{uncompleted_tasks} task(s) uncompleted")
+        if pending_approvals > 0:
+            blocker_reasons.append(f"{pending_approvals} photo(s) pending approval")
+        if rejected_photos > 0:
+            blocker_reasons.append(f"{rejected_photos} photo(s) rejected")
+
+        checkout_blocked_reason = ", ".join(blocker_reasons) if blocker_reasons else None
+        can_checkout = (uncompleted_tasks == 0 and pending_approvals == 0 and rejected_photos == 0)
+
+        worker_entries = (
+            exec_doc.get("assigned_workers") or
+            exec_doc.get("workers") or
+            s.get("assigned_workers") or
+            s.get("workers") or []
+        )
+        if not worker_entries and (exec_doc.get("worker_ids") or s.get("worker_ids")):
+            worker_entries = [{"worker_id": wid} for wid in (exec_doc.get("worker_ids") or s.get("worker_ids"))]
 
         for w_record in worker_entries:
             w_id = str(w_record.get("worker_id") or w_record.get("id") or "")
@@ -188,6 +251,8 @@ async def get_live_shift_monitoring(
                 position=w_pos,
                 shift_id=shift_id,
                 shift_name=s_title,
+                date=s_date,
+                shift_date=s_date,
                 location_id=l_id,
                 location_name=l_name,
                 client_id=c_id,
@@ -199,7 +264,13 @@ async def get_live_shift_monitoring(
                 hours_worked_display=hours_worked_disp,
                 hours_worked_numeric=hours_worked_num,
                 progress_percentage=progress_pct,
-                status=status_label
+                status=status_label,
+                pending_approval_count=pending_approvals,
+                pending_photos_count=pending_photos,
+                rejected_photos_count=rejected_photos,
+                uncompleted_tasks_count=uncompleted_tasks,
+                checkout_blocked_reason=checkout_blocked_reason,
+                can_checkout=can_checkout
             ))
 
     total_shifts_count = len(all_items)

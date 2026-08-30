@@ -215,6 +215,8 @@ async def get_roster_client_dropdowns(
     ]
 
 
+from app.services.client_helper import resolve_client_id_aliases
+
 @roster_drafts_dropdowns_router.get("/dropdowns/locations", response_model=LocationDropdownPaginatedResponse, summary="Roster Location Dropdown List")
 async def get_roster_location_dropdowns(
     client_id: Optional[str] = None,
@@ -224,11 +226,14 @@ async def get_roster_location_dropdowns(
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {}
+    query_parts = []
     if client_id:
-        query["client_id"] = client_id
+        c_aliases = await resolve_client_id_aliases(client_id, db)
+        query_parts.append({"$or": [{"client_id": {"$in": c_aliases}}, {"client_ids": {"$in": c_aliases}}]})
     if search:
-        query["name"] = {"$regex": search, "$options": "i"}
+        query_parts.append({"name": {"$regex": search, "$options": "i"}})
+
+    query = {"$and": query_parts} if len(query_parts) > 1 else (query_parts[0] if query_parts else {})
 
     total_count = await db["locations"].count_documents(query)
     skip = (page - 1) * limit
@@ -243,10 +248,10 @@ async def get_roster_location_dropdowns(
         lid = str(l.get("_id") or l.get("id"))
 
         dropdowns.append(LocationDropdownItemResponse(
-            location_id=lid,
-            location_name=l.get("name", ""),
+            id=lid,
+            name=l.get("name", ""),
             client_id=cid,
-            client_name=cname,
+            company_name=cname,
             address=l.get("address", "")
         ))
 
@@ -314,16 +319,26 @@ async def get_roster_worker_dropdowns(
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    query = {"role": "worker", "is_active": True}
+    query = {
+        "role": "worker",
+        "is_active": True,
+        "account_status": {"$ne": "deleted"},
+        "$or": [
+            {"is_approved": True},
+            {"approval_status": "approved"},
+            {"is_admin_created": True}
+        ]
+    }
 
     if worker_type and worker_type.lower() != "all":
         query["worker_type"] = worker_type.lower()
 
     if search:
-        query["$or"] = [
+        search_filter = [
             {"full_name": {"$regex": search, "$options": "i"}},
             {"position": {"$regex": search, "$options": "i"}}
         ]
+        query = {"$and": [query, {"$or": search_filter}]}
 
     total_count = await db["users"].count_documents(query)
     skip = (page - 1) * limit

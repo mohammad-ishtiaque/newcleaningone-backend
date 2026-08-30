@@ -5,13 +5,14 @@ from typing import Optional, List
 from app.core.database import get_database
 from app.dependencies.auth import get_current_user
 from app.models.user import UserInDB, RoleEnum
-from app.services.extra_services_helper import format_extra_service_response
+from app.services.extra_services_helper import format_extra_service_response, format_extra_service_list_item
 from app.schemas.extra_services import (
     ExtraServiceCreate, ExtraServiceUpdate, ExtraServiceResponse, ExtraServicePaginatedResponse,
     ClientRoomDropdownItem, ClientRoomDropdownPaginatedResponse,
     ClientLocationDropdownItem, ClientLocationDropdownPaginatedResponse
 )
 from app.schemas.client_list import CleaningTaskResponse, TaskPhotoResponse
+from app.services.client_helper import resolve_client_id_aliases
 
 router = APIRouter(prefix="/client/extra-services", tags=["Client Extra Service Management"])
 
@@ -176,16 +177,17 @@ async def get_client_room_dropdowns(
     Client Room Dropdowns Endpoint.
     """
     db = get_database()
-    client_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "client_1")
+    client_aliases = await resolve_client_id_aliases(current_user, db)
 
     # Discover location IDs and map location names belonging to this client
     loc_ids = []
     loc_name_map = {}
     loc_cursor = db["locations"].find({
         "$or": [
-            {"client_id": client_id},
-            {"client_ids": client_id},
-            {"id": client_id}
+            {"client_id": {"$in": client_aliases}},
+            {"client_ids": {"$in": client_aliases}},
+            {"_id": {"$in": client_aliases}},
+            {"id": {"$in": client_aliases}}
         ]
     })
     loc_docs = await loc_cursor.to_list(length=1000)
@@ -195,18 +197,22 @@ async def get_client_room_dropdowns(
             loc_ids.append(lid)
             loc_name_map[lid] = l.get("name", "Location")
 
-    c_doc = await db["client_list"].find_one({"$or": [{"_id": client_id}, {"id": client_id}]})
-    if c_doc and "locations" in c_doc and isinstance(c_doc["locations"], list):
-        for l in c_doc["locations"]:
-            if isinstance(l, dict):
-                lid = str(l.get("id") or l.get("_id") or "")
-                if lid:
-                    if lid not in loc_ids:
-                        loc_ids.append(lid)
-                    if lid not in loc_name_map:
-                        loc_name_map[lid] = l.get("name", "Location")
+    c_docs = await db["client_list"].find({"$or": [{"_id": {"$in": client_aliases}}, {"id": {"$in": client_aliases}}, {"user_id": {"$in": client_aliases}}]}).to_list(length=10)
+    for c_doc in c_docs:
+        if c_doc and "locations" in c_doc and isinstance(c_doc["locations"], list):
+            for l in c_doc["locations"]:
+                if isinstance(l, dict):
+                    lid = str(l.get("id") or l.get("_id") or "")
+                    if lid:
+                        if lid not in loc_ids:
+                            loc_ids.append(lid)
+                        if lid not in loc_name_map:
+                            loc_name_map[lid] = l.get("name", "Location")
 
-    client_filter_clauses = [{"client_id": client_id}]
+    client_filter_clauses = [
+        {"client_id": {"$in": client_aliases}},
+        {"client_ids": {"$in": client_aliases}}
+    ]
     if loc_ids:
         client_filter_clauses.append({"location_id": {"$in": loc_ids}})
 
@@ -287,7 +293,6 @@ async def get_client_room_dropdowns(
 
         rooms_list.append(ClientRoomDropdownItem(
             id=rid,
-            room_id=rid,
             room_name=rname,
             room_type=rtype,
             location_id=r_loc_id or None,
@@ -341,14 +346,15 @@ async def get_client_location_dropdowns(
     Client Location Dropdowns Endpoint.
     """
     db = get_database()
-    client_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "client_1")
+    client_aliases = await resolve_client_id_aliases(current_user, db)
 
     # Base query for locations of this client
     query_parts = [{
         "$or": [
-            {"client_id": client_id},
-            {"client_ids": client_id},
-            {"id": client_id}
+            {"client_id": {"$in": client_aliases}},
+            {"client_ids": {"$in": client_aliases}},
+            {"_id": {"$in": client_aliases}},
+            {"id": {"$in": client_aliases}}
         ]
     }]
 
@@ -375,9 +381,12 @@ async def get_client_location_dropdowns(
 
     # Fallback to embedded locations in client_list if collection is empty
     if not raw_locs and total_count == 0:
-        c_doc = await db["client_list"].find_one({"$or": [{"_id": client_id}, {"id": client_id}]})
-        if c_doc and "locations" in c_doc and isinstance(c_doc["locations"], list):
-            embedded_locs = c_doc["locations"]
+        c_docs = await db["client_list"].find({"$or": [{"_id": {"$in": client_aliases}}, {"id": {"$in": client_aliases}}, {"user_id": {"$in": client_aliases}}]}).to_list(length=10)
+        embedded_locs = []
+        for c_doc in c_docs:
+            if "locations" in c_doc and isinstance(c_doc["locations"], list):
+                embedded_locs.extend(c_doc["locations"])
+        if embedded_locs:
             if search:
                 s_lower = search.lower()
                 embedded_locs = [
@@ -412,9 +421,7 @@ async def get_client_location_dropdowns(
 
         locations_list.append(ClientLocationDropdownItem(
             id=lid,
-            location_id=lid,
             name=lname,
-            location_name=lname,
             address=addr or None,
             city=city or None,
             postal_code=p_code or None,
@@ -466,7 +473,7 @@ async def list_client_extra_services(
     cursor = db["extra_services"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     raw_docs = await cursor.to_list(length=limit)
 
-    requests_res = [format_extra_service_response(d) for d in raw_docs]
+    requests_res = [format_extra_service_list_item(d) for d in raw_docs]
     return ExtraServicePaginatedResponse(total_count=total_count, page=page, limit=limit, requests=requests_res)
 
 

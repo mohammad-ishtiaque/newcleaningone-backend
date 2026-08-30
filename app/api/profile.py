@@ -28,15 +28,31 @@ def process_image(file_bytes: bytes, size: tuple = (1080, 1080)) -> bytes:
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid image format: {str(e)}")
 
-@router.get("/")
-async def get_profile(current_user: UserInDB = Depends(get_current_user)):
-    return {
-        "full_name": current_user.full_name,
-        "profile_photo": current_user.profile_photo,
-        "role": current_user.role
-    }
+from pydantic import BaseModel, Field
 
-@router.post("/")
+class ProfileResponse(BaseModel):
+    full_name: str
+    email: Optional[str] = None
+    profile_photo: Optional[str] = None
+    role: str
+
+class ProfileUpdateResponse(BaseModel):
+    message: str
+    profile_photo: Optional[str] = None
+
+class ProfileDeleteResponse(BaseModel):
+    message: str
+
+@router.get("/", response_model=ProfileResponse, summary="Get Current User Profile")
+async def get_profile(current_user: UserInDB = Depends(get_current_user)):
+    return ProfileResponse(
+        full_name=current_user.full_name,
+        email=getattr(current_user, "email", None),
+        profile_photo=current_user.profile_photo,
+        role=str(getattr(current_user.role, "value", current_user.role))
+    )
+
+@router.post("/", response_model=ProfileUpdateResponse, summary="Create/Update User Profile")
 async def create_profile_details(
     full_name: Optional[str] = Form(None),
     profile_photo: Optional[UploadFile] = File(None),
@@ -57,9 +73,9 @@ async def create_profile_details(
             current_user.profile_photo = url
             
     await user_repo.update(current_user)
-    return {"message": "Profile created/updated successfully", "profile_photo": current_user.profile_photo}
+    return ProfileUpdateResponse(message="Profile created/updated successfully", profile_photo=current_user.profile_photo)
 
-@router.patch("/")
+@router.patch("/", response_model=ProfileUpdateResponse, summary="Update User Profile")
 async def update_profile_details(
     full_name: Optional[str] = Form(None),
     profile_photo: Optional[UploadFile] = File(None),
@@ -69,7 +85,7 @@ async def update_profile_details(
 ):
     return await create_profile_details(full_name, profile_photo, current_user, s3_service, user_repo)
 
-@router.delete("/")
+@router.delete("/", response_model=ProfileDeleteResponse, summary="Delete Profile Picture")
 async def delete_profile_picture(
     current_user: UserInDB = Depends(get_current_user),
     s3_service: S3Service = Depends(get_s3_service),
@@ -79,5 +95,5 @@ async def delete_profile_picture(
         await s3_service.delete_file(current_user.profile_photo)
         current_user.profile_photo = None
         await user_repo.update(current_user)
-        return {"message": "Profile picture deleted"}
-    return {"message": "No profile picture to delete"}
+        return ProfileDeleteResponse(message="Profile picture deleted")
+    return ProfileDeleteResponse(message="No profile picture to delete")

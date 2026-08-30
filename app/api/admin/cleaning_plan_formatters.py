@@ -281,8 +281,10 @@ async def _resolve_workers_data(worker_ids: List[str], db, assigned_workers_meta
                     meta_positions[aw_id] = aw.get("position", "normal")
 
     workers = []
+    found_wids = set()
     for w in raw_workers:
         wid = str(w.get("_id") or w.get("id"))
+        found_wids.add(wid)
         w_name = w.get("full_name") or w.get("name") or "Worker"
         w_type = w.get("worker_type") or "employee"
         pos = meta_positions.get(wid) or w.get("position") or "normal"
@@ -296,6 +298,24 @@ async def _resolve_workers_data(worker_ids: List[str], db, assigned_workers_meta
             phone=w.get("phone"),
             profile_photo=w.get("profile_photo") or w.get("profile_picture") or w.get("avatar_url")
         ))
+
+    if assigned_workers_meta:
+        for aw in assigned_workers_meta:
+            if isinstance(aw, dict):
+                aw_id = str(aw.get("worker_id") or aw.get("id") or "")
+                if aw_id and aw_id not in found_wids:
+                    workers.append(CleaningPlanWorkerDetail(
+                        worker_id=aw_id,
+                        name=aw.get("name") or aw.get("full_name") or "Worker",
+                        email=aw.get("email"),
+                        role=aw.get("role", "worker"),
+                        worker_type=aw.get("worker_type", "employee"),
+                        position=aw.get("position", "normal"),
+                        phone=aw.get("phone"),
+                        profile_photo=aw.get("profile_photo") or aw.get("profile_picture")
+                    ))
+                    found_wids.add(aw_id)
+
     return workers
 
 

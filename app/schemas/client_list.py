@@ -346,9 +346,6 @@ class LocationDropdownItemResponse(BaseModel):
     name: str = ""
     client_id: str = ""
     company_name: str = ""
-    client_name: Optional[str] = None
-    location_id: Optional[str] = None
-    location_name: Optional[str] = None
     address: Optional[str] = None
     total_rooms_count: Optional[int] = 0
 
@@ -357,11 +354,13 @@ class LocationDropdownItemResponse(BaseModel):
             data["id"] = data["location_id"]
         if "location_name" in data and not data.get("name"):
             data["name"] = data["location_name"]
+        if "client_name" in data and not data.get("company_name"):
+            data["company_name"] = data["client_name"]
         super().__init__(**data)
 
     class Config:
         populate_by_name = True
-        extra = "allow"
+        extra = "ignore"
 
 class LocationDropdownPaginatedResponse(BasePaginatedResponse):
     locations: List[LocationDropdownItemResponse]
@@ -369,7 +368,6 @@ class LocationDropdownPaginatedResponse(BasePaginatedResponse):
 class RoomDropdownItemResponse(BaseModel):
     id: str = ""
     room_name: str = ""
-    room_id: Optional[str] = None
     location_id: Optional[str] = None
     location_name: Optional[str] = None
     floor: Optional[int] = 1
@@ -386,7 +384,7 @@ class RoomDropdownItemResponse(BaseModel):
 
     class Config:
         populate_by_name = True
-        extra = "allow"
+        extra = "ignore"
 
 class RoomDropdownPaginatedResponse(BasePaginatedResponse):
     rooms: List[RoomDropdownItemResponse]
@@ -863,10 +861,13 @@ class AdminLocationCreate(BaseModel):
     assigned_worker_ids: List[str] = Field(default_factory=list)
 
 class AdminLocationGridItem(BaseModel):
-    location_id: str
-    location_name: str
+    id: Optional[str] = None
+    name: Optional[str] = None
+    location_id: Optional[str] = None
+    location_name: Optional[str] = None
     client_id: str
-    client_company_name: str
+    company_name: Optional[str] = None
+    client_company_name: Optional[str] = None
     address: str
     floors: int = 1
     rooms: int = 0
@@ -874,6 +875,28 @@ class AdminLocationGridItem(BaseModel):
     required_hours_numeric: float = 0.0
     created_at: datetime
     updated_at: datetime
+
+    def __init__(self, **data):
+        if "id" in data and not data.get("location_id"):
+            data["location_id"] = data["id"]
+        elif "location_id" in data and not data.get("id"):
+            data["id"] = data["location_id"]
+
+        if "name" in data and not data.get("location_name"):
+            data["location_name"] = data["name"]
+        elif "location_name" in data and not data.get("name"):
+            data["name"] = data["location_name"]
+
+        if "company_name" in data and not data.get("client_company_name"):
+            data["client_company_name"] = data["company_name"]
+        elif "client_company_name" in data and not data.get("company_name"):
+            data["company_name"] = data["client_company_name"]
+
+        super().__init__(**data)
+
+    class Config:
+        populate_by_name = True
+        extra = "allow"
 
 class AdminLocationGridPaginatedResponse(BasePaginatedResponse):
     locations: List[AdminLocationGridItem] = Field(default_factory=list)
@@ -912,6 +935,12 @@ class LocationDrawerRoomsResponse(BaseModel):
     rooms: List[LocationDrawerRoomItem] = Field(default_factory=list)
 
 class LocationBulkImportResult(BaseModel):
+    total_rows: int
+    imported_count: int
+    failed_count: int
+    errors: List[str] = Field(default_factory=list)
+
+class ClientBulkImportResult(BaseModel):
     total_rows: int
     imported_count: int
     failed_count: int

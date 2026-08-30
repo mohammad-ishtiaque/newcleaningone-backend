@@ -361,6 +361,85 @@ async def list_deleted_clients(
     )
 
 
+from app.schemas.client_list import (
+    ClientListCreate, ClientListUpdate, ClientListResponse, ClientListPaginatedResponse,
+    ContractRenewRequest, ClientGridDropdownItem, ClientGridDropdownPaginatedResponse,
+    ClientOverviewListPaginatedResponse, ClientOverviewItemResponse, ClientDashboardOverviewResponse, ClientContractDetailsResponse,
+    ClientBulkImportResult
+)
+from app.api.admin.client_csv_utils import (
+    generate_client_csv_template,
+    parse_and_validate_client_csv,
+    export_clients_to_csv
+)
+from fastapi import Response
+
+@client_mgmt_router.get("/clients/pending-approvals", response_model=PendingClientApprovalsPaginatedResponse, summary="List Pending Client Approvals")
+async def list_pending_client_approvals(
+    page: int = 1,
+    limit: int = 10,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"role": "client", "approval_status": "pending"}
+    
+    total_count = await db["users"].count_documents(query)
+    skip = (page - 1) * limit
+    cursor = db["users"].find(query).sort("created_at", -1).skip(skip).limit(limit)
+    users = await cursor.to_list(length=limit)
+    
+    for u in users:
+        u["id"] = str(u.get("_id"))
+    
+    has_more = (skip + len(users)) < total_count
+    
+    return PendingClientApprovalsPaginatedResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        has_more=has_more,
+        users=[UserResponse(**u) for u in users]
+    )
+
+@client_mgmt_router.get("/clients/bulk-import/template", summary="Download Client CSV Template")
+async def download_client_import_template(
+    current_user: UserInDB = Depends(require_manager)
+):
+    template_content = generate_client_csv_template()
+    return Response(
+        content=template_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=import_clients_template.csv"}
+    )
+
+@client_mgmt_router.post("/clients/bulk-import", response_model=ClientBulkImportResult, summary="Bulk Import Clients CSV")
+async def bulk_import_clients_csv(
+    file: UploadFile = File(...),
+    current_user: UserInDB = Depends(require_manager)
+):
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported for client bulk import")
+
+    content_bytes = await file.read()
+    content_str = content_bytes.decode("utf-8-sig", errors="ignore")
+
+    db = get_database()
+    result = await parse_and_validate_client_csv(content_str, db)
+    return result
+
+@client_mgmt_router.get("/clients/export", summary="Export Clients to CSV")
+async def export_clients_csv(
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    raw_clients = await db["client_list"].find({"status": {"$ne": "deleted"}}).sort("created_at", -1).to_list(length=1000)
+    csv_content = export_clients_to_csv(raw_clients)
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=clients_export.csv"}
+    )
+
 @client_mgmt_router.get("/clients/{client_id}", response_model=ClientListResponse, summary="Get Client by ID")
 async def get_client_by_id(
     client_id: str,
@@ -455,33 +534,6 @@ async def restore_client(
         )
         
     return {"message": "Client restored successfully"}
-
-@client_mgmt_router.get("/clients/pending-approvals", response_model=PendingClientApprovalsPaginatedResponse, summary="List Pending Client Approvals")
-async def list_pending_client_approvals(
-    page: int = 1,
-    limit: int = 10,
-    current_user: UserInDB = Depends(require_manager)
-):
-    db = get_database()
-    query = {"role": "client", "approval_status": "pending"}
-    
-    total_count = await db["users"].count_documents(query)
-    skip = (page - 1) * limit
-    cursor = db["users"].find(query).sort("created_at", -1).skip(skip).limit(limit)
-    users = await cursor.to_list(length=limit)
-    
-    for u in users:
-        u["id"] = str(u.get("_id"))
-    
-    has_more = (skip + len(users)) < total_count
-    
-    return PendingClientApprovalsPaginatedResponse(
-        total_count=total_count,
-        page=page,
-        limit=limit,
-        has_more=has_more,
-        users=[UserResponse(**u) for u in users]
-    )
 
 @client_mgmt_router.post("/clients/{user_id}/approve", response_model=ClientListResponse, summary="Approve Client Signup")
 async def approve_client_signup(
