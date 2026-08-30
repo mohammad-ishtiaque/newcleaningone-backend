@@ -1,23 +1,28 @@
 # ==========================================
-# FastAPI / Python Project .gitignore
+# Docker Ignore File - Cleaning One Backend
 # ==========================================
+
+# --- Version Control ---
+.git
+.gitignore
+.gitattributes
+.github
+
+# --- Virtual Environments & Package Managers ---
+.venv
+venv/
+env/
+ENV/
+.uv/
+uv.cache/
 
 # --- Python Bytecode & Cache ---
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.Python
 *.pyd
-
-# --- Virtual Environments ---
-.venv/
-venv/
-ENV/
-env/
-env.bak/
-venv.bak/
-.uv/
+.Python
 
 # --- Environment Variables & Secrets ---
 .env
@@ -36,7 +41,7 @@ media/*
 static/uploads/*
 !static/uploads/.gitkeep
 
-# --- Machine Learning & Model Checkpoints ---
+# --- Machine Learning & Checkpoints ---
 *.pt
 *.pth
 *.onnx
@@ -45,14 +50,7 @@ static/uploads/*
 checkpoints/
 model_weights/
 
-# --- Temporary Files, Scratch & Test Artifacts ---
-scratch/
-tmp/
-temp/
-*.tmp
-*.temp
-
-# --- Logs & Databases ---
+# --- Logs & Local Databases ---
 *.log
 logs/
 *.sqlite3
@@ -60,7 +58,7 @@ logs/
 mongo_dump/
 dump/
 
-# --- Testing & Code Quality Tools ---
+# --- Test, Linting & Coverage ---
 .pytest_cache/
 .coverage
 htmlcov/
@@ -69,31 +67,35 @@ htmlcov/
 .ruff_cache/
 .mypy_cache/
 .hypothesis/
+tests/
 
-# --- IDE & Editor Files ---
+# --- IDE & OS Files ---
+.vscode/
 .idea/
 *.swp
 *.swo
 *~
-*.sublime-project
-*.sublime-workspace
-
-# --- Operating System Files ---
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
 desktop.ini
 
-# --- Build & Distribution ---
-build/
-dist/
-*.egg-info/
-*.egg
-*.spec
-branch_structure.json
-temp_auto_push.bat
-temp_interactive_push.bat
+# --- Local Utility / Temporary / Scratch Files ---
+scratch/
+tmp/
+temp/
+*.tmp
+*.temp
+check.py
+mock.py
+get_otp.py
+get_token.py
+update_admin_routes.py
+walkthrough.md
+start
+start.bat
+start.ps1
+
+# --- Docker & CI/CD Configs ---
+Dockerfile*
+docker-compose*.yml
+.dockerignore
