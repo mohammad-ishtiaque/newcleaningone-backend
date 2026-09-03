@@ -25,16 +25,24 @@ class ExtraServicePhotoRequirement(BaseModel):
     uploaded_at: Optional[datetime] = None
 
 class ExtraServiceCreate(BaseModel):
-    title: str = Field(..., json_schema_extra={"example": "Window Cleaning"})
-    preferred_date: str = Field(..., json_schema_extra={"example": "2026-07-10"})
+    title: Optional[str] = Field(None, json_schema_extra={"example": "Window Cleaning"})
+    preferred_date: Optional[str] = Field(None, json_schema_extra={"example": "2026-07-10"})
     priority: Literal["High Priority", "Medium Priority", "Low Priority", "high", "medium", "low"] = "Medium Priority"
-    description: str = Field(..., json_schema_extra={"example": "All exterior windows on floors 2-4 need cleaning before client visit."})
+    description: Optional[str] = Field(None, json_schema_extra={"example": "All exterior windows on floors 2-4 need cleaning before client visit."})
+    service_name: Optional[str] = None
+    notes: Optional[str] = None
     location_id: Optional[str] = None
     room_id: Optional[str] = None
     tasks: Optional[List[CleaningTaskCreate]] = Field(default_factory=list)
     task_list: Optional[List[str]] = None
 
     def __init__(self, **data):
+        if "title" not in data or not data.get("title"):
+            data["title"] = data.get("service_name") or "Extra Cleaning Service"
+        if "description" not in data or not data.get("description"):
+            data["description"] = data.get("notes") or data.get("title") or "Extra service request"
+        if "preferred_date" not in data or not data.get("preferred_date"):
+            data["preferred_date"] = datetime.now().strftime("%Y-%m-%d")
         if "priority" in data and data["priority"]:
             p_val = str(data["priority"]).strip().lower()
             if p_val in ["high", "high priority", "urgent"]:

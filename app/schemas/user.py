@@ -350,10 +350,10 @@ class WorkerDetailResponse(BaseModel):
     certificates: Optional[List[str]] = Field(default_factory=list)
     dob: Optional[str] = None
     nationality: Optional[str] = None
-    status: str = "active"
-    account_status: str = "active"
+    status: Optional[str] = "active"
+    account_status: Optional[str] = "active"
     is_approved: bool = True
-    approval_status: str = "approved"
+    approval_status: Optional[str] = "approved"
     is_profile_completed: bool = True
     temp_password_changed: bool = True
     is_signup: bool = True

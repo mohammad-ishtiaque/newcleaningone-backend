@@ -5,6 +5,7 @@ from app.app_builder import create_app
 from app.core.config import settings
 
 # Determine service name from env var or CLI arguments
+# Reload trigger client
 cli_arg = sys.argv[1].lower().strip() if len(sys.argv) > 1 and not sys.argv[1].startswith("-") and sys.argv[1] not in ("main:app",) else None
 service_name = cli_arg or os.environ.get("SERVICE_NAME", "all").lower().strip()
 

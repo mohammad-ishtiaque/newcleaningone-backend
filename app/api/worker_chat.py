@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException, UploadFile, File
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from bson import ObjectId
 from app.core.database import get_database
 from app.dependencies.auth import get_current_user
@@ -412,10 +412,16 @@ async def upload_worker_chat_attachment(
 
 
 class WorkerGroupCreate(BaseModel):
-    title: str
-    participant_ids: List[str]
+    title: Optional[str] = None
+    group_name: Optional[str] = None
+    participant_ids: List[str] = Field(default_factory=list)
     shift_id: Optional[str] = None
     cleaning_plan_id: Optional[str] = None
+
+    def __init__(self, **data):
+        if "title" not in data or not data.get("title"):
+            data["title"] = data.get("group_name") or data.get("name") or "Worker Group Chat"
+        super().__init__(**data)
 
 
 @router.post(

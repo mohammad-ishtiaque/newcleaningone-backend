@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Optional, List
 from datetime import datetime, timezone, date
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 class RoleEnum(str, Enum):
     worker = "worker"
@@ -19,6 +19,12 @@ class WorkerTypeEnum(str, Enum):
 
 class UserInDB(BaseModel):
     id: Optional[str] = Field(default=None, alias="_id")
+
+    @field_validator("id", mode="before")
+    def convert_id(cls, v):
+        if v is not None:
+            return str(v)
+        return v
     full_name: str
     email: EmailStr
     phone: Optional[str] = None

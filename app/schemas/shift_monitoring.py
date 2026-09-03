@@ -182,21 +182,42 @@ class WorkerLiveDetailsResponse(BaseModel):
     period: Literal["today", "weekly", "monthly"] = "today"
     hours_worked: str = "0h"
     hours_worked_numeric: float = 0.0
+    total_hours_worked: Optional[str] = None
+    total_hours_worked_numeric: Optional[float] = None
     shifts_count: int = 0
+    total_shifts: Optional[int] = None
     avg_duration: str = "0.0h"
     avg_duration_numeric: float = 0.0
-    shift_details: WorkerLiveShiftDetail
+    avg_shift_duration: Optional[str] = None
+    shift_details: Optional[WorkerLiveShiftDetail] = Field(default_factory=WorkerLiveShiftDetail)
     activity_history_available: bool = True
 
 
 # --- Picture 5: Worker Attendance Stats Drawer Schemas ---
 class WeeklyTrendItem(BaseModel):
-    week_label: str
+    week_label: Optional[str] = None
+    day: Optional[str] = None
+    date: Optional[str] = None
     hours: float
 
+    def __init__(self, **data):
+        if "week_label" not in data or data.get("week_label") is None:
+            data["week_label"] = data.get("day") or data.get("date") or ""
+        if "day" not in data:
+            data["day"] = data.get("week_label")
+        super().__init__(**data)
+
 class MonthlyTrendItem(BaseModel):
-    month_label: str
+    month_label: Optional[str] = None
+    month: Optional[str] = None
     hours: float
+
+    def __init__(self, **data):
+        if "month_label" not in data or data.get("month_label") is None:
+            data["month_label"] = data.get("month") or ""
+        if "month" not in data:
+            data["month"] = data.get("month_label")
+        super().__init__(**data)
 
 class WorkerAttendanceStatsDrawerResponse(BaseModel):
     worker_id: str
@@ -205,10 +226,31 @@ class WorkerAttendanceStatsDrawerResponse(BaseModel):
     profile_picture: Optional[str] = None
     hours_worked: str
     hours_worked_numeric: float
-    completed_shifts: int
-    avg_shift_duration: str
-    avg_shift_duration_numeric: float
-    late_checkins: int
+    total_hours_worked: Optional[str] = None
+    total_hours_worked_numeric: Optional[float] = None
+    completed_shifts: int = 0
+    total_shifts: Optional[int] = 0
+    avg_shift_duration: str = "0.0h"
+    avg_shift_duration_numeric: float = 0.0
+    late_checkins: int = 0
+    late_days: Optional[int] = 0
     weekly_hours_trend: List[WeeklyTrendItem] = Field(default_factory=list)
+    weekly_trend: Optional[List[WeeklyTrendItem]] = None
     monthly_hours_trend: List[MonthlyTrendItem] = Field(default_factory=list)
+    monthly_trend: Optional[List[MonthlyTrendItem]] = None
+
+    def __init__(self, **data):
+        if "hours_worked" not in data and "total_hours_worked" in data:
+            data["hours_worked"] = data["total_hours_worked"]
+        if "hours_worked_numeric" not in data and "total_hours_worked_numeric" in data:
+            data["hours_worked_numeric"] = data["total_hours_worked_numeric"]
+        if "completed_shifts" not in data and "total_shifts" in data:
+            data["completed_shifts"] = data["total_shifts"]
+        if "late_checkins" not in data and "late_days" in data:
+            data["late_checkins"] = data["late_days"]
+        if "weekly_hours_trend" not in data and "weekly_trend" in data:
+            data["weekly_hours_trend"] = data["weekly_trend"]
+        if "monthly_hours_trend" not in data and "monthly_trend" in data:
+            data["monthly_hours_trend"] = data["monthly_trend"]
+        super().__init__(**data)
 

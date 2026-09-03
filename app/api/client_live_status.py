@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException
 from typing import Optional, List
@@ -252,21 +253,19 @@ async def _resolve_client_id_aliases(current_user: UserInDB, db) -> List[str]:
     if cid:
         client_ids.add(cid)
 
+    or_conds = []
     if getattr(current_user, "company_name", None):
-        client_cursor = db["client_list"].find({"company_name": current_user.company_name})
+        or_conds.append({"company_name": current_user.company_name})
+    if getattr(current_user, "email", None):
+        or_conds.append({"email": current_user.email})
+
+    if or_conds:
+        client_cursor = db["client_list"].find({"$or": or_conds})
         async for c in client_cursor:
             if "_id" in c:
                 client_ids.add(str(c["_id"]))
             if "id" in c and c["id"]:
                 client_ids.add(str(c["id"]))
-
-    if getattr(current_user, "email", None):
-        c_doc = await db["client_list"].find_one({"email": current_user.email})
-        if c_doc:
-            if "_id" in c_doc:
-                client_ids.add(str(c_doc["_id"]))
-            if "id" in c_doc and c_doc["id"]:
-                client_ids.add(str(c_doc["id"]))
 
     return list(client_ids)
 
@@ -424,13 +423,24 @@ async def list_client_live_shifts(
     db = get_database()
     client_aliases = await _resolve_client_id_aliases(current_user, db)
 
-    # 1. Fetch from shift_executions
-    exec_cursor = db["shift_executions"].find({"client_id": {"$in": client_aliases}}).sort("created_at", -1)
-    exec_shifts = await exec_cursor.to_list(length=100)
+    # 1. Fetch from shift_executions and shifts concurrently with projection
+    shift_proj = {
+        "rooms.tasks.photo": 0,
+        "rooms.required_photos": 0,
+        "rooms.tasks.description": 0
+    }
+    fetch_limit = max(limit, min(30, page * limit + 10))
+    exec_task = db["shift_executions"].find(
+        {"client_id": {"$in": client_aliases}},
+        projection=shift_proj
+    ).sort("created_at", -1).limit(fetch_limit).to_list(length=fetch_limit)
 
-    # 2. Fetch from shifts
-    shift_cursor = db["shifts"].find({"client_id": {"$in": client_aliases}}).sort("created_at", -1)
-    direct_shifts = await shift_cursor.to_list(length=100)
+    shift_task = db["shifts"].find(
+        {"client_id": {"$in": client_aliases}},
+        projection=shift_proj
+    ).sort("created_at", -1).limit(fetch_limit).to_list(length=fetch_limit)
+
+    exec_shifts, direct_shifts = await asyncio.gather(exec_task, shift_task)
 
     combined_map = {}
     for s in exec_shifts + direct_shifts:

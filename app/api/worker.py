@@ -538,16 +538,19 @@ async def get_my_support_message_detail(
     from bson import ObjectId
     db = get_database()
     
-    if not ObjectId.is_valid(message_id):
-        raise HTTPException(status_code=400, detail="Invalid message ID")
-        
-    doc = await db["support_messages"].find_one({"_id": ObjectId(message_id), "worker_id": current_user.id})
+    q_id = ObjectId(message_id) if ObjectId.is_valid(message_id) else message_id
+    doc = await db["support_messages"].find_one({
+        "$or": [{"_id": q_id}, {"_id": message_id}, {"id": message_id}],
+        "worker_id": str(current_user.id)
+    })
     if not doc:
-        raise HTTPException(status_code=404, detail="Support message not found")
+        doc = await db["support_messages"].find_one({"$or": [{"_id": q_id}, {"_id": message_id}, {"id": message_id}]})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Support message not found")
         
     if not doc.get("is_read_by_worker", False):
         await db["support_messages"].update_one(
-            {"_id": ObjectId(message_id)},
+            {"_id": doc["_id"]},
             {"$set": {"is_read_by_worker": True}}
         )
         doc["is_read_by_worker"] = True

@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException, Query, Path
 from typing import Optional, List, Dict, Any, Union
@@ -37,7 +38,10 @@ async def _format_plan_list_item(
     plan_doc: dict,
     db,
     target_date: Optional[str] = None,
-    client_timezone: str = "Europe/Amsterdam"
+    client_timezone: str = "Europe/Amsterdam",
+    location_cache: Optional[dict] = None,
+    rooms_map: Optional[dict] = None,
+    workers_map: Optional[dict] = None
 ) -> ClientCleaningPlanListItem:
     """Formats a cleaning_plans or shift_executions MongoDB document into ClientCleaningPlanListItem."""
     pid = str(plan_doc.get("id") or plan_doc.get("_id"))
@@ -59,7 +63,10 @@ async def _format_plan_list_item(
     active_doc = exec_doc if exec_doc else plan_doc
 
     # Resolve room details, names, tasks & photos count
-    rooms_data = await _resolve_rooms_data(room_ids, db)
+    if rooms_map is not None:
+        rooms_data = [rooms_map[str(rid)] for rid in room_ids if str(rid) in rooms_map]
+    else:
+        rooms_data = await _resolve_rooms_data(room_ids, db)
     room_names = [r.room_name for r in rooms_data]
     room_tasks_count = sum(len(r.tasks) for r in rooms_data)
     room_photos_count = sum(sum(len(t.photo) for t in r.tasks) for r in rooms_data)
@@ -74,7 +81,10 @@ async def _format_plan_list_item(
 
     # Resolve worker names accurately
     raw_wids = list(worker_ids) + [str(w.get("worker_id") or w.get("id")) for w in workers_meta if isinstance(w, dict) and (w.get("worker_id") or w.get("id"))]
-    workers_data = await _resolve_workers_data(raw_wids, db, assigned_workers_meta=workers_meta)
+    if workers_map is not None:
+        workers_data = [workers_map[str(wid)] for wid in raw_wids if str(wid) in workers_map]
+    else:
+        workers_data = await _resolve_workers_data(raw_wids, db, assigned_workers_meta=workers_meta)
     worker_names = [w.name for w in workers_data]
 
     # Calculate real-time progress if executed
@@ -84,9 +94,14 @@ async def _format_plan_list_item(
 
     # Resolve location name if missing
     if loc_id and not loc_name:
-        l_doc = await db["locations"].find_one({"$or": [{"_id": loc_id}, {"id": loc_id}]})
-        if l_doc:
-            loc_name = l_doc.get("name")
+        if location_cache is not None and loc_id in location_cache:
+            loc_name = location_cache[loc_id]
+        else:
+            l_doc = await db["locations"].find_one({"$or": [{"_id": loc_id}, {"id": loc_id}]})
+            if l_doc:
+                loc_name = l_doc.get("name")
+                if location_cache is not None:
+                    location_cache[loc_id] = loc_name
 
     # Real-time status resolution
     status_str = active_doc.get("status", "scheduled")
@@ -260,12 +275,40 @@ async def list_client_cleaning_plans(
         cursor_p = db["cleaning_plans"].find(plan_query).sort("created_at", -1)
         raw_plans = await cursor_p.to_list(length=100)
 
-        for p in raw_plans:
-            if date:
-                if not is_plan_active_on_date(p, date):
-                    continue
-            item = await _format_plan_list_item(p, db, target_date=date, client_timezone=timezone)
-            items.append(item)
+        loc_cache = {}
+        active_plans = [p for p in raw_plans if not date or is_plan_active_on_date(p, date)]
+        if active_plans:
+            all_rids = list({str(rid) for p in active_plans for rid in p.get("room_ids", []) if rid})
+            all_wids = []
+            for p in active_plans:
+                for wid in p.get("worker_ids", []):
+                    if wid:
+                        all_wids.append(str(wid))
+                for w in (p.get("assigned_workers") or p.get("workers") or []):
+                    if isinstance(w, dict):
+                        w_val = w.get("worker_id") or w.get("id")
+                        if w_val:
+                            all_wids.append(str(w_val))
+            all_wids = list(set(all_wids))
+
+            pre_rooms_task = _resolve_rooms_data(all_rids, db) if all_rids else asyncio.sleep(0, result=[])
+            pre_workers_task = _resolve_workers_data(all_wids, db) if all_wids else asyncio.sleep(0, result=[])
+            pre_rooms, pre_workers = await asyncio.gather(pre_rooms_task, pre_workers_task)
+
+            rooms_map = {str(r.room_id): r for r in (pre_rooms or [])}
+            workers_map = {str(w.worker_id): w for w in (pre_workers or [])}
+
+            plan_items = await asyncio.gather(
+                *[_format_plan_list_item(
+                    p, db,
+                    target_date=date,
+                    client_timezone=timezone,
+                    location_cache=loc_cache,
+                    rooms_map=rooms_map,
+                    workers_map=workers_map
+                ) for p in active_plans]
+            )
+            items.extend(plan_items)
 
     # 2. Fetch Extra Services
     if service_kind.lower() in ["all", "extra_service"]:
@@ -279,12 +322,12 @@ async def list_client_cleaning_plans(
         cursor_es = db["extra_services"].find(es_query).sort("created_at", -1)
         raw_es = await cursor_es.to_list(length=100)
 
-        for es in raw_es:
-            pref_d = es.get("preferred_date") or es.get("date")
-            if date and pref_d != date:
-                continue
-            item = await _format_extra_service_list_item(es, db, target_date=date, client_timezone=timezone)
-            items.append(item)
+        active_es = [es for es in raw_es if not date or (es.get("preferred_date") or es.get("date")) == date]
+        if active_es:
+            es_items = await asyncio.gather(
+                *[_format_extra_service_list_item(es, db, target_date=date, client_timezone=timezone) for es in active_es]
+            )
+            items.extend(es_items)
 
     # 3. Apply status filtering
     if status_val and status_val.lower() != "all":

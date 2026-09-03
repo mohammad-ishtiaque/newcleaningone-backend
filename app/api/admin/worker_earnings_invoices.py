@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, Query, HTTPException, status
 from typing import Optional, List, Literal
@@ -242,27 +243,29 @@ async def get_all_workers_monthly_earnings(
             {"phone": {"$regex": search, "$options": "i"}}
         ]
 
-    total_workers_cnt = await db["users"].count_documents(worker_query)
+    cnt_task = db["users"].count_documents(worker_query)
     skip = (page - 1) * limit
-    workers_cursor = db["users"].find(worker_query).sort("full_name", 1).skip(skip).limit(limit)
-    workers_docs = await workers_cursor.to_list(length=limit)
+    workers_task = db["users"].find(worker_query).sort("full_name", 1).skip(skip).limit(limit).to_list(length=limit)
+
+    # Pre-fetch shifts for this month using date range index & small projection
+    shifts_task = db["shift_executions"].find(
+        {
+            "date": {"$gte": f"{month_str}-01", "$lte": f"{month_str}-31"},
+            "status": {"$ne": "cancelled"}
+        },
+        projection={"assigned_workers": 1, "workers": 1, "duration_minutes": 1, "date": 1}
+    ).to_list(length=1000)
+
+    total_workers_cnt, workers_docs, all_execs = await asyncio.gather(cnt_task, workers_task, shifts_task)
 
     w_ids = [str(w["_id"]) for w in workers_docs]
 
-    # Pre-fetch shifts for this month
-    shifts_cursor = db["shift_executions"].find({
-        "date": {"$regex": f"^{month_str}"},
-        "status": {"$ne": "cancelled"}
-    })
-    all_execs = await shifts_cursor.to_list(length=1000)
-
-    # Pre-fetch invoices
-    invoices_cursor = db["worker_invoices"].find({
+    # Pre-fetch invoices for current page workers
+    all_invoices = await db["worker_invoices"].find({
         "worker_id": {"$in": w_ids},
         "period_month": target_month,
         "period_year": target_year
-    })
-    all_invoices = await invoices_cursor.to_list(length=500)
+    }).to_list(length=500)
 
     # Compute month-wide totals across all shift executions and invoices
     total_gross_all = 0.0

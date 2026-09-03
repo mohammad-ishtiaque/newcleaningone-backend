@@ -167,9 +167,16 @@ async def get_worker_invoice_detail(
     user_query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"$or": [{"_id": worker_id}, {"id": worker_id}]}
     worker_rate = resolve_hourly_rate(await db["users"].find_one(user_query))
 
-    inv = await db["invoices"].find_one({
+    inv = await db["worker_invoices"].find_one({
         "$or": [{"_id": invoice_id}, {"id": invoice_id}, {"invoice_id": invoice_id}],
         "worker_id": worker_id
+    }) or await db["invoices"].find_one({
+        "$or": [{"_id": invoice_id}, {"id": invoice_id}, {"invoice_id": invoice_id}],
+        "worker_id": worker_id
+    }) or await db["worker_invoices"].find_one({
+        "$or": [{"_id": invoice_id}, {"id": invoice_id}, {"invoice_id": invoice_id}]
+    }) or await db["invoices"].find_one({
+        "$or": [{"_id": invoice_id}, {"id": invoice_id}, {"invoice_id": invoice_id}]
     })
     if inv:
         inv_id = str(inv.get("id") or inv.get("_id") or inv.get("invoice_id"))

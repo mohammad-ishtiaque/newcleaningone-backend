@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException, UploadFile, File, Form, Path, Request
 from typing import Optional, Dict, Any
@@ -294,8 +295,6 @@ async def submit_photo_for_review(
         "updated_at": now
     }
 
-    await db["photo_reviews"].insert_one(review_doc)
-
     photo_entry = {
         "photo_id": target_photo_id,
         "photo_name": target_photo_name,
@@ -336,38 +335,44 @@ async def submit_photo_for_review(
     if shift_doc.get("additional_tasks"):
         update_data["additional_tasks"] = shift_doc["additional_tasks"]
 
-    await db[coll_name].update_one({"_id": doc_id}, {"$set": update_data})
+    await asyncio.gather(
+        db["photo_reviews"].insert_one(review_doc),
+        db[coll_name].update_one({"_id": doc_id}, {"$set": update_data})
+    )
 
-    # Trigger Push Notification to Managers & Broadcast WebSocket
-    try:
-        from app.services.notification_service import NotificationService
-        from app.api.chat import ws_manager
-        notif_service = NotificationService()
-        await notif_service.create_notification(
-            title="New Photo Submitted for Review",
-            message=f"{getattr(current_user, 'full_name', 'Worker')} submitted photo for '{target_photo_name}' in {target_room_name}.",
-            notification_type="photo_review",
-            recipient_type="admin",
-            data={
+    # Trigger Push Notification to Managers & Broadcast WebSocket asynchronously
+    async def _notify_photo_review():
+        try:
+            from app.services.notification_service import NotificationService
+            from app.api.chat import ws_manager
+            notif_service = NotificationService()
+            await notif_service.create_notification(
+                title="New Photo Submitted for Review",
+                message=f"{getattr(current_user, 'full_name', 'Worker')} submitted photo for '{target_photo_name}' in {target_room_name}.",
+                notification_type="photo_review",
+                recipient_type="admin",
+                data={
+                    "review_id": review_id,
+                    "shift_id": shift_id,
+                    "photo_id": target_photo_id,
+                    "photo_url": target_photo_url
+                }
+            )
+
+            admin_cursor = db["users"].find({"role": {"$in": ["admin", "manager"]}})
+            admin_ids = [str(u.get("_id") or u.get("id")) async for u in admin_cursor]
+            await ws_manager.broadcast_to_users({
+                "type": "new_photo_review",
                 "review_id": review_id,
                 "shift_id": shift_id,
-                "photo_id": target_photo_id,
+                "room_name": target_room_name,
+                "photo_name": target_photo_name,
                 "photo_url": target_photo_url
-            }
-        )
+            }, admin_ids)
+        except Exception as e:
+            print(f"Error notifying manager of photo submission: {e}")
 
-        admin_cursor = db["users"].find({"role": {"$in": ["admin", "manager"]}})
-        admin_ids = [str(u.get("_id") or u.get("id")) async for u in admin_cursor]
-        await ws_manager.broadcast_to_users({
-            "type": "new_photo_review",
-            "review_id": review_id,
-            "shift_id": shift_id,
-            "room_name": target_room_name,
-            "photo_name": target_photo_name,
-            "photo_url": target_photo_url
-        }, admin_ids)
-    except Exception as e:
-        print(f"Error notifying manager of photo submission: {e}")
+    asyncio.create_task(_notify_photo_review())
 
     return SubmitTaskPhotoResponse(
         review_id=review_id,

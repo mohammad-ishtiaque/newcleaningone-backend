@@ -3,6 +3,7 @@ import asyncio
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException
 from typing import List, Optional
+from bson import ObjectId
 from app.core.database import get_database
 from app.schemas.shift import (
     PhotoReviewPaginatedResponse, PhotoReviewItem, PhotoReviewDetailModalResponse,
@@ -14,6 +15,11 @@ from app.api.admin.profile_company import require_manager
 from app.services.ai_vision_engine import update_ai_model_online_learning
 
 photo_reviews_router = APIRouter(prefix="/manager", tags=["Manager Photo Reviews & Quality Control"])
+
+def _get_review_query(review_id: str):
+    if ObjectId.is_valid(review_id):
+        return {"$or": [{"_id": ObjectId(review_id)}, {"_id": review_id}, {"review_id": review_id}, {"id": review_id}]}
+    return {"$or": [{"_id": review_id}, {"review_id": review_id}, {"id": review_id}]}
 
 def _format_date_submitted(dt) -> str:
     if isinstance(dt, datetime):
@@ -111,7 +117,7 @@ async def get_photo_review_details(
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    r = await db["photo_reviews"].find_one({"$or": [{"_id": review_id}, {"review_id": review_id}]})
+    r = await db["photo_reviews"].find_one(_get_review_query(review_id))
     now = datetime.now(timezone.utc)
 
     if not r:
@@ -332,7 +338,7 @@ async def approve_photo_review(
     admin_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "admin_1")
     now = datetime.now(timezone.utc)
 
-    r_doc = await db["photo_reviews"].find_one({"$or": [{"_id": review_id}, {"review_id": review_id}]})
+    r_doc = await db["photo_reviews"].find_one(_get_review_query(review_id))
     raw_after = (r_doc.get("after_photo_path") or r_doc.get("after_photo_url") or r_doc.get("photo_url")) if r_doc else None
     after_path = str(raw_after).lstrip("/") if raw_after else "uploads/photo_reviews/after_sample.jpg"
     before_path = r_doc.get("before_photo_path") if r_doc else None
@@ -346,7 +352,7 @@ async def approve_photo_review(
     ))
 
     await db["photo_reviews"].update_one(
-        {"$or": [{"_id": review_id}, {"review_id": review_id}]},
+        _get_review_query(review_id),
         {"$set": {
             "status": "approved",
             "reviewed_by_admin_id": admin_id,
@@ -380,7 +386,7 @@ async def reject_photo_review(
     admin_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "admin_1")
     now = datetime.now(timezone.utc)
 
-    r_doc = await db["photo_reviews"].find_one({"$or": [{"_id": review_id}, {"review_id": review_id}]})
+    r_doc = await db["photo_reviews"].find_one(_get_review_query(review_id))
     raw_after = (r_doc.get("after_photo_path") or r_doc.get("after_photo_url") or r_doc.get("photo_url")) if r_doc else None
     after_path = str(raw_after).lstrip("/") if raw_after else "uploads/photo_reviews/after_sample.jpg"
     before_path = r_doc.get("before_photo_path") if r_doc else None
@@ -394,7 +400,7 @@ async def reject_photo_review(
     ))
 
     await db["photo_reviews"].update_one(
-        {"$or": [{"_id": review_id}, {"review_id": review_id}]},
+        _get_review_query(review_id),
         {"$set": {
             "status": "rejected",
             "rejection_reason": reject_in.reason,

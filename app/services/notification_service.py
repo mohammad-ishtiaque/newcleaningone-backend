@@ -136,22 +136,27 @@ class NotificationService:
     async def delete_user_notification(self, notification_id: str, user_id: str) -> bool:
         db = get_database()
         try:
-            obj_id = ObjectId(notification_id)
+            if ObjectId.is_valid(notification_id):
+                query = {"$or": [{"_id": ObjectId(notification_id)}, {"_id": notification_id}, {"id": notification_id}]}
+            else:
+                query = {"$or": [{"_id": notification_id}, {"id": notification_id}]}
+            doc = await db["notifications"].find_one(query)
+            if not doc:
+                return False
+
+            if doc.get("user_id") == user_id:
+                await db["notifications"].delete_one({"_id": doc["_id"]})
+            else:
+                await db["notifications"].update_one(
+                    {"_id": doc["_id"]},
+                    {"$addToSet": {"deleted_by": user_id}}
+                )
+            return True
         except Exception:
             return False
 
-        doc = await db["notifications"].find_one({"_id": obj_id})
-        if not doc:
-            return False
-
-        if doc.get("user_id") == user_id:
-            await db["notifications"].delete_one({"_id": obj_id})
-        else:
-            await db["notifications"].update_one(
-                {"_id": obj_id},
-                {"$addToSet": {"deleted_by": user_id}}
-            )
-        return True
+    async def delete_notification(self, notification_id: str, user_id: str) -> bool:
+        return await self.delete_user_notification(notification_id, user_id)
 
     async def get_notification_detail(self, notification_id: str, user_id: str) -> Optional[dict]:
         db = get_database()
@@ -168,7 +173,8 @@ class NotificationService:
         rec_type = doc.get("recipient_type", "all")
         doc_user_id = doc.get("user_id")
         if doc_user_id and str(doc_user_id) != str(user_id):
-            return None
+            if rec_type not in ["all", "worker", "workers", "client", "clients"]:
+                return None
 
         doc["_id"] = str(doc.get("_id"))
         is_read = doc.get("is_read", False)

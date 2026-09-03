@@ -19,11 +19,20 @@ def require_client(current_user: UserInDB = Depends(get_current_user)) -> UserIn
 
 
 class ClientNoteCreate(BaseModel):
-    title: str = Field(..., json_schema_extra={"example": "Special Key Card Instructions"})
-    content: str = Field(..., json_schema_extra={"example": "Keycard is inside lockbox #4 next to reception desk. Code: 4891."})
+    title: Optional[str] = Field("Special Note", json_schema_extra={"example": "Special Key Card Instructions"})
+    content: Optional[str] = Field(None, json_schema_extra={"example": "Keycard is inside lockbox #4 next to reception desk. Code: 4891."})
+    note: Optional[str] = None
+    note_text: Optional[str] = None
     location_id: Optional[str] = Field(None, json_schema_extra={"example": "loc_0510d4c547"})
     category: Optional[str] = Field("general", json_schema_extra={"example": "access_instruction"})
     is_pinned: bool = False
+
+    def __init__(self, **data):
+        if "content" not in data or not data.get("content"):
+            data["content"] = data.get("note") or data.get("note_text") or data.get("text") or "Client note"
+        if "title" not in data or not data.get("title"):
+            data["title"] = "Special Note"
+        super().__init__(**data)
 
 class ClientNoteResponse(BaseModel):
     id: str

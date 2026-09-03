@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import List, Optional
 from datetime import datetime
 from app.schemas.common import BasePaginatedResponse
@@ -47,7 +47,13 @@ class FAQResponse(BaseModel):
 # ---- Support Message Schemas ----
 class SupportMessageRequest(BaseModel):
     subject: str = Field(..., json_schema_extra={"example": "Issue with shift"})
-    description: str = Field(..., json_schema_extra={"example": "I cannot view my upcoming shift details."})
+    description: Optional[str] = Field(None, json_schema_extra={"example": "I cannot view my upcoming shift details."})
+    message: Optional[str] = None
+
+    def __init__(self, **data):
+        if "description" not in data or not data.get("description"):
+            data["description"] = data.get("message") or "Worker support request"
+        super().__init__(**data)
 
 class SupportReplyRequest(BaseModel):
     admin_reply: str = Field(..., json_schema_extra={"example": "We have updated your shift visibility. Please check again."})
@@ -56,7 +62,13 @@ class SupportReplyRequest(BaseModel):
 
 class SupportMessageResponse(BaseModel):
     id: Optional[str] = Field(default=None, alias="_id")
-    worker_id: str
+
+    @field_validator("id", mode="before")
+    def convert_id(cls, v):
+        if v is not None:
+            return str(v)
+        return v
+    worker_id: Optional[str] = None
     worker_name: Optional[str] = None
     worker_email: Optional[str] = None
     subject: str
@@ -77,7 +89,15 @@ class SupportMessageResponse(BaseModel):
 class ClientSupportMessageRequest(BaseModel):
     subject: str = Field(..., json_schema_extra={"example": "Inquiry about weekend service schedule"})
     category: Optional[str] = Field("general", json_schema_extra={"example": "general"})
-    description: str = Field(..., json_schema_extra={"example": "Could we schedule an additional deep clean next Saturday?"})
+    description: Optional[str] = Field(None, json_schema_extra={"example": "Could we schedule an additional deep clean next Saturday?"})
+    message: Optional[str] = None
+
+    def __init__(self, **data):
+        if "description" not in data and "message" in data:
+            data["description"] = data["message"]
+        if not data.get("description"):
+            data["description"] = data.get("message") or "Support inquiry"
+        super().__init__(**data)
 
 class ClientSupportMessageResponse(BaseModel):
     id: str
@@ -97,7 +117,17 @@ class ClientReviewCreate(BaseModel):
     rating: int = Field(5, ge=1, le=5, json_schema_extra={"example": 5})
     quality_score: Optional[int] = Field(5, ge=1, le=5)
     punctuality_score: Optional[int] = Field(5, ge=1, le=5)
-    review_text: str = Field(..., json_schema_extra={"example": "Excellent deep cleaning on the 3rd floor office."})
+    review_text: Optional[str] = Field(None, json_schema_extra={"example": "Excellent deep cleaning on the 3rd floor office."})
+    comment: Optional[str] = None
+
+    def __init__(self, **data):
+        if "rating" in data and isinstance(data["rating"], float):
+            data["rating"] = int(data["rating"])
+        if "review_text" not in data and "comment" in data:
+            data["review_text"] = data["comment"]
+        if not data.get("review_text"):
+            data["review_text"] = data.get("comment") or "Client review"
+        super().__init__(**data)
 
 class ClientReviewResponse(BaseModel):
     id: str

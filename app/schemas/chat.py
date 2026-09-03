@@ -65,12 +65,24 @@ class ConversationDetailResponse(BaseModel):
 ConversationResponse = ConversationListItemResponse
 
 class MessageCreate(BaseModel):
-    content: str = Field(..., json_schema_extra={"example": "Hello! I have a question about my schedule."})
+    content: Optional[str] = Field(None, json_schema_extra={"example": "Hello! I have a question about my schedule."})
+    text: Optional[str] = None
     attachment_url: Optional[str] = None
     attachment_type: Optional[Literal["image", "document"]] = None
 
+    def __init__(self, **data):
+        if "content" not in data or not data.get("content"):
+            data["content"] = data.get("text") or ""
+        super().__init__(**data)
+
 class MessageUpdate(BaseModel):
-    content: str = Field(..., json_schema_extra={"example": "Updated message text."})
+    content: Optional[str] = Field(None, json_schema_extra={"example": "Updated message text."})
+    text: Optional[str] = None
+
+    def __init__(self, **data):
+        if "content" not in data or not data.get("content"):
+            data["content"] = data.get("text") or ""
+        super().__init__(**data)
 
 class MessageResponse(BaseModel):
     id: str

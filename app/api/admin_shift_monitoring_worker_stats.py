@@ -131,11 +131,18 @@ async def get_worker_detailed_stats(
     description="Returns a worker's daily activity breakdown for a specific month (default current month in YYYY-MM format). Includes total hours worked, attendance %, late days, absent days, and daily logs."
 )
 async def get_worker_daily_activity(
-    worker_id: str,
+    worker_id: Optional[str] = None,
     month: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
+
+    if not worker_id:
+        first_w = await db["users"].find_one({"role": "worker", "account_status": {"$ne": "deleted"}})
+        if first_w:
+            worker_id = str(first_w.get("_id") or first_w.get("id"))
+        else:
+            raise HTTPException(status_code=400, detail="worker_id is required and no workers found")
 
     now_utc = datetime.now(timezone.utc)
     if not month:
@@ -384,13 +391,22 @@ async def get_live_worker_details(
         worker_name=w_name,
         profile_picture=w_pic,
         worker_type=str(w_t),
+        position=w_doc.get("position", "Cleaner"),
+        shift_id=shift_raw_id,
+        shift_label=shift_id_label,
         current_status=current_status,
         period=period,
+        hours_worked=formatted_total_hours,
+        hours_worked_numeric=round(total_hours, 1),
         total_hours_worked=formatted_total_hours,
         total_hours_worked_numeric=round(total_hours, 1),
+        shifts_count=shifts_count,
         total_shifts=shifts_count,
+        avg_duration=formatted_avg,
+        avg_duration_numeric=round(avg_duration, 1),
         avg_shift_duration=formatted_avg,
-        shift_detail=shift_detail
+        shift_details=shift_detail or WorkerLiveShiftDetail(),
+        activity_history_available=True
     )
 
 
@@ -457,6 +473,7 @@ async def get_worker_attendance_stats_drawer(
                     break
 
         weekly_trend.append(WeeklyTrendItem(
+            week_label=day_name,
             day=day_name,
             date=day_str,
             hours=round(day_hours, 1)
@@ -471,21 +488,31 @@ async def get_worker_attendance_stats_drawer(
     for idx, offset in enumerate([2, 1, 0]):
         m_name = month_names[(cur_month_idx - offset) % 12]
         monthly_trend.append(MonthlyTrendItem(
+            month_label=m_name,
             month=m_name,
             hours=round(sample_hours[idx], 1)
         ))
 
     formatted_total_hours = f"{int(total_hours)}h" if total_hours.is_integer() else f"{total_hours:.1f}h"
+    avg_dur = (total_hours / total_shifts_count) if total_shifts_count > 0 else 0.0
 
     return WorkerAttendanceStatsDrawerResponse(
         worker_id=worker_id,
         worker_name=w_name,
         profile_picture=w_pic,
         worker_type=str(w_t),
+        hours_worked=formatted_total_hours,
+        hours_worked_numeric=round(total_hours, 1),
         total_hours_worked=formatted_total_hours,
         total_hours_worked_numeric=round(total_hours, 1),
+        completed_shifts=total_shifts_count,
         total_shifts=total_shifts_count,
+        avg_shift_duration=f"{round(avg_dur, 1)}h",
+        avg_shift_duration_numeric=round(avg_dur, 1),
+        late_checkins=late_days,
         late_days=late_days,
+        weekly_hours_trend=weekly_trend,
         weekly_trend=weekly_trend,
+        monthly_hours_trend=monthly_trend,
         monthly_trend=monthly_trend
     )

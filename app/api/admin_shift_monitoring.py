@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, status, HTTPException
 from typing import Optional, List, Dict, Any
@@ -42,47 +43,68 @@ async def get_live_shift_monitoring(
     target_date = (date_val or datetime.now(timezone.utc).date().isoformat()).strip()
     now_utc = datetime.now(timezone.utc)
 
-    # 1. Fetch all active cleaning plans from cleaning_plans collection
-    cursor_plans = db["cleaning_plans"].find({"status": {"$ne": "cancelled"}})
-    all_plans = await cursor_plans.to_list(length=1000)
+    # 1. Fetch all active cleaning plans, existing shift executions, and legacy shifts in parallel
+    plans_task = db["cleaning_plans"].find({"status": {"$ne": "cancelled"}}).to_list(length=1000)
+    execs_task = db["shift_executions"].find({"date": target_date, "status": {"$ne": "cancelled"}}).to_list(length=1000)
+    legacy_task = db["shifts"].find({"date": target_date, "status": {"$ne": "cancelled"}}).to_list(length=1000)
+    all_plans, existing_execs, legacy_shifts = await asyncio.gather(plans_task, execs_task, legacy_task)
 
-    # Also load existing shift executions and legacy shifts for target_date
-    exec_cursor = db["shift_executions"].find({"date": target_date, "status": {"$ne": "cancelled"}})
-    existing_execs = await exec_cursor.to_list(length=1000)
-    legacy_shifts = await db["shifts"].find({"date": target_date, "status": {"$ne": "cancelled"}}).to_list(length=1000)
-    seen_plan_ids = set()
+    # 2. Build in-memory lookup map for existing executions (O(1) lookup, eliminates N+1 queries)
+    existing_map = {}
+    for ex in existing_execs:
+        pid = str(ex.get("plan_id") or "")
+        if pid:
+            existing_map[pid] = ex
+        eid = str(ex.get("id") or ex.get("_id") or "")
+        if eid:
+            existing_map[eid] = ex
 
-    # Filter plans active on target_date
-    active_plans = []
+    raw_shifts = []
+    seen_shift_ids = set()
+    create_tasks = []
+
     for p in all_plans:
         p_id = str(p.get("id") or p.get("_id"))
         if is_plan_active_on_date(p, target_date):
-            seen_plan_ids.add(p_id)
-            active_plans.append(p)
+            if p_id in existing_map:
+                doc = existing_map[p_id]
+                sid = str(doc.get("id") or doc.get("_id"))
+                if sid not in seen_shift_ids:
+                    seen_shift_ids.add(sid)
+                    raw_shifts.append(doc)
+            else:
+                create_tasks.append(get_or_create_shift_execution(p, target_date, db))
+
+    if create_tasks:
+        created_execs = await asyncio.gather(*create_tasks)
+        for doc in created_execs:
+            sid = str(doc.get("id") or doc.get("_id"))
+            if sid not in seen_shift_ids:
+                seen_shift_ids.add(sid)
+                raw_shifts.append(doc)
 
     for ex in existing_execs:
-        ex_id = str(ex.get("id") or ex.get("_id"))
-        p_id = str(ex.get("plan_id") or "")
-        if ex_id not in seen_plan_ids and (not p_id or p_id not in seen_plan_ids):
-            seen_plan_ids.add(ex_id)
-            active_plans.append(ex)
+        sid = str(ex.get("id") or ex.get("_id"))
+        if sid not in seen_shift_ids:
+            seen_shift_ids.add(sid)
+            raw_shifts.append(ex)
 
     for ls in legacy_shifts:
-        ls_id = str(ls.get("id") or ls.get("_id"))
-        if ls_id not in seen_plan_ids:
-            seen_plan_ids.add(ls_id)
-            active_plans.append(ls)
+        sid = str(ls.get("id") or ls.get("_id"))
+        if sid not in seen_shift_ids:
+            seen_shift_ids.add(sid)
+            raw_shifts.append(ls)
 
-    # Collect all worker IDs to batch fetch user details
+    # 3. Collect all worker IDs from raw_shifts to batch fetch user details
     all_worker_ids = set()
-    for p in active_plans:
-        for wid in p.get("worker_ids", []):
+    for s in raw_shifts:
+        for wid in s.get("worker_ids", []):
             if str(wid).strip():
                 all_worker_ids.add(str(wid).strip())
-        for w_entry in (p.get("assigned_workers") or []):
+        for w_entry in (s.get("assigned_workers") or []):
             if isinstance(w_entry, dict) and w_entry.get("worker_id"):
                 all_worker_ids.add(str(w_entry["worker_id"]).strip())
-        for w_entry in (p.get("workers") or []):
+        for w_entry in (s.get("workers") or []):
             if isinstance(w_entry, dict):
                 wid = str(w_entry.get("worker_id") or w_entry.get("id") or "")
                 if wid:
@@ -109,10 +131,8 @@ async def get_live_shift_monitoring(
     late_cnt = 0
     missing_cnt = 0
 
-    for s in active_plans:
-        # Get or create dedicated daily shift execution document
-        exec_doc = await get_or_create_shift_execution(s, target_date, db)
-        shift_id = str(exec_doc.get("id") or exec_doc.get("_id") or s.get("id") or s.get("_id"))
+    for exec_doc in raw_shifts:
+        shift_id = str(exec_doc.get("id") or exec_doc.get("_id") or "")
         c_id = str(exec_doc.get("client_id") or "")
         c_name = exec_doc.get("client_name") or "Client"
         l_id = str(exec_doc.get("location_id") or "")
@@ -326,21 +346,23 @@ async def get_attendance_time_tracking(
         else:
             user_query["$and"] = [search_condition]
 
-    workers_cursor = db["users"].find(user_query).sort("full_name", 1)
-    raw_workers = await workers_cursor.to_list(length=1000)
-
-    # Fetch shifts within period date range from shift_executions and legacy shifts
-    cursor_execs = db["shift_executions"].find({
+    shift_proj = {
+        "assigned_workers": 1,
+        "workers": 1,
+        "date": 1,
+        "status": 1
+    }
+    workers_task = db["users"].find(user_query).sort("full_name", 1).to_list(length=1000)
+    execs_task = db["shift_executions"].find({
         "date": {"$gte": start_date, "$lte": end_date},
         "status": {"$ne": "cancelled"}
-    })
-    shifts_in_period = await cursor_execs.to_list(length=2000)
-
-    legacy_shifts = await db["shifts"].find({
+    }, projection=shift_proj).to_list(length=2000)
+    legacy_task = db["shifts"].find({
         "date": {"$gte": start_date, "$lte": end_date},
         "status": {"$ne": "cancelled"}
-    }).to_list(length=2000)
+    }, projection=shift_proj).to_list(length=2000)
 
+    raw_workers, shifts_in_period, legacy_shifts = await asyncio.gather(workers_task, execs_task, legacy_task)
     all_shifts_period = shifts_in_period + legacy_shifts
 
     worker_items = []
@@ -413,17 +435,28 @@ async def get_location_statistics(
     db = get_database()
     start_date, end_date = _get_period_date_range(period)
 
-    shifts_in_period = await db["shift_executions"].find({
+    loc_proj = {
+        "location_id": 1,
+        "location_name": 1,
+        "client_id": 1,
+        "client_name": 1,
+        "assigned_workers": 1,
+        "workers": 1,
+        "date": 1
+    }
+    execs_task = db["shift_executions"].find({
         "date": {"$gte": start_date, "$lte": end_date},
         "status": {"$ne": "cancelled"}
-    }).to_list(length=2000)
+    }, projection=loc_proj).to_list(length=2000)
 
-    legacy_shifts = await db["shifts"].find({
+    legacy_task = db["shifts"].find({
         "date": {"$gte": start_date, "$lte": end_date},
         "status": {"$ne": "cancelled"}
-    }).to_list(length=2000)
+    }, projection=loc_proj).to_list(length=2000)
 
+    shifts_in_period, legacy_shifts = await asyncio.gather(execs_task, legacy_task)
     all_shifts_period = shifts_in_period + legacy_shifts
+
 
     location_groups: Dict[str, Dict[str, Any]] = {}
 

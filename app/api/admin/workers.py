@@ -98,13 +98,16 @@ async def get_admin_workers_table(
     worker_ids_str = [str(w["_id"]) for w in page_workers]
     hours_map = {}
     if worker_ids_str:
-        exec_cursor = db["shift_executions"].find({
-            "$or": [
-                {"assigned_workers.worker_id": {"$in": worker_ids_str}},
-                {"workers.worker_id": {"$in": worker_ids_str}},
-                {"worker_ids": {"$in": worker_ids_str}}
-            ]
-        })
+        exec_cursor = db["shift_executions"].find(
+            {
+                "$or": [
+                    {"assigned_workers.worker_id": {"$in": worker_ids_str}},
+                    {"workers.worker_id": {"$in": worker_ids_str}},
+                    {"worker_ids": {"$in": worker_ids_str}}
+                ]
+            },
+            projection={"assigned_workers": 1, "workers": 1}
+        )
         async for ex in exec_cursor:
             w_list = ex.get("assigned_workers") or ex.get("workers") or []
             for w_rec in w_list:

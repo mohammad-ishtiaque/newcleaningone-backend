@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, status, HTTPException
 from typing import Optional, List
@@ -86,37 +87,34 @@ async def get_worker_home_dashboard_screen(
     worker_name = getattr(current_user, "full_name", None) or getattr(current_user, "name", "Worker")
     profile_photo = getattr(current_user, "profile_photo", None)
 
-    # 1. Fetch cleaning plans and direct shifts for worker
-    cursor_plans = db["cleaning_plans"].find({
-        "$or": [
-            {"worker_ids": worker_id},
-            {"assigned_workers.worker_id": worker_id},
-            {"workers.worker_id": worker_id}
-        ],
-        "status": {"$ne": "cancelled"}
-    })
-    plans = await cursor_plans.to_list(length=100)
-
-    # Also query active shift executions and direct shifts
-    exec_cursor = db["shift_executions"].find({
-        "$or": [
-            {"assigned_workers.worker_id": worker_id},
-            {"workers.worker_id": worker_id},
-            {"worker_ids": worker_id}
-        ],
-        "date": today_str,
-        "status": {"$ne": "cancelled"}
-    })
-    today_execs = await exec_cursor.to_list(length=100)
-
-    direct_shifts = await db["shifts"].find({
-        "$or": [
-            {"workers.worker_id": worker_id},
-            {"assigned_workers.worker_id": worker_id}
-        ],
-        "date": today_str,
-        "status": {"$ne": "cancelled"}
-    }).to_list(length=100)
+    # 1. Fetch cleaning plans and direct shifts for worker concurrently
+    plans, today_execs, direct_shifts = await asyncio.gather(
+        db["cleaning_plans"].find({
+            "$or": [
+                {"worker_ids": worker_id},
+                {"assigned_workers.worker_id": worker_id},
+                {"workers.worker_id": worker_id}
+            ],
+            "status": {"$ne": "cancelled"}
+        }).to_list(length=100),
+        db["shift_executions"].find({
+            "$or": [
+                {"assigned_workers.worker_id": worker_id},
+                {"workers.worker_id": worker_id},
+                {"worker_ids": worker_id}
+            ],
+            "date": today_str,
+            "status": {"$ne": "cancelled"}
+        }).to_list(length=100),
+        db["shifts"].find({
+            "$or": [
+                {"workers.worker_id": worker_id},
+                {"assigned_workers.worker_id": worker_id}
+            ],
+            "date": today_str,
+            "status": {"$ne": "cancelled"}
+        }).to_list(length=100)
+    )
 
     all_today_shifts = []
     seen_shift_ids = set()
@@ -251,13 +249,12 @@ async def get_worker_home_dashboard_screen(
         QuickActionItem(id="act_help", title="Get Help", action_type="get_help", icon_type="help")
     ]
 
-    # 4. Next Shift Card (Look ahead across today and next 14 days)
+    # 4. Next Shift Card (Check memory plans first, then single DB lookup)
     if not next_card:
+        # Check recurring cleaning plans in memory (0 DB roundtrips)
         for day_offset in range(1, 15):
             future_dt = now_utc + timedelta(days=day_offset)
             future_date_str = future_dt.strftime("%Y-%m-%d")
-
-            # 1. Check recurring cleaning plans
             for p in plans:
                 if is_plan_active_on_date(p, future_date_str):
                     plan_tz = p.get("timezone") or "Europe/Amsterdam"
@@ -275,36 +272,39 @@ async def get_worker_home_dashboard_screen(
                         date=future_date_str
                     )
                     break
-
             if next_card:
                 break
 
-            # 2. Check shift executions or direct shifts on future_date_str
-            future_shift = await db["shift_executions"].find_one({
-                "$or": [
-                    {"assigned_workers.worker_id": worker_id},
-                    {"workers.worker_id": worker_id},
-                    {"worker_ids": worker_id}
-                ],
-                "date": future_date_str,
-                "status": {"$ne": "cancelled"}
-            }, sort=[("start_time", 1)])
-
-            if not future_shift:
-                future_shift = await db["shifts"].find_one({
+        # Single query for future shift executions or direct shifts
+        if not next_card:
+            max_future_date_str = (now_utc + timedelta(days=14)).strftime("%Y-%m-%d")
+            future_exec, future_direct = await asyncio.gather(
+                db["shift_executions"].find_one({
+                    "$or": [
+                        {"assigned_workers.worker_id": worker_id},
+                        {"workers.worker_id": worker_id},
+                        {"worker_ids": worker_id}
+                    ],
+                    "date": {"$gt": today_str, "$lte": max_future_date_str},
+                    "status": {"$ne": "cancelled"}
+                }, sort=[("date", 1), ("start_time", 1)]),
+                db["shifts"].find_one({
                     "$or": [
                         {"workers.worker_id": worker_id},
                         {"assigned_workers.worker_id": worker_id}
                     ],
-                    "date": future_date_str,
+                    "date": {"$gt": today_str, "$lte": max_future_date_str},
                     "status": {"$in": ["published", "upcoming", "scheduled"]}
-                }, sort=[("start_time", 1)])
+                }, sort=[("date", 1), ("start_time", 1)])
+            )
 
+            future_shift = future_exec or future_direct
             if future_shift:
                 fs_id = str(future_shift.get("_id") or future_shift.get("id"))
+                fs_date = future_shift.get("date", today_str)
                 st_str = future_shift.get("start_time", "08:00 AM")
                 et_str = future_shift.get("end_time", "04:00 PM")
-                start_dt = parse_plan_start_datetime(future_date_str, st_str, tz=future_shift.get("timezone", "Europe/Amsterdam"))
+                start_dt = parse_plan_start_datetime(fs_date, st_str, tz=future_shift.get("timezone", "Europe/Amsterdam"))
                 time_until = human_time_until(start_dt, now_utc)
 
                 next_card = WorkerNextShiftCard(
@@ -313,9 +313,8 @@ async def get_worker_home_dashboard_screen(
                     time_until_start=time_until,
                     time_range=f"{_format_time_12h(st_str)} - {_format_time_12h(et_str)}",
                     address_district=future_shift.get("location_address") or future_shift.get("address") or "",
-                    date=future_date_str
+                    date=fs_date
                 )
-                break
 
     # 5. Recent Activity Feed
     cursor_rev = db["photo_reviews"].find({"cleaner.worker_id": worker_id}).sort("date_submitted", -1).limit(5)

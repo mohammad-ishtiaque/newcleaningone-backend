@@ -146,6 +146,8 @@ async def update_client_profile(
         )
 
     updated_user_doc = await db["users"].find_one({"$or": [{"_id": obj_id}, {"id": user_id}]})
+    if updated_user_doc and "_id" in updated_user_doc:
+        updated_user_doc["_id"] = str(updated_user_doc["_id"])
     updated_user = UserInDB(**updated_user_doc) if updated_user_doc else current_user
     return await get_client_profile(current_user=updated_user)
 
@@ -214,6 +216,8 @@ async def update_client_settings(
         )
 
     updated_user_doc = await db["users"].find_one({"$or": [{"_id": obj_id}, {"id": user_id}]})
+    if updated_user_doc and "_id" in updated_user_doc:
+        updated_user_doc["_id"] = str(updated_user_doc["_id"])
     updated_user = UserInDB(**updated_user_doc) if updated_user_doc else current_user
     return await get_client_settings(current_user=updated_user)
 
