@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from bson import ObjectId
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException
@@ -26,7 +27,8 @@ from app.api.admin.cleaning_plan_formatters import (
     _format_tasks_list, _format_photos_list, _resolve_rooms_data,
     _resolve_clients_data, _resolve_manager_data, _resolve_workers_data,
     _calculate_end_time, _format_manager_cleaning_plan_detail,
-    _format_manager_cleaning_plan_list_item
+    _format_manager_cleaning_plan_list_item,
+    batch_format_manager_cleaning_plan_list_items
 )
 from app.services.chat_service import sync_cleaning_plan_group_conversation
 
@@ -263,12 +265,13 @@ async def list_manager_cleaning_plans(
         else:
             query["$or"] = search_filter
 
-    total_count = await db["cleaning_plans"].count_documents(query)
     skip = (page - 1) * limit
-    cursor = db["cleaning_plans"].find(query).sort("created_at", -1).skip(skip).limit(limit)
-    raw_plans = await cursor.to_list(length=limit)
+    total_count, raw_plans = await asyncio.gather(
+        db["cleaning_plans"].count_documents(query),
+        db["cleaning_plans"].find(query).sort("created_at", -1).skip(skip).limit(limit).to_list(length=limit)
+    )
 
-    plan_items = [await _format_manager_cleaning_plan_list_item(p, db) for p in raw_plans]
+    plan_items = await batch_format_manager_cleaning_plan_list_items(raw_plans, db)
 
     return ManagerCleaningPlanPaginatedResponse(
         total_count=total_count,

@@ -1,6 +1,10 @@
+import os
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from app.core.database import get_database
+from app.core.indexes import ensure_database_indexes
 from app.api import (
     auth, worker, client, admin, profile, worker_shifts,
     admin_shift_monitoring, admin_dashboard, client_live_status,
@@ -9,7 +13,12 @@ from app.api import (
     client_location_monitoring, worker_escalations, client_cleaning_plans,
     worker_assignments, worker_invoices, worker_availability, client_notes, worker_earnings
 )
-import os
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db = get_database()
+    await ensure_database_indexes(db)
+    yield
 
 def create_app(service_name: str = "all") -> FastAPI:
     service_name = service_name.lower().strip()
@@ -31,7 +40,8 @@ def create_app(service_name: str = "all") -> FastAPI:
         title=title_map.get(service_name, "Cleaning One API"),
         description=f"Production-ready FastAPI {service_name.capitalize()} System",
         version="1.0.0",
-        generate_unique_id_function=custom_unique_id
+        generate_unique_id_function=custom_unique_id,
+        lifespan=lifespan
     )
     
     origins = [

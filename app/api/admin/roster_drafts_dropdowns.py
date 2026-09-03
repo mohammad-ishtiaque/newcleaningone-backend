@@ -240,11 +240,23 @@ async def get_roster_location_dropdowns(
     cursor = db["locations"].find(query).sort("name", 1).skip(skip).limit(limit)
     raw_locs = await cursor.to_list(length=limit)
 
+    client_ids = [str(l.get("client_id")) for l in raw_locs if l.get("client_id")]
+    client_map = {}
+    if client_ids:
+        cli_or = [{"_id": {"$in": client_ids}}, {"id": {"$in": client_ids}}]
+        cli_oids = [ObjectId(x) for x in client_ids if ObjectId.is_valid(x)]
+        if cli_oids:
+            cli_or.append({"_id": {"$in": cli_oids}})
+        async for c in db["client_list"].find({"$or": cli_or}):
+            cname = c.get("company_name", "Client")
+            for k in (c.get("_id"), c.get("id")):
+                if k:
+                    client_map[str(k)] = cname
+
     dropdowns = []
     for l in raw_locs:
-        cid = l.get("client_id", "")
-        cdoc = await db["client_list"].find_one({"$or": [{"_id": cid}, {"id": cid}]})
-        cname = cdoc.get("company_name", "Client") if cdoc else "Client"
+        cid = str(l.get("client_id") or "")
+        cname = client_map.get(cid) or "Client"
         lid = str(l.get("_id") or l.get("id"))
 
         dropdowns.append(LocationDropdownItemResponse(
@@ -283,11 +295,23 @@ async def get_roster_room_dropdowns(
     cursor = db["rooms"].find(query).sort("name", 1).skip(skip).limit(limit)
     raw_rooms = await cursor.to_list(length=limit)
 
+    loc_ids = [str(r.get("location_id")) for r in raw_rooms if r.get("location_id")]
+    location_map = {}
+    if loc_ids:
+        loc_or = [{"_id": {"$in": loc_ids}}, {"id": {"$in": loc_ids}}]
+        loc_oids = [ObjectId(x) for x in loc_ids if ObjectId.is_valid(x)]
+        if loc_oids:
+            loc_or.append({"_id": {"$in": loc_oids}})
+        async for loc in db["locations"].find({"$or": loc_or}):
+            lname = loc.get("name", "Location")
+            for k in (loc.get("_id"), loc.get("id")):
+                if k:
+                    location_map[str(k)] = lname
+
     dropdowns = []
     for r in raw_rooms:
-        lid = r.get("location_id", "")
-        ldoc = await db["locations"].find_one({"$or": [{"_id": lid}, {"id": lid}]})
-        lname = ldoc.get("name", "Location") if ldoc else "Location"
+        lid = str(r.get("location_id") or "")
+        lname = location_map.get(lid) or "Location"
         rid = str(r.get("_id") or r.get("id"))
 
         dropdowns.append(RoomDropdownItemResponse(

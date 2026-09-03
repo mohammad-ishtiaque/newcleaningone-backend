@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException, File, UploadFile, Response
 from typing import List, Optional
@@ -82,16 +83,19 @@ async def get_admin_workers_table(
         elif status_filter.lower() in ["suspended", "banned"]:
             query["account_status"] = status_filter.lower()
 
-    # Worker type counters
-    total_workers_cnt = await db["users"].count_documents(base_approved_filter)
-    employees_cnt = await db["users"].count_documents({**base_approved_filter, "worker_type": "employee"})
-    freelancers_cnt = await db["users"].count_documents({**base_approved_filter, "worker_type": "freelancer"})
+    skip = (page - 1) * limit
 
-    cursor = db["users"].find(query).sort("created_at", -1)
-    all_matched = await cursor.to_list(length=1000)
+    # Worker type counters and paginated query in parallel
+    total_workers_cnt, employees_cnt, freelancers_cnt, total_filtered, page_workers = await asyncio.gather(
+        db["users"].count_documents(base_approved_filter),
+        db["users"].count_documents({**base_approved_filter, "worker_type": "employee"}),
+        db["users"].count_documents({**base_approved_filter, "worker_type": "freelancer"}),
+        db["users"].count_documents(query),
+        db["users"].find(query).sort("created_at", -1).skip(skip).limit(limit).to_list(length=limit)
+    )
 
-    # Compute live total hours worked for each worker from shift_executions
-    worker_ids_str = [str(w["_id"]) for w in all_matched]
+    # Compute live total hours worked ONLY for the current page workers from shift_executions
+    worker_ids_str = [str(w["_id"]) for w in page_workers]
     hours_map = {}
     if worker_ids_str:
         exec_cursor = db["shift_executions"].find({
@@ -110,7 +114,7 @@ async def get_admin_workers_table(
                     hours_map[wid] = hours_map.get(wid, 0.0) + hw
 
     formatted_workers = []
-    for w in all_matched:
+    for w in page_workers:
         wid = str(w["_id"])
         loc = w.get("location") or w.get("base_location") or "Amsterdam-Centrum"
         langs = w.get("languages") or ["Nederlands", "English"]
@@ -149,17 +153,13 @@ async def get_admin_workers_table(
             is_active=w_is_active
         ))
 
-    total_filtered = len(formatted_workers)
-    skip = (page - 1) * limit
-    paginated_workers = formatted_workers[skip : skip + limit]
-
     return AdminWorkerTablePaginatedResponse(
         total_workers=total_workers_cnt,
         employees_count=employees_cnt,
         freelancers_count=freelancers_cnt,
         page=page,
         limit=limit,
-        workers=paginated_workers
+        workers=formatted_workers
     )
 
 
@@ -237,14 +237,14 @@ async def create_new_worker(
         upsert=True
     )
 
-    # Send credentials email via SMTP
+    # Send credentials email asynchronously in background
     from app.services.email_service import EmailService
-    await EmailService.send_credentials_email(
+    asyncio.create_task(EmailService.send_credentials_email(
         to_email=email_clean,
         full_name=worker_in.full_name,
         role="Worker",
         password=temp_pwd
-    )
+    ))
 
     return AdminWorkerTableItem(
         worker_id=wid,

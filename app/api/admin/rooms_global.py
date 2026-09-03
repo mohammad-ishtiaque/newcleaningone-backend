@@ -88,30 +88,37 @@ async def get_global_rooms_grid(
     cursor = db["rooms"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     raw_rooms = await cursor.to_list(length=limit)
 
+    loc_ids = [str(r.get("location_id")) for r in raw_rooms if r.get("location_id")]
+    client_ids = [str(r.get("client_id")) for r in raw_rooms if r.get("client_id")]
+
+    locations_map = {}
+    if loc_ids:
+        loc_or = [{"_id": {"$in": loc_ids}}, {"id": {"$in": loc_ids}}]
+        async for l in db["locations"].find({"$or": loc_or}):
+            for k in (l.get("_id"), l.get("id")):
+                if k:
+                    locations_map[str(k)] = l
+            if l.get("client_id"):
+                client_ids.append(str(l["client_id"]))
+
+    clients_map = {}
+    if client_ids:
+        cli_or = [{"_id": {"$in": client_ids}}, {"id": {"$in": client_ids}}]
+        async for c in db["client_list"].find({"$or": cli_or}):
+            for k in (c.get("_id"), c.get("id")):
+                if k:
+                    clients_map[str(k)] = c.get("company_name", "Client")
+
     items = []
     for r in raw_rooms:
         rid = str(r.get("_id") or r.get("id") or r.get("room_id") or "")
         rname = r.get("room_name") or r.get("name") or "Room"
         rtype = r.get("room_type") or r.get("type") or "standard"
         lid = str(r.get("location_id") or "")
-        lname = str(r.get("location_name") or "")
-        cid = str(r.get("client_id") or "")
-        cname = str(r.get("company_name") or "")
-
-        if lid and (not lname or not cid or not cname):
-            ldoc = await db["locations"].find_one({"$or": [{"_id": lid}, {"id": lid}]})
-            if ldoc:
-                if not lname:
-                    lname = ldoc.get("name", "")
-                if not cid:
-                    cid = ldoc.get("client_id", "")
-                if not cname:
-                    cname = ldoc.get("company_name", "")
-
-        if cid and not cname:
-            cdoc = await db["client_list"].find_one({"$or": [{"_id": cid}, {"id": cid}]})
-            if cdoc:
-                cname = cdoc.get("company_name", "")
+        ldoc = locations_map.get(lid, {})
+        lname = str(r.get("location_name") or ldoc.get("name") or "")
+        cid = str(r.get("client_id") or ldoc.get("client_id") or "")
+        cname = str(r.get("company_name") or clients_map.get(cid) or ldoc.get("company_name") or "")
 
         freq = r.get("monthly_cleaning_frequency", 4)
         tasks_raw = r.get("tasks", [])

@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from datetime import datetime, timezone, date
 from fastapi import APIRouter, Depends, status, HTTPException, File, UploadFile
 from typing import List, Optional
@@ -212,15 +213,15 @@ async def create_client(
 
     await db["client_list"].insert_one(doc)
 
-    # Send credentials email via SMTP if temporary password was generated
+    # Send credentials email asynchronously in background
     if temp_pwd:
         from app.services.email_service import EmailService
-        await EmailService.send_credentials_email(
+        asyncio.create_task(EmailService.send_credentials_email(
             to_email=email_clean,
             full_name=client_in.primary_contact_name,
             role="Client",
             password=temp_pwd
-        )
+        ))
 
     return _format_client_response(doc, temporary_password=temp_pwd)
 
@@ -257,10 +258,29 @@ async def list_clients_grid(
     cursor = db["client_list"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     raw_clients = await cursor.to_list(length=limit)
 
+    client_ids = [str(c.get("_id") or c.get("id")) for c in raw_clients]
+    emails_needed = [c.get("email") for c in raw_clients if c.get("is_signup") is None and c.get("email")]
+
+    # Batch count locations by client_id in a single aggregation
+    loc_count_map = {}
+    if client_ids:
+        pipeline = [
+            {"$match": {"client_id": {"$in": client_ids}}},
+            {"$group": {"_id": "$client_id", "count": {"$sum": 1}}}
+        ]
+        async for doc in db["locations"].aggregate(pipeline):
+            loc_count_map[str(doc["_id"])] = doc["count"]
+
+    # Batch lookup users for signup status
+    user_signup_map = {}
+    if emails_needed:
+        async for u in db["users"].find({"email": {"$in": emails_needed}, "role": "client"}):
+            user_signup_map[u.get("email")] = bool(u.get("is_approved", True))
+
     items = []
     for c in raw_clients:
         cid = str(c.get("_id") or c.get("id"))
-        loc_count = await db["locations"].count_documents({"client_id": cid})
+        loc_count = loc_count_map.get(cid, 0)
         
         contract_status = c.get("contract_status", "active")
         exp_date_str = c.get("license_expiration_date")
@@ -276,8 +296,7 @@ async def list_clients_grid(
 
         is_signup = c.get("is_signup")
         if is_signup is None:
-            user_doc = await db["users"].find_one({"email": c.get("email"), "role": "client"})
-            is_signup = bool(user_doc and user_doc.get("is_approved", True))
+            is_signup = user_signup_map.get(c.get("email"), True)
 
         items.append(ClientOverviewItemResponse(
             id=cid,

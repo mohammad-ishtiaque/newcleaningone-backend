@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from datetime import datetime, timezone, date
 from fastapi import APIRouter, Depends, status, HTTPException, File, UploadFile, Response
 from typing import List, Optional
@@ -59,14 +60,17 @@ async def get_client_dashboard_overview(
     ind = cdoc.get("industry", "Corporate")
     st = cdoc.get("status", "Active").capitalize()
 
-    loc_count = await db["locations"].count_documents({"client_id": cid})
-    contact_count = await db["contacts"].count_documents({"client_id": cid})
+    # Run independent count and contract queries concurrently in parallel
+    loc_count, contact_count, tasks_count, contract_doc = await asyncio.gather(
+        db["locations"].count_documents({"client_id": cid}),
+        db["contacts"].count_documents({"client_id": cid}),
+        db["rooms"].count_documents({"client_id": cid}),
+        db["contracts"].find_one({"$or": [{"client_id": cid}, {"client_name": cname}]})
+    )
+
     if contact_count == 0 and cdoc.get("contacts"):
         contact_count = len(cdoc.get("contacts", []))
 
-    tasks_count = await db["rooms"].count_documents({"client_id": cid})
-
-    contract_doc = await db["contracts"].find_one({"$or": [{"client_id": cid}, {"client_name": cname}]})
     expiry_raw = contract_doc.get("expiry_date") if contract_doc else cdoc.get("contract_expiry")
     expiry_fmt = _format_date_human(expiry_raw)
     contract_st = contract_doc.get("status", "Active").capitalize() if contract_doc else "Active"
@@ -430,14 +434,14 @@ async def send_client_report_email(
     target_email = req_in.email if req_in and req_in.email else cdoc.get("email")
     cname = cdoc.get("company_name", "Client")
 
-    # Send report summary email via SMTP
+    # Send report summary email asynchronously in background
     if target_email:
         from app.services.email_service import EmailService
-        await EmailService.send_report_summary_email(
+        asyncio.create_task(EmailService.send_report_summary_email(
             to_email=target_email,
             company_name=cname,
             report_title=f"Monthly Service & Quality Report ({cname})"
-        )
+        ))
 
     return {
         "message": f"Service report successfully sent to '{target_email}' for '{cname}'",

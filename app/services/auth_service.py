@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import HTTPException, status
 from datetime import datetime, timezone, timedelta
 import random
@@ -119,12 +120,12 @@ class AuthService:
         user.otp_expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
         await self.user_repo.update(user)
         
-        await EmailService.send_otp_email(
+        asyncio.create_task(EmailService.send_otp_email(
             to_email=user.email,
             full_name=user.full_name,
             otp=otp,
             purpose=purpose
-        )
+        ))
         return {"message": "OTP sent to email"}
 
     async def verify_email(self, request: VerifyEmailRequest) -> Token:
@@ -156,21 +157,21 @@ class AuthService:
                 from app.core.database import get_database
 
                 notif_service = NotificationService()
-                await notif_service.create_notification(
+                asyncio.create_task(notif_service.create_notification(
                     title="New Worker Signup Approval Request",
                     message=f"A new worker ({user.full_name}) has verified their email and is awaiting approval.",
                     notification_type="approval_request",
                     recipient_type="admin"
-                )
+                ))
 
                 db = get_database()
                 admin_cursor = db["users"].find({"role": {"$in": ["admin", "manager"]}})
                 admin_ids = [str(u.get("_id") or u.get("id")) async for u in admin_cursor]
 
-                await ws_manager.broadcast_to_users({
+                asyncio.create_task(ws_manager.broadcast_to_users({
                     "type": "new_approval_request",
                     "message": f"New worker signup approval request from {user.full_name}."
-                }, admin_ids)
+                }, admin_ids))
 
                 user_role = user.role.value if hasattr(user.role, "value") else str(user.role)
                 return Token(
@@ -189,21 +190,21 @@ class AuthService:
                 from app.core.database import get_database
 
                 notif_service = NotificationService()
-                await notif_service.create_notification(
+                asyncio.create_task(notif_service.create_notification(
                     title="New Client Signup Request",
                     message=f"A new client ({user.company_name or user.full_name}) has signed up and is awaiting approval.",
                     notification_type="approval_request",
                     recipient_type="admin"
-                )
+                ))
 
                 db = get_database()
                 admin_cursor = db["users"].find({"role": {"$in": ["admin", "manager"]}})
                 admin_ids = [str(u.get("_id") or u.get("id")) async for u in admin_cursor]
 
-                await ws_manager.broadcast_to_users({
+                asyncio.create_task(ws_manager.broadcast_to_users({
                     "type": "new_approval_request",
                     "message": f"New client signup request from {user.company_name or user.full_name}."
-                }, admin_ids)
+                }, admin_ids))
 
                 user_role = user.role.value if hasattr(user.role, "value") else str(user.role)
                 return Token(
@@ -251,8 +252,8 @@ class AuthService:
         user.otp_expires_at = None
         await self.user_repo.update(user)
         
-        # Send security notification email
-        await EmailService.send_password_changed_email(user.email, user.full_name)
+        # Send security notification email in background
+        asyncio.create_task(EmailService.send_password_changed_email(user.email, user.full_name))
         
         return {"message": "Password reset successfully"}
 
@@ -269,7 +270,7 @@ class AuthService:
         user.last_password_changed_at = datetime.now(timezone.utc)
         await self.user_repo.update(user)
         
-        # Send security notification email
-        await EmailService.send_password_changed_email(user.email, user.full_name)
+        # Send security notification email in background
+        asyncio.create_task(EmailService.send_password_changed_email(user.email, user.full_name))
         
         return {"message": "Password changed successfully"}

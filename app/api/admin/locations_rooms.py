@@ -185,16 +185,41 @@ async def get_global_locations_grid(
     cursor = db["locations"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     raw_locs = await cursor.to_list(length=limit)
 
+    loc_ids = [str(l.get("_id") or l.get("id")) for l in raw_locs]
+    client_ids = [str(l.get("client_id")) for l in raw_locs if l.get("client_id")]
+
+    # Batch resolve clients
+    client_map = {}
+    if client_ids:
+        cli_or = [{"_id": {"$in": client_ids}}, {"id": {"$in": client_ids}}]
+        cli_oids = [ObjectId(x) for x in client_ids if ObjectId.is_valid(x)]
+        if cli_oids:
+            cli_or.append({"_id": {"$in": cli_oids}})
+        async for c in db["client_list"].find({"$or": cli_or}):
+            cname = c.get("company_name", "Client")
+            for k in (c.get("_id"), c.get("id")):
+                if k:
+                    client_map[str(k)] = cname
+
+    # Batch count rooms per location using single aggregation
+    room_count_map = {}
+    if loc_ids:
+        pipeline = [
+            {"$match": {"location_id": {"$in": loc_ids}}},
+            {"$group": {"_id": "$location_id", "count": {"$sum": 1}}}
+        ]
+        async for doc in db["rooms"].aggregate(pipeline):
+            room_count_map[str(doc["_id"])] = doc["count"]
+
     grid_items = []
     for l in raw_locs:
         lid = str(l.get("_id") or l.get("id"))
         lname = l.get("name", "Location Name")
         cid_val = l.get("client_id", "")
-        cdoc = await db["client_list"].find_one({"$or": [{"_id": cid_val}, {"id": cid_val}]}) if cid_val else None
-        cname = cdoc.get("company_name", "Client") if cdoc else l.get("company_name", "Client")
+        cname = client_map.get(cid_val) or l.get("company_name", "Client")
 
         floors = l.get("number_of_floors") or l.get("floor") or 1
-        rcnt = await db["rooms"].count_documents({"location_id": lid})
+        rcnt = room_count_map.get(lid, 0)
 
         req_h = float(l.get("required_hours_per_month", 0.0))
         req_lbl = f"{int(req_h)}h" if req_h > 0 else "0h"
@@ -233,11 +258,18 @@ async def export_locations_csv(
     db = get_database()
     raw_locs = await db["locations"].find({}).sort("created_at", -1).to_list(length=1000)
 
+    # Pre-fetch all clients into lookup map
+    client_map = {}
+    async for c in db["client_list"].find({}):
+        cname = c.get("company_name", "Client")
+        for k in (c.get("_id"), c.get("id")):
+            if k:
+                client_map[str(k)] = cname
+
     export_items = []
     for l in raw_locs:
-        cid = l.get("client_id", "")
-        cdoc = await db["client_list"].find_one({"$or": [{"_id": cid}, {"id": cid}]}) if cid else None
-        cname = cdoc.get("company_name", "Client") if cdoc else l.get("company_name", "Client")
+        cid = str(l.get("client_id") or "")
+        cname = client_map.get(cid) or l.get("company_name", "Client")
 
         export_items.append({
             "location_name": l.get("name", ""),

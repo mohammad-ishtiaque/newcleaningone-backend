@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException
 from typing import List, Optional
@@ -336,13 +337,13 @@ async def approve_photo_review(
     after_path = str(raw_after).lstrip("/") if raw_after else "uploads/photo_reviews/after_sample.jpg"
     before_path = r_doc.get("before_photo_path") if r_doc else None
 
-    # TRIGGER ONLINE LEARNING STEP (PyTorch SGD Update: y = 1.0)
-    await update_ai_model_online_learning(
+    # TRIGGER ONLINE LEARNING STEP ASYNCHRONOUSLY (PyTorch SGD Update: y = 1.0)
+    asyncio.create_task(update_ai_model_online_learning(
         after_photo_path=after_path,
         before_photo_path=before_path,
         is_approved=True,
         admin_id=admin_id
-    )
+    ))
 
     await db["photo_reviews"].update_one(
         {"$or": [{"_id": review_id}, {"review_id": review_id}]},
@@ -384,13 +385,13 @@ async def reject_photo_review(
     after_path = str(raw_after).lstrip("/") if raw_after else "uploads/photo_reviews/after_sample.jpg"
     before_path = r_doc.get("before_photo_path") if r_doc else None
 
-    # TRIGGER ONLINE LEARNING STEP (PyTorch SGD Update: y = 0.0)
-    await update_ai_model_online_learning(
+    # TRIGGER ONLINE LEARNING STEP ASYNCHRONOUSLY (PyTorch SGD Update: y = 0.0)
+    asyncio.create_task(update_ai_model_online_learning(
         after_photo_path=after_path,
         before_photo_path=before_path,
         is_approved=False,
         admin_id=admin_id
-    )
+    ))
 
     await db["photo_reviews"].update_one(
         {"$or": [{"_id": review_id}, {"review_id": review_id}]},
@@ -407,44 +408,47 @@ async def reject_photo_review(
     if r_doc:
         await _sync_shift_room_approval(db, r_doc, is_approved=False, rejection_reason=reject_in.reason)
 
-        # Send Rich Push Notification & WebSocket Alert to Assigned Worker
-        try:
-            from app.services.notification_service import NotificationService
-            from app.api.chat import ws_manager
+        # Send Rich Push Notification & WebSocket Alert to Assigned Worker asynchronously
+        async def _dispatch_reject_notifs():
+            try:
+                from app.services.notification_service import NotificationService
+                from app.api.chat import ws_manager
 
-            worker_id = str(r_doc.get("cleaner", {}).get("worker_id") or "")
-            shift_id = str(r_doc.get("shift_id") or "")
-            photo_name = r_doc.get("photo_name") or "Task Photo"
-            room_name = r_doc.get("room", {}).get("name") if isinstance(r_doc.get("room"), dict) else "Room"
+                worker_id = str(r_doc.get("cleaner", {}).get("worker_id") or "")
+                shift_id = str(r_doc.get("shift_id") or "")
+                photo_name = r_doc.get("photo_name") or "Task Photo"
+                room_name = r_doc.get("room", {}).get("name") if isinstance(r_doc.get("room"), dict) else "Room"
 
-            notif_service = NotificationService()
-            notif_payload = {
-                "shift_id": shift_id,
-                "review_id": review_id,
-                "photo_id": r_doc.get("photo_id"),
-                "photo_name": photo_name,
-                "room_name": room_name,
-                "rejection_reason": reject_in.reason,
-                "deeplink": f"cleaningone://worker/shifts/{shift_id}",
-                "route": f"/worker/shifts/{shift_id}"
-            }
+                notif_service = NotificationService()
+                notif_payload = {
+                    "shift_id": shift_id,
+                    "review_id": review_id,
+                    "photo_id": r_doc.get("photo_id"),
+                    "photo_name": photo_name,
+                    "room_name": room_name,
+                    "rejection_reason": reject_in.reason,
+                    "deeplink": f"cleaningone://worker/shifts/{shift_id}",
+                    "route": f"/worker/shifts/{shift_id}"
+                }
 
-            if worker_id:
-                await notif_service.create_notification(
-                    user_id=worker_id,
-                    title=f"Photo Rejected: {photo_name}",
-                    message=f"Your photo for '{photo_name}' in {room_name} was rejected. Reason: '{reject_in.reason}'. Please resubmit photo.",
-                    notification_type="photo_rejected",
-                    recipient_type="worker",
-                    data=notif_payload
-                )
+                if worker_id:
+                    await notif_service.create_notification(
+                        user_id=worker_id,
+                        title=f"Photo Rejected: {photo_name}",
+                        message=f"Your photo for '{photo_name}' in {room_name} was rejected. Reason: '{reject_in.reason}'. Please resubmit photo.",
+                        notification_type="photo_rejected",
+                        recipient_type="worker",
+                        data=notif_payload
+                    )
 
-                await ws_manager.broadcast_to_users({
-                    "type": "photo_rejected",
-                    **notif_payload
-                }, [worker_id])
-        except Exception as e:
-            print(f"Error sending photo rejection push notification: {e}")
+                    await ws_manager.broadcast_to_users({
+                        "type": "photo_rejected",
+                        **notif_payload
+                    }, [worker_id])
+            except Exception as e:
+                print(f"Error sending photo rejection push notification: {e}")
+
+        asyncio.create_task(_dispatch_reject_notifs())
 
     return {
         "review_id": review_id,

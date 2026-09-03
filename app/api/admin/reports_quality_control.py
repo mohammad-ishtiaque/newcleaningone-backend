@@ -1,5 +1,6 @@
 import uuid
 import io
+import asyncio
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, status, HTTPException, Response
 from typing import List, Optional, Literal
@@ -28,32 +29,35 @@ async def get_quality_control_report(
     else:
         tf = "month"
 
-    # Query MongoDB counts across shifts, executions, plans
-    shifts_cnt = (
-        await db["shifts"].count_documents({"status": {"$ne": "cancelled"}}) +
-        await db["shift_executions"].count_documents({"status": {"$ne": "cancelled"}})
+    # Query MongoDB counts across shifts, executions, plans in parallel
+    shifts_cnt_1, shifts_cnt_2, photos_approved_cnt, photos_pending_cnt, photos_rejected_cnt, esc_cnt = await asyncio.gather(
+        db["shifts"].count_documents({"status": {"$ne": "cancelled"}}),
+        db["shift_executions"].count_documents({"status": {"$ne": "cancelled"}}),
+        db["photo_reviews"].count_documents({"status": "approved"}),
+        db["photo_reviews"].count_documents({"status": "pending_review"}),
+        db["photo_reviews"].count_documents({"status": "rejected"}),
+        db["escalations"].count_documents({})
     )
+    shifts_cnt = shifts_cnt_1 + shifts_cnt_2
     if shifts_cnt == 0:
         shifts_cnt = await db["cleaning_plans"].count_documents({"status": {"$ne": "cancelled"}})
-
-    photos_approved_cnt = await db["photo_reviews"].count_documents({"status": "approved"})
-    photos_pending_cnt = await db["photo_reviews"].count_documents({"status": "pending_review"})
-    photos_rejected_cnt = await db["photo_reviews"].count_documents({"status": "rejected"})
-    esc_cnt = await db["escalations"].count_documents({})
 
     now = datetime.now(timezone.utc)
     trends = []
 
     if tf == "week":
         days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        for d_idx, day_name in enumerate(days):
+        queries = []
+        for d_idx in range(7):
             day_dt = now - timedelta(days=now.weekday()) + timedelta(days=d_idx)
             day_str = day_dt.strftime("%Y-%m-%d")
-            c = (
-                await db["shifts"].count_documents({"date": day_str, "status": {"$ne": "cancelled"}}) +
-                await db["shift_executions"].count_documents({"date": day_str, "status": {"$ne": "cancelled"}})
-            )
+            queries.append(db["shifts"].count_documents({"date": day_str, "status": {"$ne": "cancelled"}}))
+            queries.append(db["shift_executions"].count_documents({"date": day_str, "status": {"$ne": "cancelled"}}))
+        results = await asyncio.gather(*queries)
+        for idx, day_name in enumerate(days):
+            c = results[idx * 2] + results[idx * 2 + 1]
             trends.append(ShiftTrendDataPoint(label=day_name, count=c))
+
     elif tf == "quarter":
         curr_year = now.year
         q_map = [
@@ -62,30 +66,50 @@ async def get_quality_control_report(
             ("Q3", f"{curr_year}-07-01", f"{curr_year}-09-30"),
             ("Q4", f"{curr_year}-10-01", f"{curr_year}-12-31"),
         ]
+        queries = []
         for q_label, q_start, q_end in q_map:
-            c = (
-                await db["shifts"].count_documents({"date": {"$gte": q_start, "$lte": q_end}}) +
-                await db["shift_executions"].count_documents({"date": {"$gte": q_start, "$lte": q_end}})
-            )
+            queries.append(db["shifts"].count_documents({"date": {"$gte": q_start, "$lte": q_end}}))
+            queries.append(db["shift_executions"].count_documents({"date": {"$gte": q_start, "$lte": q_end}}))
+        results = await asyncio.gather(*queries)
+        for idx, (q_label, _, _) in enumerate(q_map):
+            c = results[idx * 2] + results[idx * 2 + 1]
             trends.append(ShiftTrendDataPoint(label=q_label, count=c))
+
     elif tf == "year":
         curr_year = now.year
-        for yr in range(curr_year - 3, curr_year + 1):
+        years = list(range(curr_year - 3, curr_year + 1))
+        queries = []
+        for yr in years:
             yr_str = str(yr)
-            c = (
-                await db["shifts"].count_documents({"date": {"$regex": f"^{yr_str}"}}) +
-                await db["shift_executions"].count_documents({"date": {"$regex": f"^{yr_str}"}})
-            )
-            trends.append(ShiftTrendDataPoint(label=yr_str, count=c))
+            queries.append(db["shifts"].count_documents({"date": {"$regex": f"^{yr_str}"}}))
+            queries.append(db["shift_executions"].count_documents({"date": {"$regex": f"^{yr_str}"}}))
+        results = await asyncio.gather(*queries)
+        for idx, yr in enumerate(years):
+            c = results[idx * 2] + results[idx * 2 + 1]
+            trends.append(ShiftTrendDataPoint(label=str(yr), count=c))
+
     else:  # month
         months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         curr_year = now.year
+        pipeline = [
+            {"$match": {"date": {"$regex": f"^{curr_year}-"}, "status": {"$ne": "cancelled"}}},
+            {"$group": {"_id": {"$substr": ["$date", 5, 2]}, "count": {"$sum": 1}}}
+        ]
+        shifts_by_month, execs_by_month = await asyncio.gather(
+            db["shifts"].aggregate(pipeline).to_list(length=100),
+            db["shift_executions"].aggregate(pipeline).to_list(length=100)
+        )
+        month_map = {}
+        for doc in shifts_by_month:
+            m_k = doc["_id"]
+            month_map[m_k] = month_map.get(m_k, 0) + doc["count"]
+        for doc in execs_by_month:
+            m_k = doc["_id"]
+            month_map[m_k] = month_map.get(m_k, 0) + doc["count"]
+
         for m_idx, m_name in enumerate(months, start=1):
-            m_prefix = f"{curr_year}-{m_idx:02d}"
-            c = (
-                await db["shifts"].count_documents({"date": {"$regex": f"^{m_prefix}"}}) +
-                await db["shift_executions"].count_documents({"date": {"$regex": f"^{m_prefix}"}})
-            )
+            m_prefix = f"{m_idx:02d}"
+            c = month_map.get(m_prefix, 0)
             trends.append(ShiftTrendDataPoint(label=m_name, count=c))
 
     pie_dist = PhotoQualityDistributionData(

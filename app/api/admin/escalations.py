@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException
 from typing import List, Optional
@@ -35,10 +36,12 @@ async def get_admin_escalations(
             {"reporter.name": {"$regex": search, "$options": "i"}}
         ]
 
-    total_count = await db["escalations"].count_documents(query)
-    open_cnt = await db["escalations"].count_documents({"status": "open"})
-    in_prog_cnt = await db["escalations"].count_documents({"status": "in_progress"})
-    res_cnt = await db["escalations"].count_documents({"status": "resolved"})
+    total_count, open_cnt, in_prog_cnt, res_cnt = await asyncio.gather(
+        db["escalations"].count_documents(query),
+        db["escalations"].count_documents({"status": "open"}),
+        db["escalations"].count_documents({"status": "in_progress"}),
+        db["escalations"].count_documents({"status": "resolved"})
+    )
 
     skip = (page - 1) * limit
     cursor = db["escalations"].find(query).sort("created_at", -1).skip(skip).limit(limit)

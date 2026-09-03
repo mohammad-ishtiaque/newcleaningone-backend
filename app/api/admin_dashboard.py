@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, status, HTTPException
 from typing import List, Dict, Any, Optional
@@ -57,32 +58,57 @@ async def get_admin_dashboard_overview(
     admin_fname = getattr(current_user, "full_name", None) or getattr(current_user, "name", "Admin")
     greeting_str = f"Good morning, {admin_fname.split()[0]}"
 
-    reviews_pending_cnt = await db["photo_reviews"].count_documents({"status": "pending_review"})
-    open_esc_cnt = await db["escalations"].count_documents({"status": {"$in": ["open", "in_progress"]}})
+    reviews_pending_cnt, open_esc_cnt = await asyncio.gather(
+        db["photo_reviews"].count_documents({"status": "pending_review"}),
+        db["escalations"].count_documents({"status": {"$in": ["open", "in_progress"]}})
+    )
 
-    # 1. Fetch active plans and daily shift executions for today
+    # 1. Fetch active plans, executions, and direct shifts for today in parallel
     raw_shifts = []
     seen_shift_ids = set()
 
-    cursor_plans = db["cleaning_plans"].find({"status": {"$ne": "cancelled"}})
-    plans = await cursor_plans.to_list(length=200)
-    for p in plans:
-        if is_plan_active_on_date(p, today_str):
-            exec_doc = await get_or_create_shift_execution(p, today_str, db)
+    plans, today_execs, direct_shifts = await asyncio.gather(
+        db["cleaning_plans"].find({"status": {"$ne": "cancelled"}}).to_list(length=200),
+        db["shift_executions"].find({"date": today_str, "status": {"$ne": "cancelled"}}).to_list(length=100),
+        db["shifts"].find({"date": today_str, "status": {"$ne": "cancelled"}}).to_list(length=100)
+    )
+
+    existing_exec_map = {}
+    for ex in today_execs:
+        pid = str(ex.get("plan_id") or "")
+        if pid:
+            existing_exec_map[pid] = ex
+        eid = str(ex.get("id") or ex.get("_id") or "")
+        if eid:
+            existing_exec_map[eid] = ex
+
+    active_plans = [p for p in plans if is_plan_active_on_date(p, today_str)]
+    create_tasks = []
+    for p in active_plans:
+        pid = str(p.get("id") or p.get("_id"))
+        if pid in existing_exec_map:
+            doc = existing_exec_map[pid]
+            sid = str(doc.get("id") or doc.get("_id"))
+            if sid not in seen_shift_ids:
+                seen_shift_ids.add(sid)
+                raw_shifts.append(doc)
+        else:
+            create_tasks.append(get_or_create_shift_execution(p, today_str, db))
+
+    if create_tasks:
+        created_execs = await asyncio.gather(*create_tasks)
+        for exec_doc in created_execs:
             sid = str(exec_doc.get("id") or exec_doc.get("_id"))
             if sid not in seen_shift_ids:
                 seen_shift_ids.add(sid)
                 raw_shifts.append(exec_doc)
 
-    exec_cursor = db["shift_executions"].find({"date": today_str, "status": {"$ne": "cancelled"}})
-    today_execs = await exec_cursor.to_list(length=100)
     for ex in today_execs:
         sid = str(ex.get("id") or ex.get("_id"))
         if sid not in seen_shift_ids:
             seen_shift_ids.add(sid)
             raw_shifts.append(ex)
 
-    direct_shifts = await db["shifts"].find({"date": today_str, "status": {"$ne": "cancelled"}}).to_list(length=100)
     for ds in direct_shifts:
         sid = str(ds.get("id") or ds.get("_id"))
         if sid not in seen_shift_ids:
@@ -288,6 +314,21 @@ async def get_in_progress_shifts(
     }
     raw_shifts = await db["shifts"].find(query).sort("start_time", 1).to_list(length=1000)
 
+    # Pre-fetch location images in batch
+    all_loc_ids = list({str(s.get("location_id")) for s in raw_shifts if s.get("location_id")})
+    loc_img_map = {}
+    if all_loc_ids:
+        loc_or = [{"_id": {"$in": all_loc_ids}}, {"id": {"$in": all_loc_ids}}]
+        loc_oids = [ObjectId(x) for x in all_loc_ids if ObjectId.is_valid(x)]
+        if loc_oids:
+            loc_or.append({"_id": {"$in": loc_oids}})
+        async for loc in db["locations"].find({"$or": loc_or}):
+            img = loc.get("image_url")
+            if img:
+                for k in (loc.get("_id"), loc.get("id")):
+                    if k:
+                        loc_img_map[str(k)] = img
+
     in_progress_items = []
 
     for s in raw_shifts:
@@ -308,7 +349,7 @@ async def get_in_progress_shifts(
 
         total_duration_mins = max(1, end_mins - start_mins)
 
-        loc_img_url = await _find_location_image_url(db, l_id)
+        loc_img_url = loc_img_map.get(str(l_id))
 
         for w in s.get("workers", []):
             w_id = str(w.get("worker_id") or w.get("id"))
