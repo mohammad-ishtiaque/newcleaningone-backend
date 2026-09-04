@@ -1,8 +1,10 @@
 import uuid
+import base64
+import re
 from datetime import datetime, timezone
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from typing import List, Optional
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, UploadFile, File, Form, Path
+from typing import List, Optional, Union
 from app.core.database import get_database
 from app.schemas.escalation import (
     WorkerEscalationCreate, WorkerEscalationResponse, WorkerEscalationDetail,
@@ -11,63 +13,190 @@ from app.schemas.escalation import (
 from app.models.user import UserInDB
 from app.api.worker import require_worker
 from app.services.notification_service import NotificationService
+from app.services.s3_service import S3Service
+from app.services.escalation_photo_service import (
+    WORKER_ESCALATION_OPENAPI_EXTRA,
+    WORKER_SHIFT_ESCALATION_OPENAPI_EXTRA,
+    process_photos_to_s3
+)
+from app.api.worker_shift_utils import resolve_shift_execution
 
 router = APIRouter(prefix="/worker", tags=["Worker Escalations"])
+
 
 @router.post(
     "/escalations",
     response_model=WorkerEscalationResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create Worker Escalation Report",
-    description=(
-        "Enables a worker to submit an incident, blockage, or maintenance report. "
-        "Captures issue title, category ('maintenance', 'safety', 'access', 'cleaning', 'equipment', 'client_dispute', 'other'), "
-        "severity ('high', 'medium', 'low'), description, and photo evidence. "
-        "Automatically links reporting worker credentials and broadcasts an alert to all active managers."
-    )
+    description="""
+Enables a worker to submit an incident, blockage, or maintenance report with photo evidence automatically uploaded to Amazon S3.
+
+### Supported Features:
+- **Photo Upload to Amazon S3**: Supports direct binary file uploads (`photos`, `photo`, `files`, `file`) and base64 encoded images (`data:image/...;base64,...`). Every photo is automatically resized (1080px responsive width) and uploaded to Amazon S3.
+- **Dual Content-Type Support**: Accepts both `multipart/form-data` (for direct file uploads from mobile/camera) and `application/json` (for JSON payloads).
+- **Shift & Location Linking**: Automatically resolves shift, client, facility, and room details if `shift_id` is supplied.
+- **Manager Alerts**: Dispatches background notifications to active managers.
+
+### Field Notes & Supported Values:
+- **`title`**: String (required). Short summary of the incident. Example: `"Broken Keycard / Inaccessible Room"`
+- **`description`**: String (required). Comprehensive details of the issue. Example: `"Door handle is detached and room cannot be entered."`
+- **`category`**: String (optional, default: `"maintenance"`). Supported values:
+  - `"maintenance"`: Physical damage, plumbing, electrical, fixtures.
+  - `"safety"`: Hazards, chemical spills, security concerns.
+  - `"access"`: Locked doors, invalid keycards, blocked pathways.
+  - `"cleaning"`: Deep staining, biohazards, abnormal mess.
+  - `"equipment"`: Broken vacuum, missing cleaning cart, faulty supplies.
+  - `"client_dispute"`: Client complaints, on-site conflicts.
+  - `"other"`: Miscellaneous incidents.
+- **`severity`**: String (optional, default: `"high"`). Supported values:
+  - `"high"`: Immediate blocker halting shift progress.
+  - `"medium"`: Issue requiring attention but cleaning can continue elsewhere.
+  - `"low"`: Minor defect or informational report.
+- **`shift_id`**: String (optional). Associated shift execution or plan ID.
+- **`room_id`**: String (optional). Specific room ID within the shift.
+- **`photos` / `photo`**: Image file(s) (optional). Binary files (`.jpg`, `.jpeg`, `.png`, `.webp`).
+- **`photo_urls`**: Array of strings (optional). Direct URLs or base64 image strings.
+""",
+    openapi_extra=WORKER_ESCALATION_OPENAPI_EXTRA
 )
 async def create_worker_escalation(
-    esc_in: WorkerEscalationCreate,
+    request: Request,
+    title: Optional[str] = Form(None, description="Short summary of the issue", example="Broken Keycard / Inaccessible Room"),
+    description: Optional[str] = Form(None, description="Detailed problem description", example="Door handle is detached and room cannot be entered."),
+    category: Optional[str] = Form("maintenance", description="Incident category: 'maintenance', 'safety', 'access', 'cleaning', 'equipment', 'client_dispute', 'other'", example="maintenance"),
+    severity: Optional[str] = Form("high", description="Urgency: 'high', 'medium', 'low'", example="high"),
+    shift_id: Optional[str] = Form(None, description="Associated shift execution ID", example="exec_plan_6141aedb01_2026-09-01"),
+    room_id: Optional[str] = Form(None, description="Associated room ID within the shift", example="room_01"),
+    location_name: Optional[str] = Form(None, description="Facility or site name", example="Grand Hotel Central"),
+    room_name: Optional[str] = Form(None, description="Room name or number", example="Room 107"),
+    photo_urls: Optional[List[str]] = Form(None, description="Pre-existing photo URLs or base64 strings"),
+    photo_url: Optional[str] = Form(None, description="Single photo URL or base64 string"),
+    photos: Optional[List[Union[UploadFile, str]]] = File(default=None, description="Photo evidence files to upload to Amazon S3"),
+    photo: Optional[Union[UploadFile, str]] = File(default=None, description="Single photo evidence file to upload to Amazon S3"),
+    files: Optional[List[Union[UploadFile, str]]] = File(default=None, description="Alternative multiple files upload field"),
+    file: Optional[Union[UploadFile, str]] = File(default=None, description="Alternative single file upload field"),
     current_user: UserInDB = Depends(require_worker)
 ):
+    content_type = request.headers.get("content-type", "") if request else ""
+    raw_files: List[UploadFile] = []
+    raw_photo_strings: List[str] = []
+
+    def _is_file_upload(obj):
+        return bool(obj and hasattr(obj, "filename") and obj.filename and hasattr(obj, "read"))
+
+    # Collect files from multipart form parameters (robustly supporting UploadFile and Swagger empty string / string values)
+    for f_list in [photos, files]:
+        if f_list:
+            items = f_list if isinstance(f_list, list) else [f_list]
+            for f in items:
+                if _is_file_upload(f):
+                    raw_files.append(f)
+                elif isinstance(f, str) and f.strip():
+                    raw_photo_strings.append(f.strip())
+
+    for single_f in [photo, file]:
+        if _is_file_upload(single_f):
+            raw_files.append(single_f)
+        elif isinstance(single_f, str) and single_f.strip():
+            raw_photo_strings.append(single_f.strip())
+
+    # Collect string URLs from form
+    if photo_urls:
+        for u in photo_urls:
+            if u and isinstance(u, str) and u.strip():
+                raw_photo_strings.append(u.strip())
+    if photo_url and isinstance(photo_url, str) and photo_url.strip() and photo_url.strip() not in raw_photo_strings:
+        raw_photo_strings.append(photo_url.strip())
+
+    # Seamless application/json payload parsing
+    if "application/json" in content_type:
+        try:
+            body = await request.json()
+            if isinstance(body, dict):
+                title = body.get("title") or title
+                description = body.get("description") or description
+                category = body.get("category") or category
+                severity = body.get("severity") or severity
+                shift_id = body.get("shift_id") or shift_id
+                room_id = body.get("room_id") or room_id
+                location_name = body.get("location_name") or location_name
+                room_name = body.get("room_name") or room_name
+
+                j_urls = body.get("photo_urls") or body.get("photos") or []
+                if isinstance(j_urls, str):
+                    j_urls = [j_urls]
+                for u in j_urls:
+                    if u and str(u) not in raw_photo_strings:
+                        raw_photo_strings.append(str(u))
+
+                j_single = body.get("photo_url") or body.get("photo") or body.get("photo_base64")
+                if j_single and str(j_single) not in raw_photo_strings:
+                    raw_photo_strings.append(str(j_single))
+        except Exception:
+            pass
+
+    # Validate mandatory fields
+    if not title or not str(title).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Escalation title ('title') is required."
+        )
+    if not description or not str(description).strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Escalation description ('description') is required."
+        )
+
+    # Normalize category and severity
+    valid_categories = {"maintenance", "safety", "access", "cleaning", "equipment", "client_dispute", "other"}
+    cat = (category or "maintenance").lower().strip()
+    if cat not in valid_categories:
+        cat = "maintenance"
+
+    valid_severities = {"high", "medium", "low"}
+    sev = (severity or "high").lower().strip()
+    if sev not in valid_severities:
+        sev = "high"
+
+    # Normalize empty strings to None
+    shift_id = (shift_id or "").strip() or None
+    room_id = (room_id or "").strip() or None
+    room_name = (room_name or "").strip() or None
+    location_name = (location_name or "").strip() or None
+
     db = get_database()
     now = datetime.now(timezone.utc)
     esc_id = f"esc_{uuid.uuid4().hex[:10]}"
 
-    loc_name = esc_in.location_name
-    room_name = esc_in.room_name
+    loc_name = location_name
+    rm_name = room_name
     client_name = None
     shift_doc = None
 
-    if esc_in.shift_id:
-        s_query = {"$or": [{"_id": esc_in.shift_id}, {"id": esc_in.shift_id}]}
-        if ObjectId.is_valid(esc_in.shift_id):
-            s_query["$or"].append({"_id": ObjectId(esc_in.shift_id)})
-
-        shift_doc = await db["shifts"].find_one(s_query)
-        if not shift_doc:
-            shift_doc = await db["shift_executions"].find_one({
-                "$or": [{"_id": esc_in.shift_id}, {"id": esc_in.shift_id}, {"plan_id": esc_in.shift_id}]
-            })
-        if not shift_doc:
-            shift_doc = await db["cleaning_plans"].find_one(s_query)
+    if shift_id:
+        shift_doc, _ = await resolve_shift_execution(shift_id, db)
 
     if shift_doc:
         loc_name = shift_doc.get("location_name") or shift_doc.get("location") or loc_name or "Assigned Facility"
-        client_name = shift_doc.get("client_name")
-        if esc_in.room_id:
+        client_name = shift_doc.get("client_name") or shift_doc.get("company_name")
+        if room_id:
             for r in shift_doc.get("rooms", []):
-                if str(r.get("id") or r.get("room_id")) == str(esc_in.room_id):
-                    room_name = r.get("name") or r.get("room_name") or room_name
+                if str(r.get("id") or r.get("room_id")) == str(room_id):
+                    rm_name = r.get("name") or r.get("room_name") or rm_name
                     break
 
     loc_name = loc_name or "General Site"
-    sub_title = f"{loc_name} - {room_name}" if room_name else loc_name
+    sub_title = f"{loc_name} - {rm_name}" if rm_name else loc_name
 
-    photos = [p for p in (esc_in.photo_urls or []) if p]
-    if esc_in.photo_url and esc_in.photo_url not in photos:
-        photos.append(esc_in.photo_url)
-    primary_photo = photos[0] if photos else esc_in.photo_url
+    # Upload all photos to Amazon S3
+    s3_service = S3Service()
+    final_photo_urls = await process_photos_to_s3(
+        files=raw_files,
+        raw_strings=raw_photo_strings,
+        s3_service=s3_service
+    )
+    primary_photo = final_photo_urls[0] if final_photo_urls else None
 
     worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "")
 
@@ -75,23 +204,23 @@ async def create_worker_escalation(
         "_id": esc_id,
         "id": esc_id,
         "escalation_id": esc_id,
-        "shift_id": esc_in.shift_id,
-        "room_id": esc_in.room_id,
-        "title": esc_in.title.strip(),
+        "shift_id": shift_id,
+        "room_id": room_id,
+        "title": title.strip(),
         "subtitle": sub_title,
-        "category": (esc_in.category or "maintenance").lower().strip(),
-        "severity": esc_in.severity,
-        "description": esc_in.description.strip(),
+        "category": cat,
+        "severity": sev,
+        "description": description.strip(),
         "location_name": loc_name,
-        "room_name": room_name,
+        "room_name": rm_name,
         "client_name": client_name,
         "photo_url": primary_photo,
-        "photo_urls": photos,
+        "photo_urls": final_photo_urls,
         "status": "open",
         "reporter": {
             "worker_id": worker_id,
-            "name": current_user.full_name,
-            "profile_picture": getattr(current_user, "profile_photo", None),
+            "name": getattr(current_user, "full_name", None) or getattr(current_user, "name", "Worker"),
+            "profile_picture": getattr(current_user, "profile_photo", None) or getattr(current_user, "profile_picture", None),
             "phone": getattr(current_user, "phone", None),
             "email": getattr(current_user, "email", None)
         },
@@ -111,36 +240,83 @@ async def create_worker_escalation(
     return WorkerEscalationResponse(
         id=esc_id,
         escalation_id=esc_id,
-        shift_id=esc_in.shift_id,
-        room_id=esc_in.room_id,
+        shift_id=shift_id,
+        room_id=room_id,
         title=doc["title"],
         category=doc["category"],
         severity=doc["severity"],
         description=doc["description"],
         status="open",
         photo_url=primary_photo,
-        photo_urls=photos,
+        photo_urls=final_photo_urls,
         created_at=now,
         message="Escalation report submitted successfully"
     )
+
 
 @router.post(
     "/shifts/{shift_id}/escalations",
     response_model=WorkerEscalationResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create Escalation within Specific Shift",
-    description=(
-        "Enables a worker to submit an incident directly linked to an active shift. "
-        "Automatically inherits client, location, and room details from the shift execution."
-    )
+    description="""
+Enables a worker to submit an incident directly linked to a specific active shift with photo evidence automatically uploaded to Amazon S3.
+
+### Supported Features:
+- **Photo Upload to Amazon S3**: Supports direct binary file uploads (`photos`, `photo`, `files`, `file`) and base64 encoded images (`data:image/...;base64,...`). All photos are automatically uploaded to Amazon S3.
+- **Inherited Context**: Automatically inherits client, location, and room details from the specified shift.
+- **Dual Content-Type**: Accepts both `multipart/form-data` and `application/json`.
+""",
+    openapi_extra=WORKER_SHIFT_ESCALATION_OPENAPI_EXTRA
 )
 async def create_shift_escalation(
-    shift_id: str,
-    esc_in: WorkerEscalationCreate,
+    shift_id: str = Path(..., description="Target Shift / Execution ID", example="exec_plan_6141aedb01_2026-09-01"),
+    request: Request = None,
+    title: Optional[str] = Form(None, description="Short summary of the issue", example="Broken Keycard / Inaccessible Room"),
+    description: Optional[str] = Form(None, description="Detailed problem description", example="Door handle is detached and room cannot be entered."),
+    category: Optional[str] = Form("maintenance", description="Incident category: 'maintenance', 'safety', 'access', 'cleaning', 'equipment', 'client_dispute', 'other'", example="maintenance"),
+    severity: Optional[str] = Form("high", description="Urgency: 'high', 'medium', 'low'", example="high"),
+    room_id: Optional[str] = Form(None, description="Associated room ID within the shift", example="room_01"),
+    location_name: Optional[str] = Form(None, description="Facility or site name (optional, inherited from shift)", example="Grand Hotel Central"),
+    room_name: Optional[str] = Form(None, description="Room name or number (optional, inherited from shift)", example="Room 107"),
+    photo_urls: Optional[List[str]] = Form(None, description="Pre-existing photo URLs or base64 strings"),
+    photo_url: Optional[str] = Form(None, description="Single photo URL or base64 string"),
+    photos: Optional[List[Union[UploadFile, str]]] = File(default=None, description="Photo evidence files to upload to Amazon S3"),
+    photo: Optional[Union[UploadFile, str]] = File(default=None, description="Single photo evidence file to upload to Amazon S3"),
+    files: Optional[List[Union[UploadFile, str]]] = File(default=None, description="Alternative multiple files upload field"),
+    file: Optional[Union[UploadFile, str]] = File(default=None, description="Alternative single file upload field"),
     current_user: UserInDB = Depends(require_worker)
 ):
-    esc_in.shift_id = shift_id
-    return await create_worker_escalation(esc_in, current_user)
+    clean_shift_id = (shift_id or "").strip()
+    # Validate shift existence for shift-linked escalation
+    db = get_database()
+    shift_doc, _ = await resolve_shift_execution(clean_shift_id, db)
+
+    if not shift_doc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Shift with ID '{clean_shift_id}' not found."
+        )
+
+    # Enforce shift_id from path and delegate
+    return await create_worker_escalation(
+        request=request,
+        title=title,
+        description=description,
+        category=category,
+        severity=severity,
+        shift_id=clean_shift_id,
+        room_id=room_id,
+        location_name=location_name,
+        room_name=room_name,
+        photo_urls=photo_urls,
+        photo_url=photo_url,
+        photos=photos,
+        photo=photo,
+        files=files,
+        file=file,
+        current_user=current_user
+    )
 
 @router.get(
     "/escalations",

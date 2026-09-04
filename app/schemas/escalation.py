@@ -181,6 +181,16 @@ class WorkerEscalationCreate(BaseModel):
         description="Single photo URL fallback.",
         json_schema_extra={"example": "https://s3.eu-central-1.amazonaws.com/cleanones-bucket/uploads/door.jpg"}
     )
+    photos: Optional[List[str]] = Field(
+        default_factory=list,
+        description="List of uploaded image URLs or base64 data URIs demonstrating the issue.",
+        json_schema_extra={"example": ["https://cleanones-bucket.s3.eu-central-1.amazonaws.com/uploads/door.jpg"]}
+    )
+    photo: Optional[str] = Field(
+        None,
+        description="Single photo URL or base64 string fallback.",
+        json_schema_extra={"example": "https://cleanones-bucket.s3.eu-central-1.amazonaws.com/uploads/door.jpg"}
+    )
 
 class WorkerEscalationResponse(BaseModel):
     """Response returned upon successful creation of a worker escalation."""
