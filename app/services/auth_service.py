@@ -61,6 +61,22 @@ class AuthService:
             user.onesignal_player_id = login_data.onesignal_player_id
             
         await self.user_repo.update(user)
+
+        # When client signs in, activate their client_list record
+        if user.role == RoleEnum.client:
+            from app.core.database import get_database
+            db = get_database()
+            email_clean = (user.email or "").lower().strip()
+            await db["client_list"].update_many(
+                {"email": email_clean},
+                {
+                    "$set": {
+                        "is_signup": True,
+                        "status": "active",
+                        "updated_at": datetime.now(timezone.utc)
+                    }
+                }
+            )
         
         # Adjust refresh token lifetime based on remember_me flag
         if login_data.remember_me:
@@ -148,6 +164,21 @@ class AuthService:
             user.onesignal_player_id = request.onesignal_player_id
             
         await self.user_repo.update(user)
+
+        if user.role == RoleEnum.client:
+            from app.core.database import get_database
+            db = get_database()
+            email_clean = (user.email or "").lower().strip()
+            await db["client_list"].update_many(
+                {"email": email_clean},
+                {
+                    "$set": {
+                        "is_signup": True,
+                        "status": "active",
+                        "updated_at": datetime.now(timezone.utc)
+                    }
+                }
+            )
 
         # Check if individual worker pending admin approval
         if user.role == RoleEnum.worker and not getattr(user, "is_admin_created", False):

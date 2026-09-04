@@ -40,10 +40,16 @@ class NotificationService:
             if plan_id:
                 push_data["plan_id"] = plan_id
             push_data["notification_type"] = notification_type
+            
+            is_broadcast = (recipient_type == "all" and not user_id)
+            ext_ids = [str(user_id)] if user_id else None
+
             await self.onesignal.send_notification(
                 headings=title,
                 contents=message,
                 player_ids=player_ids,
+                external_user_ids=ext_ids,
+                is_broadcast=is_broadcast,
                 data=push_data
             )
         except Exception as e:
@@ -214,7 +220,7 @@ class NotificationService:
 
     async def notify_support_reply(self, worker_id: str, subject: str):
         db = get_database()
-        worker = await db["users"].find_one({"_id": ObjectId(worker_id)})
+        worker = await db["users"].find_one({"_id": ObjectId(worker_id)}) if ObjectId.is_valid(worker_id) else await db["users"].find_one({"_id": worker_id})
         player_ids = None
         if worker and worker.get("onesignal_player_id"):
             player_ids = [worker["onesignal_player_id"]]
@@ -230,3 +236,163 @@ class NotificationService:
             user_id=worker_id,
             player_ids=player_ids
         )
+
+    async def notify_escalation_status_changed(
+        self,
+        escalation: dict,
+        new_status: str,
+        manager_user,
+        notes: Optional[str] = None
+    ) -> Optional[dict]:
+        """
+        Dispatches targeted push notification, database notification, and WebSocket alert
+        to the reporter worker when an escalation status is updated or resolved.
+        """
+        db = get_database()
+        reporter = escalation.get("reporter") or {}
+        worker_id = str(reporter.get("worker_id") or escalation.get("reporter_id") or escalation.get("worker_id") or "")
+        
+        if not worker_id:
+            print("[Escalation Notification] No worker_id found on escalation. Skipping worker push.")
+            return None
+
+        # Look up worker to get device push token
+        worker_doc = None
+        if ObjectId.is_valid(worker_id):
+            worker_doc = await db["users"].find_one({"_id": ObjectId(worker_id)})
+        if not worker_doc:
+            worker_doc = await db["users"].find_one({"$or": [{"_id": worker_id}, {"id": worker_id}]})
+
+        player_ids = []
+        if worker_doc and worker_doc.get("onesignal_player_id"):
+            player_ids = [worker_doc["onesignal_player_id"]]
+
+        manager_name = getattr(manager_user, "full_name", None) or "Manager"
+        esc_title = escalation.get("title") or "Issue Report"
+        esc_id = escalation.get("escalation_id") or str(escalation.get("_id"))
+
+        if new_status == "resolved":
+            heading = f"Escalation Resolved: {esc_title}"
+            body = f"Your escalation report has been resolved by {manager_name}."
+            if notes:
+                body += f" Note: {notes}"
+            notif_type = "escalation_resolved"
+        elif new_status == "in_progress":
+            heading = f"Escalation In Progress: {esc_title}"
+            body = f"{manager_name} is actively working on your escalation report."
+            if notes:
+                body += f" Note: {notes}"
+            notif_type = "escalation_in_progress"
+        elif new_status == "closed":
+            heading = f"Escalation Closed: {esc_title}"
+            body = f"Your escalation report has been closed by {manager_name}."
+            if notes:
+                body += f" Note: {notes}"
+            notif_type = "escalation_closed"
+        else:
+            heading = f"Escalation Status Updated: {esc_title}"
+            body = f"Status updated to '{new_status}' by {manager_name}."
+            if notes:
+                body += f" Note: {notes}"
+            notif_type = "escalation_updated"
+
+        extra_data = {
+            "escalation_id": esc_id,
+            "status": new_status,
+            "notes": notes,
+            "manager_name": manager_name,
+            "shift_id": escalation.get("shift_id")
+        }
+
+        # 1. Create in-app notification & send OneSignal push
+        notif_doc = await self.create_notification(
+            title=heading,
+            message=body,
+            notification_type=notif_type,
+            recipient_type="worker",
+            user_id=worker_id,
+            player_ids=player_ids if player_ids else None,
+            data=extra_data
+        )
+
+        # 2. Broadcast real-time WebSocket event to the worker
+        try:
+            from app.api.chat import ws_manager
+            await ws_manager.broadcast_to_users(
+                {
+                    "event": "escalation_resolved" if new_status == "resolved" else "escalation_status_updated",
+                    "data": {
+                        "escalation_id": esc_id,
+                        "status": new_status,
+                        "notes": notes,
+                        "resolved_by": manager_name if new_status == "resolved" else None,
+                        "updated_by": manager_name,
+                        "notification": notif_doc
+                    }
+                },
+                [worker_id]
+            )
+        except Exception as ws_err:
+            print(f"[WebSocket Alert Warning] Failed to broadcast escalation event: {ws_err}")
+
+        return notif_doc
+
+    async def notify_escalation_created(self, escalation: dict, reporter_user) -> Optional[dict]:
+        """
+        Dispatches in-app notification, push notifications, and WebSocket alert
+        to all active managers when a new escalation is submitted by a worker.
+        """
+        db = get_database()
+        esc_title = escalation.get("title") or "New Issue"
+        esc_id = escalation.get("escalation_id") or str(escalation.get("_id"))
+        reporter_name = getattr(reporter_user, "full_name", None) or "A worker"
+
+        heading = f"New Escalation: {esc_title}"
+        body = f"{reporter_name} reported an issue: {escalation.get('description', '')[:120]}"
+        
+        extra_data = {
+            "escalation_id": esc_id,
+            "severity": escalation.get("severity", "high"),
+            "status": "open",
+            "shift_id": escalation.get("shift_id")
+        }
+
+        # Collect manager player IDs
+        cursor = db["users"].find(
+            {"role": {"$in": ["manager", "admin"]}, "onesignal_player_id": {"$ne": None}, "is_active": True},
+            {"onesignal_player_id": 1}
+        )
+        player_ids = [u["onesignal_player_id"] async for u in cursor if u.get("onesignal_player_id")]
+
+        notif_doc = await self.create_notification(
+            title=heading,
+            message=body,
+            notification_type="escalation_created",
+            recipient_type="manager",
+            player_ids=player_ids if player_ids else None,
+            data=extra_data
+        )
+
+        # Broadcast WebSocket event to all managers
+        try:
+            from app.api.chat import ws_manager
+            manager_cursor = db["users"].find({"role": {"$in": ["manager", "admin"]}}, {"_id": 1})
+            manager_ids = [str(m["_id"]) async for m in manager_cursor]
+            if manager_ids:
+                await ws_manager.broadcast_to_users(
+                    {
+                        "event": "new_escalation",
+                        "data": {
+                            "escalation_id": esc_id,
+                            "title": esc_title,
+                            "severity": escalation.get("severity", "high"),
+                            "reporter_name": reporter_name,
+                            "notification": notif_doc
+                        }
+                    },
+                    manager_ids
+                )
+        except Exception as ws_err:
+            print(f"[WebSocket Alert Warning] Failed to broadcast new escalation: {ws_err}")
+
+        return notif_doc

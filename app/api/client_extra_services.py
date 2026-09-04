@@ -17,6 +17,44 @@ from app.services.client_helper import resolve_client_id_aliases
 router = APIRouter(prefix="/client/extra-services", tags=["Client Extra Service Management"])
 
 
+import re
+from typing import Optional, List, Union
+
+def _parse_duration_to_minutes(dur: Optional[Union[str, int, float]]) -> Optional[int]:
+    if dur is None:
+        return None
+    if isinstance(dur, (int, float)):
+        return int(dur)
+    dur_str = str(dur).strip().lower()
+    if not dur_str:
+        return None
+    if dur_str.isdigit():
+        return int(dur_str)
+    if ":" in dur_str:
+        parts = dur_str.split(":")
+        try:
+            return int(parts[0]) * 60 + int(parts[1])
+        except Exception:
+            pass
+    total_m = 0
+    h_match = re.search(r"(\d+)\s*(?:h|hr|hour)", dur_str)
+    if h_match:
+        total_m += int(h_match.group(1)) * 60
+    m_match = re.search(r"(\d+)\s*(?:m|min)", dur_str)
+    if m_match:
+        total_m += int(m_match.group(1))
+    return total_m if total_m > 0 else None
+
+def _calculate_end_time_str(start_time_str: str, duration_mins: int) -> str:
+    from app.core.timezone_utils import parse_time_to_minutes
+    start_mins = parse_time_to_minutes(start_time_str)
+    end_mins = (start_mins + duration_mins) % 1440
+    end_h = end_mins // 60
+    end_m = end_mins % 60
+    meridiem = "AM" if end_h < 12 else "PM"
+    display_h = end_h if 1 <= end_h <= 12 else (12 if end_h == 0 or end_h == 12 else end_h - 12)
+    return f"{display_h:02d}:{end_m:02d} {meridiem}"
+
 def require_client(current_user: UserInDB = Depends(get_current_user)) -> UserInDB:
     if current_user.role != RoleEnum.client and current_user.role != "client":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Client role required")
@@ -30,20 +68,18 @@ def require_client(current_user: UserInDB = Depends(get_current_user)) -> UserIn
     summary="Client Create Extra Service Request",
     description="""
 ### Client Create Extra Service Request
-Submits a new request for additional cleaning beyond regular schedule with hierarchical task and photo requirements.
+Submits a new request for additional cleaning beyond regular schedule with hierarchical task and photo requirements, start time, and estimated duration.
 
 #### Supported Field Values & Options:
+- **`start_time`**: e.g. `"08:00 AM"` or `"02:30 PM"`
+- **`duration`**: e.g. `"1h 30m"`, `"2 hours"`, `"45 mins"`
+- **`duration_minutes`**: Duration in minutes (e.g. `90`)
+- **`end_time`**: Optional end time e.g. `"09:30 AM"` (automatically calculated if `start_time` and `duration` provided)
 - **`priority`**: `"High Priority"`, `"Medium Priority"`, `"Low Priority"` (also accepts `"high"`, `"medium"`, `"low"`)
 - **`preferred_date`**: Target service date (`YYYY-MM-DD`, e.g. `"2026-07-10"`)
 - **`tasks[].frequency_type`**: `"every_visit"`, `"weekly"`, `"monthly"`, `"yearly"`
 - **`tasks[].is_photo_req`**: `true` | `false` (automatically enabled if `photo` list is provided)
-- **`tasks[].photo`**: List of required photo items connected to this task:
-  ```json
-  "photo": [
-    {"name": "After exterior glass cleaning"},
-    {"name": "Before exterior glass cleaning"}
-  ]
-  ```
+- **`tasks[].photo`**: List of required photo items connected to this task
 - **`location_id`**: Associated facility / office location ID
 - **`room_id`**: Optional specific room ID
 """
@@ -114,11 +150,33 @@ async def create_client_extra_service(
         else:
             room_name = f"Room {service_in.room_id}"
 
+    # Duration & Time handling
+    start_time_val = service_in.start_time
+    dur_mins = service_in.duration_minutes
+    if dur_mins is None and service_in.duration:
+        dur_mins = _parse_duration_to_minutes(service_in.duration)
+
+    dur_str = service_in.duration
+    if not dur_str and dur_mins:
+        hours = dur_mins // 60
+        mins = dur_mins % 60
+        dur_str = f"{hours}h {mins}m" if mins else f"{hours}h"
+
+    end_time_val = service_in.end_time
+    if start_time_val and dur_mins and not end_time_val:
+        end_time_val = _calculate_end_time_str(start_time_val, dur_mins)
+
+    est_hours = float(dur_mins / 60.0) if dur_mins else 0.0
+
     doc = {
         "_id": service_id,
         "id": service_id,
         "title": service_in.title,
         "preferred_date": service_in.preferred_date,
+        "start_time": start_time_val,
+        "duration_minutes": dur_mins,
+        "duration": dur_str,
+        "end_time": end_time_val,
         "priority": prio_str,
         "description": service_in.description,
         "status": "under_review",
@@ -133,7 +191,7 @@ async def create_client_extra_service(
         "assigned_workers": [],
         "tasks": task_items,
         "required_photos": [],
-        "estimated_hours": 0.0,
+        "estimated_hours": est_hours,
         "actual_start_time": None,
         "actual_finish_time": None,
         "hours_credited": None,
@@ -543,6 +601,29 @@ async def update_client_extra_service(
         update_fields["location_id"] = service_in.location_id
     if service_in.room_id is not None:
         update_fields["room_id"] = service_in.room_id
+
+    if service_in.start_time is not None:
+        update_fields["start_time"] = service_in.start_time
+    if service_in.duration is not None or service_in.duration_minutes is not None:
+        d_min = service_in.duration_minutes
+        if d_min is None and service_in.duration:
+            d_min = _parse_duration_to_minutes(service_in.duration)
+        update_fields["duration_minutes"] = d_min
+        d_str = service_in.duration
+        if not d_str and d_min:
+            h = d_min // 60
+            m = d_min % 60
+            d_str = f"{h}h {m}m" if m else f"{h}h"
+        update_fields["duration"] = d_str
+        if d_min:
+            update_fields["estimated_hours"] = float(d_min / 60.0)
+    if service_in.end_time is not None:
+        update_fields["end_time"] = service_in.end_time
+    elif service_in.start_time or "duration_minutes" in update_fields:
+        cur_start = update_fields.get("start_time") or doc.get("start_time")
+        cur_dur = update_fields.get("duration_minutes") or doc.get("duration_minutes")
+        if cur_start and cur_dur:
+            update_fields["end_time"] = _calculate_end_time_str(cur_start, cur_dur)
 
     if service_in.tasks is not None:
         processed_tasks = []

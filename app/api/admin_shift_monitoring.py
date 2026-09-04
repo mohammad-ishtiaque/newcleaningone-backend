@@ -1,7 +1,7 @@
 import uuid
 import asyncio
-from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, Depends, status, HTTPException
+from datetime import datetime, timezone as dt_timezone, timedelta
+from fastapi import APIRouter, Depends, status, HTTPException, Query
 from typing import Optional, List, Dict, Any
 from bson import ObjectId
 from app.core.database import get_database
@@ -16,6 +16,7 @@ from app.api.worker_shift_utils import (
     is_plan_active_on_date, evaluate_worker_attendance_status, calculate_cleaning_plan_progress,
     get_or_create_shift_execution, evaluate_auto_checkout_and_hours
 )
+from app.core.timezone_utils import parse_time_to_minutes, get_timezone
 from app.api.admin_shift_monitoring_worker_stats import worker_stats_router, require_manager, _get_period_date_range
 
 shift_monitoring_router = APIRouter(prefix="/manager/shift-monitoring", tags=["Manager Shift Monitoring"])
@@ -28,25 +29,70 @@ shift_monitoring_router.include_router(worker_stats_router)
     "/live-status",
     response_model=LiveStatusResponse,
     summary="Get Live Shift Monitoring Status",
-    description="Returns live status of worker attendance for today's shifts (or specified date) with counts of ontime, late, and missing workers."
+    description="""
+Returns live status and attendance tracking of workers for currently active cleaning shifts (shifts occurring right now where `start_time <= current_time <= end_time`, or where a worker is actively checked in on-site).
+
+### Key Features & Business Rules:
+- **Live Filtering**: Only displays shifts actively in-progress right now, filtering out future shifts (e.g., afternoon/evening) and past completed shifts.
+- **Attendance Evaluation (with 15-min grace period)**:
+  - `ontime`: Worker checked in within 15 minutes of scheduled start time.
+  - `late`: Worker checked in after 15-minute grace period, OR shift has started past grace period and worker has not checked in yet.
+  - `missing`: Shift has ended and worker never checked in.
+  - `scheduled`: Shift is ongoing within the 15-minute grace window, worker has not yet checked in.
+- **Supported Query Filters**:
+  - `checkin_status`: `all`, `ontime`, `late`, `missing`, `scheduled`
+  - `worker_type`: `all`, `employee`, `freelancer`
+  - `search`: Searches worker name, client company, location, or shift title.
+  - `timezone`: Custom timezone string (e.g. `Asia/Dhaka`, `Europe/Amsterdam`). Defaults to manager profile or local server timezone.
+- **Live Counts**: Provides aggregated counts of `ontime_count`, `late_count`, and `missing_count` across all live shifts.
+- **Blocker Diagnostics**: Computes real-time uncompleted task counts and pending/rejected photo review blockers for checkout eligibility.
+"""
 )
 async def get_live_shift_monitoring(
-    page: int = 1,
-    limit: int = 10,
-    date_val: Optional[str] = None,
-    checkin_status: Optional[str] = None,  # all, ontime, late, missing
-    worker_type: Optional[str] = None,      # all, employee, freelancer
-    search: Optional[str] = None,
+    page: int = Query(1, ge=1, description="Page number for pagination", example=1),
+    limit: int = Query(10, ge=1, le=100, description="Number of items per page", example=10),
+    date_val: Optional[str] = Query(None, description="Optional target date in YYYY-MM-DD format. Defaults to current date.", example="2026-09-04"),
+    checkin_status: Optional[str] = Query(None, description="Filter workers by attendance status. Supported values: 'all', 'ontime', 'late', 'missing', 'scheduled'.", example="all"),
+    worker_type: Optional[str] = Query(None, description="Filter workers by employment type. Supported values: 'all', 'employee', 'freelancer'.", example="all"),
+    search: Optional[str] = Query(None, description="Case-insensitive search filter matching worker name, client company, location, or shift title.", example="Sadim"),
+    timezone: Optional[str] = Query(None, description="Manager or local timezone (e.g. 'Asia/Dhaka', 'Europe/Amsterdam', '+06:00').", example="Asia/Dhaka"),
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    target_date = (date_val or datetime.now(timezone.utc).date().isoformat()).strip()
-    now_utc = datetime.now(timezone.utc)
 
-    # 1. Fetch all active cleaning plans, existing shift executions, and legacy shifts in parallel
-    plans_task = db["cleaning_plans"].find({"status": {"$ne": "cancelled"}}).to_list(length=1000)
-    execs_task = db["shift_executions"].find({"date": target_date, "status": {"$ne": "cancelled"}}).to_list(length=1000)
-    legacy_task = db["shifts"].find({"date": target_date, "status": {"$ne": "cancelled"}}).to_list(length=1000)
+    # Determine effective timezone:
+    if timezone and str(timezone).strip():
+        eff_tz = get_timezone(timezone)
+        eff_tz_str = str(timezone).strip()
+    elif getattr(current_user, "timezone", None):
+        eff_tz = get_timezone(current_user.timezone)
+        eff_tz_str = str(current_user.timezone).strip()
+    else:
+        sys_offset = datetime.now().astimezone().strftime("%z")
+        if sys_offset and len(sys_offset) == 5:
+            eff_tz_str = sys_offset[:3] + ":" + sys_offset[3:]
+        else:
+            eff_tz_str = "+00:00"
+        eff_tz = get_timezone(eff_tz_str)
+
+    now_local = datetime.now(eff_tz)
+    today_str = now_local.strftime("%Y-%m-%d")
+    target_date = (date_val or today_str).strip()
+    is_today = (target_date == today_str)
+    current_time_minutes = now_local.hour * 60 + now_local.minute
+    now_utc = datetime.now(dt_timezone.utc)
+
+    # 1. Fetch active cleaning plans, existing shift executions, and legacy shifts in parallel with projection
+    plans_task = db["cleaning_plans"].find(
+        {"status": {"$ne": "cancelled"}},
+        {"rooms": 0, "additional_tasks": 0, "additional_required_photos": 0}
+    ).to_list(length=500)
+    execs_task = db["shift_executions"].find(
+        {"date": target_date, "status": {"$ne": "cancelled"}}
+    ).to_list(length=500)
+    legacy_task = db["shifts"].find(
+        {"date": target_date, "status": {"$ne": "cancelled"}}
+    ).to_list(length=500)
     all_plans, existing_execs, legacy_shifts = await asyncio.gather(plans_task, execs_task, legacy_task)
 
     # 2. Build in-memory lookup map for existing executions (O(1) lookup, eliminates N+1 queries)
@@ -73,7 +119,14 @@ async def get_live_shift_monitoring(
                     seen_shift_ids.add(sid)
                     raw_shifts.append(doc)
             else:
-                create_tasks.append(get_or_create_shift_execution(p, target_date, db))
+                p_start = p.get("start_time", "08:00 AM")
+                p_end = p.get("end_time") or "04:00 PM"
+                p_start_m = parse_time_to_minutes(p_start)
+                p_end_m = parse_time_to_minutes(p_end)
+                if p_end_m < p_start_m:
+                    p_end_m += 1440
+                if not is_today or (p_start_m <= current_time_minutes <= p_end_m):
+                    create_tasks.append(get_or_create_shift_execution(p, target_date, db))
 
     if create_tasks:
         created_execs = await asyncio.gather(*create_tasks)
@@ -95,29 +148,69 @@ async def get_live_shift_monitoring(
             seen_shift_ids.add(sid)
             raw_shifts.append(ls)
 
-    # 3. Collect all worker IDs from raw_shifts to batch fetch user details
-    all_worker_ids = set()
+    # 3. Filter LIVE shifts first (start_time <= current_time <= end_time OR actively checked in)
+    live_shifts = []
     for s in raw_shifts:
-        for wid in s.get("worker_ids", []):
-            if str(wid).strip():
-                all_worker_ids.add(str(wid).strip())
-        for w_entry in (s.get("assigned_workers") or []):
-            if isinstance(w_entry, dict) and w_entry.get("worker_id"):
-                all_worker_ids.add(str(w_entry["worker_id"]).strip())
-        for w_entry in (s.get("workers") or []):
-            if isinstance(w_entry, dict):
-                wid = str(w_entry.get("worker_id") or w_entry.get("id") or "")
+        if s.get("status") in ["completed", "cancelled"]:
+            continue
+
+        start_t = s.get("start_time", "08:00 AM")
+        end_t = s.get("end_time") or "04:00 PM"
+        start_mins = parse_time_to_minutes(start_t)
+        end_mins = parse_time_to_minutes(end_t)
+        if end_mins < start_mins:
+            end_mins += 1440
+
+        worker_entries = s.get("assigned_workers") or s.get("workers") or []
+        if not worker_entries and s.get("worker_ids"):
+            worker_entries = [{"worker_id": wid} for wid in s.get("worker_ids")]
+
+        has_checked_in = any(
+            isinstance(w, dict) and w.get("checkin_time") and not w.get("checkout_time")
+            for w in worker_entries
+        )
+        all_checked_out = (
+            len(worker_entries) > 0 and
+            all(isinstance(w, dict) and w.get("checkout_time") for w in worker_entries)
+        )
+
+        if is_today:
+            curr_mins = current_time_minutes
+            if end_mins > 1440 and curr_mins < start_mins:
+                curr_mins += 1440
+
+            is_in_time_window = (start_mins <= curr_mins <= end_mins)
+            is_live = (is_in_time_window or has_checked_in) and not all_checked_out
+        else:
+            is_live = True
+
+        if is_live:
+            live_shifts.append((s, start_mins, end_mins, worker_entries))
+
+    # 4. Batch fetch user profiles ONLY for workers in live shifts
+    live_worker_ids = set()
+    for _, _, _, w_entries in live_shifts:
+        for w in w_entries:
+            if isinstance(w, dict):
+                wid = str(w.get("worker_id") or w.get("id") or "").strip()
                 if wid:
-                    all_worker_ids.add(wid)
+                    live_worker_ids.add(wid)
 
     worker_user_map = {}
-    if all_worker_ids:
-        w_list = list(all_worker_ids)
+    if live_worker_ids:
+        w_list = list(live_worker_ids)
         oid_list = [ObjectId(x) for x in w_list if ObjectId.is_valid(x)]
         or_clauses = [{"_id": {"$in": w_list}}, {"id": {"$in": w_list}}]
         if oid_list:
             or_clauses.append({"_id": {"$in": oid_list}})
-        u_cursor = db["users"].find({"$or": or_clauses})
+        u_cursor = db["users"].find(
+            {"$or": or_clauses},
+            {
+                "full_name": 1, "name": 1,
+                "profile_photo": 1, "profile_picture": 1,
+                "worker_type": 1, "onboarding_draft.worker_type": 1
+            }
+        )
         async for u in u_cursor:
             uid_str = str(u.get("_id") or u.get("id"))
             worker_user_map[uid_str] = u
@@ -126,21 +219,25 @@ async def get_live_shift_monitoring(
             if "_id" in u:
                 worker_user_map[str(u["_id"])] = u
 
+    # 5. Build live status items and aggregate attendance counters
     all_items = []
     ontime_cnt = 0
     late_cnt = 0
     missing_cnt = 0
 
-    for exec_doc in raw_shifts:
+    for exec_doc, start_mins, end_mins, worker_entries in live_shifts:
         shift_id = str(exec_doc.get("id") or exec_doc.get("_id") or "")
         c_id = str(exec_doc.get("client_id") or "")
-        c_name = exec_doc.get("client_name") or "Client"
+        c_name = exec_doc.get("client_name") or exec_doc.get("company_name") or "Client"
         l_id = str(exec_doc.get("location_id") or "")
         l_name = exec_doc.get("location_name") or "Location"
         s_start = exec_doc.get("start_time", "08:00 AM")
-        s_end = exec_doc.get("end_time", "04:00 PM")
-        s_title = exec_doc.get("title") or s.get("title") or s.get("plan_name") or ""
+        s_end = exec_doc.get("end_time") or "04:00 PM"
+        s_title = exec_doc.get("title") or exec_doc.get("shift_name") or exec_doc.get("plan_name") or ""
         s_date = exec_doc.get("date") or target_date
+
+        if not exec_doc.get("timezone"):
+            exec_doc["timezone"] = eff_tz_str
 
         # Calculate item-based progress %
         progress_info = calculate_cleaning_plan_progress(exec_doc)
@@ -185,15 +282,6 @@ async def get_live_shift_monitoring(
         checkout_blocked_reason = ", ".join(blocker_reasons) if blocker_reasons else None
         can_checkout = (uncompleted_tasks == 0 and pending_approvals == 0 and rejected_photos == 0)
 
-        worker_entries = (
-            exec_doc.get("assigned_workers") or
-            exec_doc.get("workers") or
-            s.get("assigned_workers") or
-            s.get("workers") or []
-        )
-        if not worker_entries and (exec_doc.get("worker_ids") or s.get("worker_ids")):
-            worker_entries = [{"worker_id": wid} for wid in (exec_doc.get("worker_ids") or s.get("worker_ids"))]
-
         for w_record in worker_entries:
             w_id = str(w_record.get("worker_id") or w_record.get("id") or "")
             if not w_id:
@@ -202,7 +290,8 @@ async def get_live_shift_monitoring(
             u_doc = worker_user_map.get(w_id, {})
             w_name = u_doc.get("full_name") or u_doc.get("name") or w_record.get("name", "Worker")
             w_pic = u_doc.get("profile_photo") or u_doc.get("profile_picture") or w_record.get("profile_photo") or w_record.get("profile_picture")
-            w_type = str(u_doc.get("worker_type") or w_record.get("worker_type") or "employee").lower()
+            w_type_raw = u_doc.get("worker_type") or u_doc.get("onboarding_draft", {}).get("worker_type") or w_record.get("worker_type") or "employee"
+            w_type = (w_type_raw.value if hasattr(w_type_raw, "value") else str(w_type_raw)).lower()
             w_pos = w_record.get("position", "normal")
 
             c_time = w_record.get("checkin_time")
@@ -220,9 +309,9 @@ async def get_live_shift_monitoring(
                     pass
 
             if c_time and hasattr(c_time, "tzinfo") and c_time.tzinfo is None:
-                c_time = c_time.replace(tzinfo=timezone.utc)
+                c_time = c_time.replace(tzinfo=dt_timezone.utc)
             if co_time and hasattr(co_time, "tzinfo") and co_time.tzinfo is None:
-                co_time = co_time.replace(tzinfo=timezone.utc)
+                co_time = co_time.replace(tzinfo=dt_timezone.utc)
 
             # Evaluate ontime, late, missing, scheduled
             status_label = evaluate_worker_attendance_status(
@@ -248,15 +337,17 @@ async def get_live_shift_monitoring(
             )
             final_co_time = co_time or resolved_co_time
 
-            # Apply filters
+            # Filter by checkin_status
             if checkin_status and checkin_status.lower() != "all":
                 if status_label != checkin_status.lower():
                     continue
 
+            # Filter by worker_type
             if worker_type and worker_type.lower() != "all":
                 if w_type != worker_type.lower():
                     continue
 
+            # Filter by search
             if search:
                 s_lower = search.lower()
                 if not (s_lower in w_name.lower() or s_lower in c_name.lower() or s_lower in l_name.lower() or s_lower in s_title.lower()):
@@ -304,6 +395,7 @@ async def get_live_shift_monitoring(
         missing_count=missing_cnt,
         page=page,
         limit=limit,
+        has_more=bool((page * limit) < total_shifts_count),
         items=paginated_items
     )
 

@@ -83,7 +83,6 @@ def create_app(service_name: str = "all") -> FastAPI:
         app.include_router(admin.worker_mgmt_router)
         app.include_router(admin.worker_earnings_invoices_router)
         app.include_router(admin.worker_approvals_router)
-        app.include_router(admin.shift_mgmt_router)
         app.include_router(admin.roster_mgmt_router)
         app.include_router(admin.photo_reviews_router)
         app.include_router(admin.escalations_router)

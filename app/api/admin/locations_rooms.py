@@ -68,10 +68,21 @@ async def list_clients_for_locations(
     conditions = [{"status": {"$ne": "deleted"}}]
     
     if is_signup is not None:
+        signed_in_client_emails = await db["users"].distinct("email", {"role": "client", "last_login": {"$ne": None}})
         if is_signup:
-            conditions.append({"is_signup": True})
+            conditions.append({
+                "$or": [
+                    {"is_signup": True},
+                    {"email": {"$in": signed_in_client_emails}}
+                ]
+            })
         else:
-            conditions.append({"$or": [{"is_signup": False}, {"is_signup": {"$exists": False}}]})
+            conditions.append({
+                "$and": [
+                    {"is_signup": {"$ne": True}},
+                    {"email": {"$nin": signed_in_client_emails}}
+                ]
+            })
 
     if search:
         conditions.append({
@@ -90,18 +101,23 @@ async def list_clients_for_locations(
     cursor = db["client_list"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     raw_clients = await cursor.to_list(length=limit)
 
+    emails = [c.get("email").lower().strip() for c in raw_clients if c.get("email")]
+    user_signup_map = {}
+    if emails:
+        async for u in db["users"].find({"email": {"$in": emails}, "role": "client"}):
+            u_email = (u.get("email") or "").lower().strip()
+            user_signup_map[u_email] = bool(u.get("last_login"))
+
     clients = []
     for c in raw_clients:
-        client_is_signup = c.get("is_signup")
-        if client_is_signup is None:
-            user_doc = await db["users"].find_one({"email": c.get("email"), "role": "client"})
-            client_is_signup = bool(user_doc and user_doc.get("is_approved", True))
+        c_email = (c.get("email") or "").lower().strip()
+        client_is_signup = bool(c.get("is_signup") is True or user_signup_map.get(c_email, False))
 
         clients.append(ClientGridDropdownItem(
             id=str(c.get("_id") or c.get("id")),
             primary_contact_name=c.get("primary_contact_name", ""),
             company_name=c.get("company_name", ""),
-            is_signup=bool(client_is_signup)
+            is_signup=client_is_signup
         ))
 
     return ClientGridDropdownPaginatedResponse(

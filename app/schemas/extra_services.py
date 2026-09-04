@@ -27,6 +27,10 @@ class ExtraServicePhotoRequirement(BaseModel):
 class ExtraServiceCreate(BaseModel):
     title: Optional[str] = Field(None, json_schema_extra={"example": "Window Cleaning"})
     preferred_date: Optional[str] = Field(None, json_schema_extra={"example": "2026-07-10"})
+    start_time: Optional[str] = Field(None, json_schema_extra={"example": "08:00 AM"})
+    duration_minutes: Optional[int] = Field(None, json_schema_extra={"example": 90})
+    duration: Optional[str] = Field(None, json_schema_extra={"example": "1h 30m"})
+    end_time: Optional[str] = Field(None, json_schema_extra={"example": "09:30 AM"})
     priority: Literal["High Priority", "Medium Priority", "Low Priority", "high", "medium", "low"] = "Medium Priority"
     description: Optional[str] = Field(None, json_schema_extra={"example": "All exterior windows on floors 2-4 need cleaning before client visit."})
     service_name: Optional[str] = None
@@ -61,6 +65,10 @@ class ExtraServiceCreate(BaseModel):
             "example": {
                 "title": "Window Cleaning",
                 "preferred_date": "2026-07-10",
+                "start_time": "08:00 AM",
+                "duration": "1h 30m",
+                "duration_minutes": 90,
+                "end_time": "09:30 AM",
                 "priority": "Medium Priority",
                 "description": "All exterior windows on floors 2-4 need cleaning before client visit.",
                 "location_id": "loc_db28f5a3f6",
@@ -89,6 +97,10 @@ class ExtraServiceCreate(BaseModel):
 class ExtraServiceUpdate(BaseModel):
     title: Optional[str] = None
     preferred_date: Optional[str] = None
+    start_time: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    duration: Optional[str] = None
+    end_time: Optional[str] = None
     priority: Optional[Literal["High Priority", "Medium Priority", "Low Priority", "high", "medium", "low"]] = None
     description: Optional[str] = None
     location_id: Optional[str] = None
@@ -192,6 +204,10 @@ class ExtraServiceListItem(BaseModel):
     room: Optional[RoomInfo] = None
     date_submitted: str
     rejection_reason: Optional[str] = None
+    start_time: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    duration: Optional[str] = None
+    end_time: Optional[str] = None
     assigned_workers: List[ExtraServiceWorkerDetail] = Field(default_factory=list)
     total_tasks_count: int = 0
     total_photos_count: int = 0

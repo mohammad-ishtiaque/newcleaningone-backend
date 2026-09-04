@@ -93,10 +93,21 @@ async def list_clients(
     conditions = [{"status": {"$ne": "deleted"}}]
     
     if is_signup is not None:
+        signed_in_client_emails = await db["users"].distinct("email", {"role": "client", "last_login": {"$ne": None}})
         if is_signup:
-            conditions.append({"is_signup": True})
+            conditions.append({
+                "$or": [
+                    {"is_signup": True},
+                    {"email": {"$in": signed_in_client_emails}}
+                ]
+            })
         else:
-            conditions.append({"$or": [{"is_signup": False}, {"is_signup": {"$exists": False}}]})
+            conditions.append({
+                "$and": [
+                    {"is_signup": {"$ne": True}},
+                    {"email": {"$nin": signed_in_client_emails}}
+                ]
+            })
 
     if search:
         conditions.append({
@@ -115,18 +126,23 @@ async def list_clients(
     cursor = db["client_list"].find(query).sort("created_at", -1).skip(skip).limit(limit)
     raw_clients = await cursor.to_list(length=limit)
 
+    emails = [c.get("email").lower().strip() for c in raw_clients if c.get("email")]
+    user_signup_map = {}
+    if emails:
+        async for u in db["users"].find({"email": {"$in": emails}, "role": "client"}):
+            u_email = (u.get("email") or "").lower().strip()
+            user_signup_map[u_email] = bool(u.get("last_login"))
+
     clients = []
     for c in raw_clients:
-        client_is_signup = c.get("is_signup")
-        if client_is_signup is None:
-            user_doc = await db["users"].find_one({"email": c.get("email"), "role": "client"})
-            client_is_signup = bool(user_doc and user_doc.get("is_approved", True))
+        c_email = (c.get("email") or "").lower().strip()
+        client_is_signup = bool(c.get("is_signup") is True or user_signup_map.get(c_email, False))
 
         clients.append(ClientGridDropdownItem(
             id=str(c.get("_id") or c.get("id")),
             primary_contact_name=c.get("primary_contact_name", ""),
             company_name=c.get("company_name", ""),
-            is_signup=bool(client_is_signup)
+            is_signup=client_is_signup
         ))
 
     return ClientGridDropdownPaginatedResponse(
@@ -148,22 +164,22 @@ async def create_client(
         raise HTTPException(status_code=400, detail="Client with this email already exists")
 
     user_existing = await db["users"].find_one({"email": email_clean})
-    is_signup = bool(user_existing)
-    
     now = datetime.now(timezone.utc)
     temp_pwd = None
     
     # Auto-approve existing user if they are pending to avoid identity split / lockout
-    if user_existing and user_existing.get("role") == "client" and user_existing.get("approval_status") != "approved":
-        await db["users"].update_one(
-            {"_id": user_existing["_id"]},
-            {"$set": {
-                "is_approved": True,
-                "approval_status": "approved",
-                "is_active": True,
-                "updated_at": now
-            }}
-        )
+    if user_existing and user_existing.get("role") == "client":
+        if user_existing.get("approval_status") != "approved":
+            await db["users"].update_one(
+                {"_id": user_existing["_id"]},
+                {"$set": {
+                    "is_approved": True,
+                    "approval_status": "approved",
+                    "is_active": True,
+                    "updated_at": now
+                }}
+            )
+        is_signup = bool(user_existing.get("last_login"))
     elif not user_existing:
         # Create client user login credentials in users collection
         temp_pwd = generate_temporary_password()
@@ -183,9 +199,13 @@ async def create_client(
             "is_temporary_password": True,
             "temporary_password_created_at": now,
             "created_at": now,
-            "updated_at": now
+            "updated_at": now,
+            "last_login": None
         }
         await db["users"].insert_one(client_user_doc)
+        is_signup = False
+    else:
+        is_signup = bool(user_existing.get("last_login"))
 
     client_id = f"cli_{uuid.uuid4().hex[:10]}"
     doc = {
@@ -238,10 +258,21 @@ async def list_clients_grid(
     conditions = [{"status": {"$ne": "deleted"}}]
     
     if is_signup is not None:
+        signed_in_client_emails = await db["users"].distinct("email", {"role": "client", "last_login": {"$ne": None}})
         if is_signup:
-            conditions.append({"is_signup": True})
+            conditions.append({
+                "$or": [
+                    {"is_signup": True},
+                    {"email": {"$in": signed_in_client_emails}}
+                ]
+            })
         else:
-            conditions.append({"$or": [{"is_signup": False}, {"is_signup": {"$exists": False}}]})
+            conditions.append({
+                "$and": [
+                    {"is_signup": {"$ne": True}},
+                    {"email": {"$nin": signed_in_client_emails}}
+                ]
+            })
 
     if search:
         conditions.append({
@@ -259,7 +290,7 @@ async def list_clients_grid(
     raw_clients = await cursor.to_list(length=limit)
 
     client_ids = [str(c.get("_id") or c.get("id")) for c in raw_clients]
-    emails_needed = [c.get("email") for c in raw_clients if c.get("is_signup") is None and c.get("email")]
+    all_emails = [c.get("email").lower().strip() for c in raw_clients if c.get("email")]
 
     # Batch count locations by client_id in a single aggregation
     loc_count_map = {}
@@ -271,11 +302,12 @@ async def list_clients_grid(
         async for doc in db["locations"].aggregate(pipeline):
             loc_count_map[str(doc["_id"])] = doc["count"]
 
-    # Batch lookup users for signup status
+    # Batch lookup users for signup status (has user signed in at least once?)
     user_signup_map = {}
-    if emails_needed:
-        async for u in db["users"].find({"email": {"$in": emails_needed}, "role": "client"}):
-            user_signup_map[u.get("email")] = bool(u.get("is_approved", True))
+    if all_emails:
+        async for u in db["users"].find({"email": {"$in": all_emails}, "role": "client"}):
+            u_email = (u.get("email") or "").lower().strip()
+            user_signup_map[u_email] = bool(u.get("last_login"))
 
     items = []
     for c in raw_clients:
@@ -294,19 +326,35 @@ async def list_clients_grid(
             except Exception:
                 pass
 
-        is_signup = c.get("is_signup")
-        if is_signup is None:
-            is_signup = user_signup_map.get(c.get("email"), True)
+        c_email = (c.get("email") or "").lower().strip()
+        user_has_logged_in = user_signup_map.get(c_email, False)
+        is_client_signup = bool(c.get("is_signup") is True or user_has_logged_in)
+
+        # Status:
+        # If client has signed in (is_signup: True), ensure status is active
+        # If client has not signed in, default status is pending
+        st = c.get("status")
+        if is_client_signup:
+            st = st if (st and st != "pending") else "active"
+        else:
+            st = "pending" if st in ["pending", "active"] else (st or "pending")
+
+        # Background self-heal for client_list document
+        if c.get("is_signup") != is_client_signup or c.get("status") != st:
+            asyncio.create_task(db["client_list"].update_one(
+                {"_id": c["_id"]},
+                {"$set": {"is_signup": is_client_signup, "status": st, "updated_at": datetime.now(timezone.utc)}}
+            ))
 
         items.append(ClientOverviewItemResponse(
             id=cid,
             company_name=c.get("company_name", "Client Company"),
             industry=c.get("industry", "Corporate"),
-            status=c.get("status", "active"),
+            status=st,
             primary_contact_name=c.get("primary_contact_name", ""),
             email=c.get("email", ""),
             phone=c.get("phone", ""),
-            is_signup=bool(is_signup),
+            is_signup=is_client_signup,
             locations_count=loc_count,
             contract_status=contract_status,
             created_at=c.get("created_at") if isinstance(c.get("created_at"), datetime) else datetime.now(timezone.utc),
@@ -331,10 +379,21 @@ async def list_deleted_clients(
     db = get_database()
     conditions = [{"status": "deleted"}]
     if is_signup is not None:
+        signed_in_client_emails = await db["users"].distinct("email", {"role": "client", "last_login": {"$ne": None}})
         if is_signup:
-            conditions.append({"is_signup": True})
+            conditions.append({
+                "$or": [
+                    {"is_signup": True},
+                    {"email": {"$in": signed_in_client_emails}}
+                ]
+            })
         else:
-            conditions.append({"$or": [{"is_signup": False}, {"is_signup": {"$exists": False}}]})
+            conditions.append({
+                "$and": [
+                    {"is_signup": {"$ne": True}},
+                    {"email": {"$nin": signed_in_client_emails}}
+                ]
+            })
 
     if search:
         conditions.append({
@@ -350,12 +409,17 @@ async def list_deleted_clients(
     cursor = db["client_list"].find(query).sort("updated_at", -1).skip(skip).limit(limit)
     raw_clients = await cursor.to_list(length=limit)
 
+    all_emails = [c.get("email").lower().strip() for c in raw_clients if c.get("email")]
+    user_signup_map = {}
+    if all_emails:
+        async for u in db["users"].find({"email": {"$in": all_emails}, "role": "client"}):
+            u_email = (u.get("email") or "").lower().strip()
+            user_signup_map[u_email] = bool(u.get("last_login"))
+
     clients = []
     for c in raw_clients:
-        deleted_is_signup = c.get("is_signup")
-        if deleted_is_signup is None:
-            user_doc = await db["users"].find_one({"email": c.get("email"), "role": "client"})
-            deleted_is_signup = bool(user_doc and user_doc.get("is_approved", True))
+        c_email = (c.get("email") or "").lower().strip()
+        deleted_is_signup = bool(c.get("is_signup") is True or user_signup_map.get(c_email, False))
 
         clients.append(ClientOverviewItemResponse(
             id=str(c.get("_id") or c.get("id")),
@@ -365,11 +429,11 @@ async def list_deleted_clients(
             primary_contact_name=c.get("primary_contact_name", ""),
             email=c.get("email", ""),
             phone=c.get("phone", ""),
-            is_signup=bool(deleted_is_signup),
+            is_signup=deleted_is_signup,
             locations_count=c.get("total_locations_count", 0),
             contract_status=c.get("contract_status", "no_contract"),
-            created_at=c.get("created_at"),
-            updated_at=c.get("updated_at")
+            created_at=c.get("created_at") if isinstance(c.get("created_at"), datetime) else datetime.now(timezone.utc),
+            updated_at=c.get("updated_at") if isinstance(c.get("updated_at"), datetime) else datetime.now(timezone.utc)
         ))
 
     return ClientOverviewListPaginatedResponse(
