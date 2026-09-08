@@ -63,7 +63,7 @@ class WorkerInvoiceItem(BaseModel):
     deductions: float = Field(default=0.0, json_schema_extra={"example": 0.0})
     net_payout: float = Field(..., json_schema_extra={"example": 1391.25})
     currency: str = "EUR"
-    status: Literal["paid", "pending", "processing"] = "paid"
+    status: Literal["paid", "pending", "processing", "partial"] = "paid"
     payment_method: Optional[str] = "Bank Transfer"
     paid_at: Optional[datetime] = None
     download_url: Optional[str] = None
