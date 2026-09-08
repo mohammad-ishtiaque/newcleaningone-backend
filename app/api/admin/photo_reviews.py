@@ -443,6 +443,7 @@ async def reject_photo_review(
                         title=f"Photo Rejected: {photo_name}",
                         message=f"Your photo for '{photo_name}' in {room_name} was rejected. Reason: '{reject_in.reason}'. Please resubmit photo.",
                         notification_type="photo_rejected",
+                        route_type="roster",
                         recipient_type="worker",
                         data=notif_payload
                     )

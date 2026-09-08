@@ -4,7 +4,10 @@ from typing import Optional, List
 from fastapi import APIRouter, Depends, status, HTTPException
 from app.schemas.user import ClientSignup, ClientUpdate, ClientProfileResponse
 from app.schemas.help import LegalDocumentResponse
-from app.schemas.notification import NotificationListResponse
+from app.schemas.notification import (
+    NotificationListResponse, NotificationResponse,
+    NotificationBulkDeleteRequest, NotificationBulkDeleteResponse
+)
 from app.schemas.client_overview import (
     ClientOverviewResponse, TodaysOverallProgress, MetricsGrid, NextVisitCard, OnSiteNowCard, LastCompletedCard,
     LiveStatusSection, SpecialistOnSiteItem, NextVisitorItem, QuickActionItem
@@ -101,6 +104,32 @@ async def get_client_notifications(
 ):
     service = NotificationService()
     return await service.get_user_notifications(user_id=current_user.id, recipient_type="client", page=page, limit=limit)
+
+@router.post("/notifications/bulk-delete", response_model=NotificationBulkDeleteResponse, summary="Bulk Delete Notifications")
+async def bulk_delete_client_notifications(
+    payload: NotificationBulkDeleteRequest,
+    current_user: UserInDB = Depends(require_client)
+):
+    service = NotificationService()
+    count = await service.bulk_delete_notifications(
+        user_id=str(current_user.id),
+        recipient_type="client",
+        notification_ids=payload.notification_ids,
+        delete_all=payload.delete_all
+    )
+    return NotificationBulkDeleteResponse(deleted_count=count, message=f"{count} notification(s) deleted")
+
+
+@router.get("/notifications/{notification_id}", response_model=NotificationResponse, summary="Get Single Notification Details")
+async def get_client_notification_detail(
+    notification_id: str,
+    current_user: UserInDB = Depends(require_client)
+):
+    service = NotificationService()
+    doc = await service.get_notification_detail(notification_id=notification_id, user_id=str(current_user.id))
+    if not doc:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return doc
 
 @router.patch("/notifications/{notification_id}/read")
 async def mark_client_notification_read(
@@ -549,7 +578,13 @@ async def submit_client_support_message(
         title=f"New Client Support Ticket: {msg_in.subject}",
         message=f"{current_user.full_name} sent an inquiry: {msg_in.description[:100]}",
         notification_type="support",
-        recipient_type="manager"
+        route_type="settings",
+        recipient_type="manager",
+        data={
+            "support_message_id": sup_id,
+            "route": "/manager/support-messages",
+            "deeplink": f"cleaningone://manager/support-messages?id={sup_id}"
+        }
     )
 
     return ClientSupportMessageResponse(

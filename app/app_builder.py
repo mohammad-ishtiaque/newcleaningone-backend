@@ -54,6 +54,7 @@ def create_app(service_name: str = "all") -> FastAPI:
         "http://localhost:8084",
         "http://localhost:3000",
         "http://localhost:5173",
+        "http://10.10.28.195:3000",
         "*"
     ]
     

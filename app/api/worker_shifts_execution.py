@@ -350,12 +350,15 @@ async def submit_photo_for_review(
                 title="New Photo Submitted for Review",
                 message=f"{getattr(current_user, 'full_name', 'Worker')} submitted photo for '{target_photo_name}' in {target_room_name}.",
                 notification_type="photo_review",
+                route_type="photo_reviews",
                 recipient_type="admin",
                 data={
                     "review_id": review_id,
                     "shift_id": shift_id,
                     "photo_id": target_photo_id,
-                    "photo_url": target_photo_url
+                    "photo_url": target_photo_url,
+                    "route": f"/manager/photo-reviews/{review_id}",
+                    "deeplink": f"cleaningone://manager/photo-reviews/{review_id}"
                 }
             )
 

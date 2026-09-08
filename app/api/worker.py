@@ -17,7 +17,10 @@ from app.dependencies.auth import get_current_user
 from app.models.user import UserInDB, RoleEnum, WorkerTypeEnum
 from app.services.s3_service import S3Service
 from app.api.profile import process_image
-from app.schemas.notification import NotificationListResponse, NotificationResponse
+from app.schemas.notification import (
+    NotificationListResponse, NotificationResponse,
+    NotificationBulkDeleteRequest, NotificationBulkDeleteResponse
+)
 from app.services.notification_service import NotificationService
 from app.services.faq_service import FAQService
 
@@ -509,6 +512,21 @@ async def send_support_message(
     doc = support_msg.model_dump(by_alias=True, exclude={"id"})
     res = await db["support_messages"].insert_one(doc)
     doc["_id"] = str(res.inserted_id)
+
+    from app.services.notification_service import NotificationService
+    await NotificationService().create_notification(
+        title=f"New Worker Support Ticket: {message.subject}",
+        message=f"{current_user.full_name} sent an inquiry: {message.description[:100]}",
+        notification_type="support",
+        route_type="settings",
+        recipient_type="manager",
+        data={
+            "support_message_id": str(res.inserted_id),
+            "route": "/manager/support-messages",
+            "deeplink": f"cleaningone://manager/support-messages?id={res.inserted_id}"
+        }
+    )
+
     return SupportMessageResponse(**doc)
 
 @router.get("/help/messages", response_model=WorkerSupportListResponse)
@@ -609,6 +627,22 @@ async def get_worker_notifications(
     worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "")
     service = NotificationService()
     return await service.get_user_notifications(user_id=worker_id, recipient_type="worker", page=page, limit=limit)
+
+
+@router.post("/notifications/bulk-delete", response_model=NotificationBulkDeleteResponse, summary="Bulk Delete Notifications")
+async def bulk_delete_worker_notifications(
+    payload: NotificationBulkDeleteRequest,
+    current_user: UserInDB = Depends(require_worker)
+):
+    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "")
+    service = NotificationService()
+    count = await service.bulk_delete_notifications(
+        user_id=worker_id,
+        recipient_type="worker",
+        notification_ids=payload.notification_ids,
+        delete_all=payload.delete_all
+    )
+    return NotificationBulkDeleteResponse(deleted_count=count, message=f"{count} notification(s) deleted")
 
 
 @router.get("/notifications/{notification_id}", response_model=NotificationResponse, summary="Get Single Notification Details")

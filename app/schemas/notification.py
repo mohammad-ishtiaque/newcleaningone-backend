@@ -10,6 +10,7 @@ class NotificationResponse(BaseModel):
     title: str
     message: str
     notification_type: str
+    route_type: str = "general"
     plan_id: Optional[str] = None
     data: Optional[dict] = None
     is_read: bool = False
@@ -29,10 +30,20 @@ class AdminNotificationItem(BaseModel):
     message: str
     time_ago: str
     notification_type: str
+    route_type: str = "general"
+    data: Optional[dict] = None
     is_read: bool = False
     created_at: datetime
 
 class AdminNotificationCenterResponse(BasePaginatedResponse):
     unread_count: int = 0
     notifications: List[AdminNotificationItem] = Field(default_factory=list)
+
+class NotificationBulkDeleteRequest(BaseModel):
+    notification_ids: Optional[List[str]] = Field(default=None, description="Specific notification IDs to delete. Ignored if delete_all is true.")
+    delete_all: bool = Field(default=False, description="Delete every notification visible to the caller, ignoring notification_ids.")
+
+class NotificationBulkDeleteResponse(BaseModel):
+    deleted_count: int
+    message: str
 

@@ -10,6 +10,7 @@ class NotificationDB(BaseModel):
     title: str
     message: str
     notification_type: str = "general" # legal_update, support_reply, shift_assignment, general
+    route_type: str = "general" # broad screen category for frontend routing: chat, schedule, escalation, review, support, account, invoice, general
     plan_id: Optional[str] = None
     data: Optional[dict] = Field(default_factory=dict)
     is_read: bool = False

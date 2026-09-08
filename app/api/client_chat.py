@@ -11,14 +11,14 @@ from app.services.chat_service import (
     get_user_id, format_conversation_list_item, format_conversation_detail,
     format_conversation, format_message, resolve_participant_profile,
     get_conversation_participants_details, get_or_create_client_admin_conversation,
-    mark_conversation_read_shared_management
+    mark_conversation_read_shared_management, get_total_unread_count
 )
 from app.schemas.chat import (
     ConversationResponse, ConversationListItemResponse,
     ConversationDetailResponse, MessageCreate, MessageUpdate,
     MessageResponse, PaginatedMessagesResponse, ParticipantProfileResponse,
     AttachmentUploadResponse, PaginatedConversationsResponse,
-    ConversationParticipantsResponse
+    ConversationParticipantsResponse, DeleteConversationResponse
 )
 
 router = APIRouter(prefix="/client/chat", tags=["Client Chat Management"])
@@ -57,12 +57,14 @@ async def list_client_conversations(
 
     convs_res = [format_conversation_list_item(c, current_user_id=client_id, viewer_role="client") for c in raw_convs]
     has_more = (skip + len(convs_res)) < total_count
+    total_unread = await get_total_unread_count(db, client_id)
 
     return PaginatedConversationsResponse(
         total_count=total_count,
         page=page,
         limit=limit,
         has_more=has_more,
+        unread_count=total_unread,
         conversations=convs_res
     )
 
@@ -112,6 +114,48 @@ async def get_client_conversation_detail(
     if not doc:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return format_conversation_detail(doc, current_user_id=client_id, viewer_role="client")
+
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    response_model=DeleteConversationResponse,
+    summary="Client Delete Conversation",
+    description="Permanently deletes the conversation and all its messages for every participant (client, admins, and managers)."
+)
+async def delete_client_conversation(
+    conversation_id: str,
+    current_user: UserInDB = Depends(require_client)
+):
+    """
+    Client Delete Conversation Endpoint.
+    """
+    db = get_database()
+    client_id = get_user_id(current_user)
+    doc = await db["conversations"].find_one({"$or": [{"_id": conversation_id}, {"id": conversation_id}]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    participant_uids = [str(p.get("user_id")) for p in doc.get("participants", []) if p.get("user_id")]
+    if client_id not in participant_uids:
+        raise HTTPException(status_code=403, detail="You are not a participant in this conversation")
+
+    await db["conversations"].delete_one({"_id": doc["_id"]})
+    await db["chat_messages"].delete_many({"conversation_id": conversation_id})
+
+    try:
+        from app.api.chat import ws_manager
+        await ws_manager.broadcast_to_users({
+            "type": "conversation_deleted",
+            "conversation_id": conversation_id,
+            "deleted_by": client_id
+        }, participant_uids)
+    except Exception:
+        pass
+
+    return DeleteConversationResponse(
+        message="Conversation and all associated messages deleted successfully",
+        conversation_id=conversation_id
+    )
 
 
 @router.get(
@@ -287,6 +331,11 @@ async def send_client_message(
 
     from app.services.chat_ws_service import broadcast_new_message
     await broadcast_new_message(db, str(conv_doc["_id"]), msg_doc)
+
+    from app.services.chat_service import notify_new_chat_message
+    await notify_new_chat_message(
+        db, str(conv_doc["_id"]), client_id, sender_name, last_text, other_uids
+    )
 
     return format_message(msg_doc)
 

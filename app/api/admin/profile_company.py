@@ -135,6 +135,13 @@ async def update_legal_document(
     )
 
     updated_doc = await db["legal_documents"].find_one({"type": type})
+
+    from app.services.notification_service import NotificationService
+    await NotificationService().notify_legal_document_update(
+        doc_type=type,
+        title=updated_doc.get("title", "Privacy Policy" if type == "privacy_policy" else "Terms and Conditions")
+    )
+
     return LegalDocumentResponse(
         type=updated_doc.get("type", type),
         title=updated_doc.get("title", ""),
@@ -236,6 +243,19 @@ async def reply_support_message(
     created_at = updated.get("created_at")
     if not isinstance(created_at, datetime):
         created_at = now
+
+    # Notify whichever role actually owns this ticket - support tickets are
+    # submitted by both workers (worker_id) and clients (client_id).
+    recipient_id = w_id or str(updated.get("client_id", ""))
+    recipient_role = "worker" if w_id else "client"
+    if recipient_id:
+        from app.services.notification_service import NotificationService
+        await NotificationService().notify_support_reply(
+            user_id=recipient_id,
+            subject=updated.get("subject", ""),
+            message_id=str(updated.get("_id")),
+            recipient_role=recipient_role
+        )
 
     return SupportMessageResponse(
         id=str(updated.get("_id")),

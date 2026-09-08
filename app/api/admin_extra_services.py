@@ -587,6 +587,7 @@ async def send_extra_service_assignment_notifications(
             title=title,
             message=message,
             notification_type="extra_service_assignment",
+            route_type="extra_services",
             recipient_type="worker",
             user_id=wid,
             player_ids=player_ids if player_ids else None,

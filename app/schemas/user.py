@@ -335,6 +335,43 @@ class WorkerApprovalResponse(BaseModel):
 class WorkerApprovalPaginatedResponse(BasePaginatedResponse):
     pending_approvals: List[WorkerApprovalResponse]
 
+class WorkerShiftsSummary(BaseModel):
+    completed: int = 0
+    in_progress: int = 0
+    upcoming: int = 0
+
+class WorkerShiftRow(BaseModel):
+    shift_id: str
+    date: str
+    location: str
+    hours: str
+    hours_numeric: float = 0.0
+    status: str
+
+class WorkerAttendanceSummary(BaseModel):
+    this_month_hours: str = "0h"
+    this_month_hours_numeric: float = 0.0
+    late_days: int = 0
+    absent_days: int = 0
+
+class WorkerAttendanceRow(BaseModel):
+    shift_id: str
+    date: str
+    check_in: str
+    check_out: str
+    hours: str
+    hours_numeric: float = 0.0
+    status: str
+
+class WorkerDocumentItem(BaseModel):
+    name: str
+    type: str
+    url: Optional[str] = None
+
+class WorkerDocumentUploadResponse(BaseModel):
+    document: WorkerDocumentItem
+    documents: List[WorkerDocumentItem]
+
 class WorkerDetailResponse(BaseModel):
     id: str
     worker_id: str
@@ -362,6 +399,11 @@ class WorkerDetailResponse(BaseModel):
     completed_shifts_count: int = 0
     rating: float = 5.0
     hourly_rate: float = 25.0
+    shifts_summary: WorkerShiftsSummary = Field(default_factory=WorkerShiftsSummary)
+    shifts: List[WorkerShiftRow] = Field(default_factory=list)
+    attendance_summary: WorkerAttendanceSummary = Field(default_factory=WorkerAttendanceSummary)
+    attendance: List[WorkerAttendanceRow] = Field(default_factory=list)
+    documents: List[WorkerDocumentItem] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

@@ -13,6 +13,7 @@ class NotificationService:
         self,
         title: str,
         message: str,
+        route_type: str,
         notification_type: str = "general",
         recipient_type: str = "all",
         user_id: Optional[str] = None,
@@ -27,6 +28,7 @@ class NotificationService:
             title=title,
             message=message,
             notification_type=notification_type,
+            route_type=route_type,
             plan_id=plan_id,
             data=data or {}
         )
@@ -40,6 +42,7 @@ class NotificationService:
             if plan_id:
                 push_data["plan_id"] = plan_id
             push_data["notification_type"] = notification_type
+            push_data["route_type"] = route_type
             
             is_broadcast = (recipient_type == "all" and not user_id)
             ext_ids = [str(user_id)] if user_id else None
@@ -164,6 +167,33 @@ class NotificationService:
     async def delete_notification(self, notification_id: str, user_id: str) -> bool:
         return await self.delete_user_notification(notification_id, user_id)
 
+    async def bulk_delete_notifications(
+        self,
+        user_id: str,
+        recipient_type: str,
+        notification_ids: Optional[List[str]] = None,
+        delete_all: bool = False
+    ) -> int:
+        """
+        Deletes many notifications in one call - either a specific set of IDs
+        (multi-select) or every notification currently visible to this user
+        (select-all), reusing the same per-user delete semantics as a single
+        delete (hard-delete when they own it, otherwise recorded in
+        deleted_by so a shared/broadcast notification still exists for
+        other recipients).
+        """
+        if delete_all:
+            visible = await self.get_user_notifications(user_id=user_id, recipient_type=recipient_type, page=1, limit=100000)
+            ids = [str(n.get("_id")) for n in visible.get("notifications", [])]
+        else:
+            ids = notification_ids or []
+
+        deleted_count = 0
+        for nid in ids:
+            if await self.delete_user_notification(nid, user_id):
+                deleted_count += 1
+        return deleted_count
+
     async def get_notification_detail(self, notification_id: str, user_id: str) -> Optional[dict]:
         db = get_database()
         try:
@@ -210,31 +240,55 @@ class NotificationService:
             if pid:
                 player_ids.append(pid)
 
+        worker_route = "/worker/privacy-policy" if doc_type == "privacy_policy" else "/worker/terms-and-conditions"
+        client_route = "/client/privacy-policy" if doc_type == "privacy_policy" else "/client/terms-and-conditions"
+
         await self.create_notification(
             title=heading,
             message=body,
             notification_type="legal_update",
+            route_type=doc_type,
             recipient_type="all",
-            player_ids=player_ids if player_ids else None
+            player_ids=player_ids if player_ids else None,
+            data={
+                "doc_type": doc_type,
+                # Two roles read this broadcast and each has its own screen path,
+                # so the client picks whichever route matches its own role.
+                "worker_route": worker_route,
+                "client_route": client_route,
+                "worker_deeplink": f"cleaningone://{worker_route.lstrip('/')}",
+                "client_deeplink": f"cleaningone://{client_route.lstrip('/')}"
+            }
         )
 
-    async def notify_support_reply(self, worker_id: str, subject: str):
+    async def notify_support_reply(self, user_id: str, subject: str, message_id: str, recipient_role: str = "worker"):
         db = get_database()
-        worker = await db["users"].find_one({"_id": ObjectId(worker_id)}) if ObjectId.is_valid(worker_id) else await db["users"].find_one({"_id": worker_id})
+        user_doc = await db["users"].find_one({"_id": ObjectId(user_id)}) if ObjectId.is_valid(user_id) else await db["users"].find_one({"_id": user_id})
         player_ids = None
-        if worker and worker.get("onesignal_player_id"):
-            player_ids = [worker["onesignal_player_id"]]
+        if user_doc and user_doc.get("onesignal_player_id"):
+            player_ids = [user_doc["onesignal_player_id"]]
 
         heading = "Support Message Reply"
         body = f"Admin has replied to your support request: '{subject}'"
-        
+
+        if recipient_role == "client":
+            route = "/client/support/messages"
+        else:
+            route = f"/worker/help/messages/{message_id}"
+
         await self.create_notification(
             title=heading,
             message=body,
             notification_type="support_reply",
-            recipient_type="worker",
-            user_id=worker_id,
-            player_ids=player_ids
+            route_type="support",
+            recipient_type=recipient_role,
+            user_id=user_id,
+            player_ids=player_ids,
+            data={
+                "support_message_id": message_id,
+                "route": route,
+                "deeplink": f"cleaningone://{route.lstrip('/')}"
+            }
         )
 
     async def notify_escalation_status_changed(
@@ -301,7 +355,9 @@ class NotificationService:
             "status": new_status,
             "notes": notes,
             "manager_name": manager_name,
-            "shift_id": escalation.get("shift_id")
+            "shift_id": escalation.get("shift_id"),
+            "route": f"/worker/escalations/{esc_id}",
+            "deeplink": f"cleaningone://worker/escalations/{esc_id}"
         }
 
         # 1. Create in-app notification & send OneSignal push
@@ -309,6 +365,7 @@ class NotificationService:
             title=heading,
             message=body,
             notification_type=notif_type,
+            route_type="escalations",
             recipient_type="worker",
             user_id=worker_id,
             player_ids=player_ids if player_ids else None,
@@ -354,7 +411,9 @@ class NotificationService:
             "escalation_id": esc_id,
             "severity": escalation.get("severity", "high"),
             "status": "open",
-            "shift_id": escalation.get("shift_id")
+            "shift_id": escalation.get("shift_id"),
+            "route": f"/manager/escalations/{esc_id}",
+            "deeplink": f"cleaningone://manager/escalations/{esc_id}"
         }
 
         # Collect manager player IDs
@@ -368,6 +427,7 @@ class NotificationService:
             title=heading,
             message=body,
             notification_type="escalation_created",
+            route_type="escalations",
             recipient_type="manager",
             player_ids=player_ids if player_ids else None,
             data=extra_data

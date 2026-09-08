@@ -13,6 +13,24 @@ def get_user_id(user: UserInDB) -> str:
     """Helper to extract string user ID cleanly."""
     return str(getattr(user, "id", None) or getattr(user, "_id", None) or getattr(user, "mongo_id", None) or "user_default")
 
+async def get_total_unread_count(db, user_id: str) -> int:
+    """
+    Sums the per-conversation unread_counts.<user_id> field across every
+    conversation the user participates in, for a single global badge count.
+    Mirrors the per-item lookup in _extract_conv_base so the sum always
+    matches what each conversation list item reports individually.
+    """
+    total = 0
+    cursor = db["conversations"].find(
+        {"participants.user_id": user_id},
+        {"unread_counts": 1}
+    )
+    async for doc in cursor:
+        unread_dict = doc.get("unread_counts") or {}
+        if isinstance(unread_dict, dict):
+            total += unread_dict.get(user_id, 0)
+    return total
+
 def build_user_id_or_query(user_ids: List[str]) -> List[dict]:
     """Builds MongoDB query clauses to match string IDs or ObjectIds."""
     clean_ids = [str(u).strip() for u in user_ids if str(u).strip()]

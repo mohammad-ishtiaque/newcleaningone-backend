@@ -636,6 +636,7 @@ async def send_cleaning_plan_assignment_notifications(plan_doc: dict, assigned_w
         }
         notif_doc = await notif_service.create_notification(
             title=title, message=message, notification_type="shift_assignment",
+            route_type="roster",
             recipient_type="worker", user_id=wid, player_ids=player_ids or None,
             plan_id=plan_id, data=rich_data
         )

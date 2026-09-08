@@ -61,13 +61,13 @@ def _format_client_response(doc: dict, temporary_password: Optional[str] = None)
         id=c_id,
         _id=c_id,
         admin=admin_info,
-        company_name=doc.get("company_name", ""),
+        company_name=doc.get("company_name") or "",
         industry=doc.get("industry", "Corporate"),
         status=doc.get("status", "active"),
-        primary_contact_name=doc.get("primary_contact_name", ""),
-        name=doc.get("primary_contact_name", ""),
-        email=doc.get("email", ""),
-        phone=doc.get("phone", ""),
+        primary_contact_name=doc.get("primary_contact_name") or "",
+        name=doc.get("primary_contact_name") or "",
+        email=doc.get("email") or "",
+        phone=doc.get("phone") or "",
         is_signup=doc.get("is_signup", False),
         temporary_password=temporary_password,
         locations_count=doc.get("total_locations_count", 0),
@@ -675,11 +675,11 @@ async def approve_client_signup(
                 "name": current_user.full_name,
                 "profile_picture": current_user.profile_photo
             },
-            "company_name": user.get("company_name", ""),
+            "company_name": user.get("company_name") or "",
             "industry": "Corporate",
-            "primary_contact_name": user.get("full_name", ""),
-            "email": user.get("email", ""),
-            "phone": user.get("phone", ""),
+            "primary_contact_name": user.get("full_name") or "",
+            "email": user.get("email") or "",
+            "phone": user.get("phone") or "",
             "status": "active",
             "is_signup": True,
             "license_expiration_date": approve_in.license_expiration_date,
@@ -713,9 +713,14 @@ async def approve_client_signup(
         title="Account Approved",
         message="Your client account has been approved by the admin. You can now login.",
         notification_type="account_approved",
+        route_type="overview",
         recipient_type="client",
         user_id=str(user.get("_id", user_id)),
-        player_ids=player_ids
+        player_ids=player_ids,
+        data={
+            "route": "/client/overview",
+            "deeplink": "cleaningone://client/overview"
+        }
     )
     
     await ws_manager.broadcast_to_users({
@@ -778,9 +783,14 @@ async def reject_client_signup(
         title="Account Rejected",
         message=reject_msg,
         notification_type="account_rejected",
+        route_type="overview",
         recipient_type="client",
         user_id=str(user.get("_id", user_id)),
-        player_ids=player_ids
+        player_ids=player_ids,
+        data={
+            "route": "/client/overview",
+            "deeplink": "cleaningone://client/overview"
+        }
     )
 
     await ws_manager.broadcast_to_users({

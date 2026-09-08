@@ -12,7 +12,7 @@ from app.services.chat_formatters import (
     get_user_id, build_user_id_or_query, build_user_map, resolve_conversation_type,
     _extract_conv_base, format_conversation_list_item, format_conversation_detail,
     format_conversation, format_message, resolve_participant_profile,
-    get_conversation_participants_details
+    get_conversation_participants_details, get_total_unread_count
 )
 
 
@@ -771,3 +771,71 @@ async def remove_conversation_participant(
         "removed_user_id": str(target_user_id),
         "remaining_participants_count": len(updated_participants)
     }
+
+
+def _chat_route_for_role(role: str, conversation_id: str) -> str:
+    """Each role has its own chat prefix, so the same conversation is opened
+    from a different path depending on which app the recipient is on."""
+    role = (role or "").lower()
+    if role == "worker":
+        return f"/worker/chat/conversations/{conversation_id}"
+    if role == "client":
+        return f"/client/chat/conversations/{conversation_id}"
+    return f"/manager/chat/conversations/{conversation_id}"
+
+
+async def notify_new_chat_message(
+    db,
+    conversation_id: str,
+    sender_id: str,
+    sender_name: str,
+    message_preview: str,
+    recipient_uids: List[str]
+) -> None:
+    """
+    Creates a persistent, clickable in-app notification (route_type="chat")
+    for every other participant of a conversation when a new message arrives,
+    on top of the existing WebSocket broadcast + per-conversation unread badge.
+    Without this, a recipient who wasn't online at send time had no record of
+    the message anywhere in their notification center.
+    """
+    if not recipient_uids:
+        return
+
+    from app.services.notification_service import NotificationService
+    notif_service = NotificationService()
+
+    recipients = await db["users"].find(
+        {"$or": build_user_id_or_query(recipient_uids)},
+        {"role": 1, "onesignal_player_id": 1}
+    ).to_list(length=len(recipient_uids))
+    role_map = build_user_map(recipients)
+
+    preview = (message_preview or "").strip()
+    if len(preview) > 120:
+        preview = preview[:117] + "..."
+    if not preview:
+        preview = "Sent an attachment"
+
+    for uid in recipient_uids:
+        recipient_doc = role_map.get(str(uid))
+        recipient_role = (recipient_doc.get("role") if recipient_doc else None) or "worker"
+        player_id = recipient_doc.get("onesignal_player_id") if recipient_doc else None
+        route = _chat_route_for_role(recipient_role, conversation_id)
+
+        await notif_service.create_notification(
+            title=f"New message from {sender_name}",
+            message=preview,
+            notification_type="new_message",
+            route_type="chat",
+            recipient_type=recipient_role,
+            user_id=str(uid),
+            player_ids=[player_id] if player_id else None,
+            data={
+                "conversation_id": conversation_id,
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "route": route,
+                "deeplink": f"cleaningone://{route.lstrip('/')}"
+            }
+        )

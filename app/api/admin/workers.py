@@ -1,7 +1,7 @@
 import uuid
 import asyncio
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, status, HTTPException, File, UploadFile, Response
+from fastapi import APIRouter, Depends, status, HTTPException, File, UploadFile, Response, Form
 from typing import List, Optional
 from bson import ObjectId
 from app.core.database import get_database
@@ -17,11 +17,13 @@ from app.schemas.user import (
     WorkerApproveRequest, WorkerRejectRequest,
     WorkerListItem, WorkerListPaginatedResponse,
     AdminWorkerCreate, AdminWorkerUpdate, AdminWorkerStatusUpdate, AdminWorkerTableItem, AdminWorkerTablePaginatedResponse,
-    WorkerBulkImportResult
+    WorkerBulkImportResult, WorkerDocumentUploadResponse, WorkerDocumentItem
 )
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
 from app.api.admin.worker_csv_utils import generate_csv_template, parse_and_validate_worker_csv, export_workers_to_csv
+from app.api.admin.worker_approvals import _build_worker_documents
+from app.services.s3_service import S3Service
 
 worker_mgmt_router = APIRouter(prefix="/manager", tags=["Manager Worker Management"])
 
@@ -216,6 +218,9 @@ async def create_new_worker(
         "is_active": worker_in.status.lower() == "active",
         "national_id": worker_in.national_id,
         "certificates": worker_in.certificates or [],
+        "id_card_front": worker_in.national_id_front,
+        "id_card_back": worker_in.national_id_back,
+        "employee_contract_pdf": worker_in.employee_contract_pdf,
         "created_at": now,
         "updated_at": now
     }
@@ -319,6 +324,12 @@ async def update_worker_details(
         set_fields["national_id"] = update_in.national_id
     if update_in.certificates is not None:
         set_fields["certificates"] = update_in.certificates
+    if update_in.national_id_front is not None:
+        set_fields["id_card_front"] = update_in.national_id_front
+    if update_in.national_id_back is not None:
+        set_fields["id_card_back"] = update_in.national_id_back
+    if update_in.employee_contract_pdf is not None:
+        set_fields["employee_contract_pdf"] = update_in.employee_contract_pdf
 
     await db["users"].update_one({"_id": user_doc["_id"]}, {"$set": set_fields})
     updated = await db["users"].find_one({"_id": user_doc["_id"]})
@@ -365,6 +376,79 @@ async def update_worker_details(
         account_status=updated.get("account_status", "active"),
         approval_status=updated.get("approval_status", "approved"),
         is_active=updated.get("is_active", True)
+    )
+
+
+DOCUMENT_FIELD_MAP = {
+    "id_card_front": "id_card_front",
+    "id_card_back": "id_card_back",
+    "employee_contract_pdf": "employee_contract_pdf",
+}
+
+@worker_mgmt_router.post(
+    "/workers/{worker_id}/documents",
+    response_model=WorkerDocumentUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload Worker Document to S3",
+    description=(
+        "Uploads a real file (ID card front/back, employee contract, or a certificate) to S3 and "
+        "attaches it to the worker's record. This is the endpoint the admin panel's Documents tab "
+        "should call - `POST /manager/workers` and `PATCH /manager/workers/{worker_id}` only accept "
+        "pre-existing URL strings for these fields, they do not upload files themselves.\n\n"
+        "`document_type` must be one of: `id_card_front`, `id_card_back`, `employee_contract_pdf`, `certificate`. "
+        "The first three replace that single field; `certificate` appends to the worker's certificates list."
+    )
+)
+async def upload_worker_document(
+    worker_id: str,
+    document_type: str = Form(...),
+    file: UploadFile = File(...),
+    current_user: UserInDB = Depends(require_manager)
+):
+    if document_type not in ("id_card_front", "id_card_back", "employee_contract_pdf", "certificate"):
+        raise HTTPException(status_code=400, detail="document_type must be one of: id_card_front, id_card_back, employee_contract_pdf, certificate")
+
+    db = get_database()
+    query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"$or": [{"_id": worker_id}, {"id": worker_id}]}
+    user_doc = await db["users"].find_one({"$and": [query, {"role": "worker"}]})
+    if not user_doc:
+        raise HTTPException(status_code=404, detail="Worker not found")
+
+    s3_service = S3Service()
+    file_bytes = await file.read()
+    url = await s3_service.upload_file(file_bytes, file.filename or "document", file.content_type or "application/octet-stream")
+    if not url:
+        raise HTTPException(status_code=502, detail="Upload to S3 failed - check AWS credentials, bucket name, and region")
+
+    now = datetime.now(timezone.utc)
+    if document_type == "certificate":
+        await db["users"].update_one({"_id": user_doc["_id"]}, {"$push": {"certificates": url}, "$set": {"updated_at": now}})
+    else:
+        field = DOCUMENT_FIELD_MAP[document_type]
+        old_url = user_doc.get(field)
+        await db["users"].update_one({"_id": user_doc["_id"]}, {"$set": {field: url, "updated_at": now}})
+        # Updating a document replaces the field, but the file it used to point
+        # to would otherwise sit in S3 forever as an unreferenced, unbilled-for
+        # orphan - clean it up now that the new one is safely saved.
+        if old_url and old_url != url:
+            try:
+                await s3_service.delete_file(old_url)
+            except Exception:
+                pass
+
+    updated = await db["users"].find_one({"_id": user_doc["_id"]})
+    all_documents = _build_worker_documents(updated, updated.get("onboarding_draft") or {})
+
+    doc_name_map = {
+        "id_card_front": "ID Card Front",
+        "id_card_back": "ID Card Back",
+        "employee_contract_pdf": "Employment Contract",
+        "certificate": f"Certificate {len(updated.get('certificates') or [])}"
+    }
+
+    return WorkerDocumentUploadResponse(
+        document=WorkerDocumentItem(name=doc_name_map[document_type], type=document_type, url=url),
+        documents=all_documents
     )
 
 

@@ -164,4 +164,5 @@ class DeleteConversationResponse(BaseModel):
     conversation_id: str
 
 class PaginatedConversationsResponse(BasePaginatedResponse):
+    unread_count: int = 0
     conversations: List[ConversationListItemResponse] = Field(default_factory=list)

@@ -527,8 +527,14 @@ async def create_worker_invoice(
         title="Payout Processed",
         message=f"A salary payout of EUR {amount_paid:.2f} has been issued for {month_label}. Invoice: {inv_number}",
         notification_type="invoice_issued",
+        route_type="invoices",
         recipient_type="worker",
-        user_id=w_uid
+        user_id=w_uid,
+        data={
+            "invoice_id": inv_raw_id,
+            "route": "/worker/invoices",
+            "deeplink": "cleaningone://worker/invoices"
+        }
     )
 
     return _format_invoice_detail(inv_doc, shifts_included=shifts_included)

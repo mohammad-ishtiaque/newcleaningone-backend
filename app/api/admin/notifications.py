@@ -5,7 +5,8 @@ from typing import List, Optional
 from bson import ObjectId
 from app.core.database import get_database
 from app.schemas.notification import (
-    AdminNotificationCenterResponse, AdminNotificationItem
+    AdminNotificationCenterResponse, AdminNotificationItem,
+    NotificationBulkDeleteRequest, NotificationBulkDeleteResponse
 )
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
@@ -21,12 +22,17 @@ async def get_admin_notification_center(
     db = get_database()
     admin_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or "admin_1")
 
-    query = {"recipient_type": "admin"}
-    total_count = await db["notifications"].count_documents(query)
-    unread_count = await db["notifications"].count_documents({"recipient_type": "admin", "is_read": False})
+    # Manager-facing notifications are created under a mix of recipient_type
+    # values ("admin", "manager") plus broadcast "all" messages (e.g. legal
+    # document updates) - matching only "admin" silently hid every
+    # recipient_type="manager" notification (escalations, support tickets, etc.)
+    # from this center even though push/WebSocket alerts still fired for them.
+    recipient_filter = {"recipient_type": {"$in": ["admin", "manager", "all"]}}
+    total_count = await db["notifications"].count_documents(recipient_filter)
+    unread_count = await db["notifications"].count_documents({**recipient_filter, "is_read": False})
 
     skip = (page - 1) * limit
-    cursor = db["notifications"].find(query).sort("created_at", -1).skip(skip).limit(limit)
+    cursor = db["notifications"].find(recipient_filter).sort("created_at", -1).skip(skip).limit(limit)
     raw_notifs = await cursor.to_list(length=limit)
 
     items = []
@@ -44,6 +50,8 @@ async def get_admin_notification_center(
             message=n.get("message", n.get("content", "")),
             time_ago=t_str,
             notification_type=n.get("notification_type", "general"),
+            route_type=n.get("route_type", "general"),
+            data=n.get("data") or {},
             is_read=n.get("is_read", False),
             created_at=c_dt
         ))
@@ -64,7 +72,7 @@ async def mark_all_admin_notifications_read(
     now = datetime.now(timezone.utc)
 
     await db["notifications"].update_many(
-        {"recipient_type": "admin", "is_read": False},
+        {"recipient_type": {"$in": ["admin", "manager", "all"]}, "is_read": False},
         {"$set": {"is_read": True, "read_at": now}}
     )
 
@@ -114,3 +122,25 @@ async def delete_admin_notification(
         "notification_id": notification_id,
         "message": "Notification dismissed successfully."
     }
+
+@admin_notifications_router.post("/notifications/bulk-delete", response_model=NotificationBulkDeleteResponse, summary="Bulk Delete Notifications")
+async def bulk_delete_admin_notifications(
+    payload: NotificationBulkDeleteRequest,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+
+    if payload.delete_all:
+        query = {"recipient_type": {"$in": ["admin", "manager", "all"]}}
+    else:
+        ids = payload.notification_ids or []
+        if not ids:
+            return NotificationBulkDeleteResponse(deleted_count=0, message="0 notification(s) deleted")
+        obj_ids = [ObjectId(i) for i in ids if ObjectId.is_valid(i)]
+        or_clauses = [{"_id": {"$in": ids}}, {"id": {"$in": ids}}]
+        if obj_ids:
+            or_clauses.append({"_id": {"$in": obj_ids}})
+        query = {"$or": or_clauses}
+
+    result = await db["notifications"].delete_many(query)
+    return NotificationBulkDeleteResponse(deleted_count=result.deleted_count, message=f"{result.deleted_count} notification(s) deleted")

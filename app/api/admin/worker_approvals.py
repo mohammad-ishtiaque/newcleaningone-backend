@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, status, HTTPException
 from typing import List, Optional
 from bson import ObjectId
@@ -6,7 +6,8 @@ from app.core.database import get_database
 from app.services.worker_salary import resolve_hourly_rate
 from app.schemas.user import (
     WorkerApprovalResponse, WorkerApprovalPaginatedResponse,
-    WorkerApproveRequest, WorkerRejectRequest, WorkerDetailResponse
+    WorkerApproveRequest, WorkerRejectRequest, WorkerDetailResponse,
+    WorkerShiftsSummary, WorkerShiftRow, WorkerAttendanceSummary, WorkerAttendanceRow, WorkerDocumentItem
 )
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
@@ -24,6 +25,147 @@ def _format_viewable_url(path: Optional[str]) -> Optional[str]:
     if clean_name.startswith("uploads/"):
         return f"/{clean_name}"
     return f"/uploads/{clean_name}"
+
+
+def _fmt_hours(dur: float) -> str:
+    return f"{int(dur)}h" if float(dur).is_integer() else f"{dur:.1f}h"
+
+
+def _fmt_time(raw) -> str:
+    if not raw:
+        return "--:--"
+    if isinstance(raw, str):
+        try:
+            raw = datetime.fromisoformat(raw)
+        except Exception:
+            return "--:--"
+    return raw.strftime("%H:%M")
+
+
+async def _build_worker_shifts(db, worker_id: str) -> tuple:
+    """
+    Builds the Shifts tab data: summary counts (completed/in_progress/upcoming)
+    plus the full shift list (date/location/hours/status), sourced from the
+    `shifts` collection - the same source the rest of the manager worker-stats
+    module (admin_shift_monitoring_worker_stats.py) already uses for this worker.
+    """
+    raw_shifts = await db["shifts"].find({
+        "workers.worker_id": worker_id,
+        "status": {"$ne": "cancelled"}
+    }).sort("date", -1).to_list(length=1000)
+
+    completed = in_progress = upcoming = 0
+    rows: List[WorkerShiftRow] = []
+
+    for s in raw_shifts:
+        s_id = str(s.get("id") or s.get("_id"))
+        s_status = str(s.get("status") or "scheduled").lower()
+        w_record = next((w for w in s.get("workers", []) if str(w.get("worker_id") or w.get("id")) == worker_id), {})
+        dur = float(w_record.get("hours_worked", 0.0) or 0.0)
+
+        if s_status == "completed":
+            completed += 1
+            display_status = "Completed"
+        elif s_status == "in_progress":
+            in_progress += 1
+            display_status = "In Progress"
+        else:
+            upcoming += 1
+            display_status = "Upcoming"
+
+        rows.append(WorkerShiftRow(
+            shift_id=s_id,
+            date=s.get("date", ""),
+            location=s.get("location_name") or s.get("location") or "",
+            hours=_fmt_hours(dur),
+            hours_numeric=round(dur, 2),
+            status=display_status
+        ))
+
+    summary = WorkerShiftsSummary(completed=completed, in_progress=in_progress, upcoming=upcoming)
+    return summary, rows
+
+
+async def _build_worker_attendance(db, worker_id: str) -> tuple:
+    """
+    Builds the Attendance tab data for the current calendar month: summary
+    (hours this month, late days, absent days) plus the daily check-in/out
+    rows - mirrors the logic in admin_shift_monitoring_worker_stats.py's
+    get_worker_daily_activity, scoped here to the current month specifically.
+    """
+    month_iso = datetime.now(timezone.utc).strftime("%Y-%m")
+    raw_shifts = await db["shifts"].find({
+        "workers.worker_id": worker_id,
+        "date": {"$regex": f"^{month_iso}"},
+        "status": {"$ne": "cancelled"}
+    }).sort("date", -1).to_list(length=1000)
+
+    total_hours = 0.0
+    late_days = 0
+    absent_days = 0
+    rows: List[WorkerAttendanceRow] = []
+
+    for s in raw_shifts:
+        s_id = str(s.get("id") or s.get("_id"))
+        w_record = next((w for w in s.get("workers", []) if str(w.get("worker_id") or w.get("id")) == worker_id), {})
+        c_raw = w_record.get("checkin_time")
+        co_raw = w_record.get("checkout_time")
+        w_status = w_record.get("status")
+
+        dur = float(w_record.get("hours_worked", 0.0) or 0.0)
+        total_hours += dur
+
+        if w_status == "late":
+            display_status = "Late"
+            late_days += 1
+        elif c_raw or w_status == "ontime":
+            display_status = "On Time"
+        else:
+            display_status = "Absent"
+            absent_days += 1
+
+        rows.append(WorkerAttendanceRow(
+            shift_id=s_id,
+            date=s.get("date", ""),
+            check_in=_fmt_time(c_raw),
+            check_out=_fmt_time(co_raw),
+            hours=_fmt_hours(dur),
+            hours_numeric=round(dur, 2),
+            status=display_status
+        ))
+
+    summary = WorkerAttendanceSummary(
+        this_month_hours=_fmt_hours(total_hours),
+        this_month_hours_numeric=round(total_hours, 2),
+        late_days=late_days,
+        absent_days=absent_days
+    )
+    return summary, rows
+
+
+def _build_worker_documents(user: dict, draft: dict) -> List[WorkerDocumentItem]:
+    docs: List[WorkerDocumentItem] = []
+
+    id_front = _format_viewable_url(user.get("id_card_front") or draft.get("id_card_front"))
+    if id_front:
+        docs.append(WorkerDocumentItem(name="ID Card Front", type="id_card_front", url=id_front))
+
+    id_back = _format_viewable_url(user.get("id_card_back") or draft.get("id_card_back"))
+    if id_back:
+        docs.append(WorkerDocumentItem(name="ID Card Back", type="id_card_back", url=id_back))
+
+    contract = _format_viewable_url(user.get("employee_contract_pdf"))
+    if contract:
+        docs.append(WorkerDocumentItem(name="Employment Contract", type="employee_contract_pdf", url=contract))
+
+    raw_certs = user.get("certificates") or draft.get("certificates") or []
+    if isinstance(raw_certs, list):
+        for idx, cert in enumerate(raw_certs, start=1):
+            cert_url = _format_viewable_url(cert)
+            if cert_url:
+                docs.append(WorkerDocumentItem(name=f"Certificate {idx}", type="certificate", url=cert_url))
+
+    return docs
 
 
 @worker_approvals_router.get(
@@ -239,9 +381,14 @@ async def approve_worker_signup(
         title="Account Approved",
         message="Your worker account has been approved by the admin. You can now login.",
         notification_type="account_approved",
+        route_type="home",
         recipient_type="worker",
         user_id=str(user["_id"]),
-        player_ids=player_ids
+        player_ids=player_ids,
+        data={
+            "route": "/worker/home",
+            "deeplink": "cleaningone://worker/home"
+        }
     )
 
     await ws_manager.broadcast_to_users({
@@ -324,6 +471,34 @@ async def reject_worker_signup(
         "created_at": now
     })
 
+    from app.services.notification_service import NotificationService
+    from app.api.chat import ws_manager
+
+    notif_service = NotificationService()
+    player_id = user.get("onesignal_player_id")
+    player_ids = [player_id] if player_id else None
+
+    reject_msg = f"Your worker account has been rejected. Reason: {reason_txt}" if reason_txt else "Your worker account has been rejected."
+
+    await notif_service.create_notification(
+        title="Account Rejected",
+        message=reject_msg,
+        notification_type="account_rejected",
+        route_type="home",
+        recipient_type="worker",
+        user_id=str(user["_id"]),
+        player_ids=player_ids,
+        data={
+            "route": "/worker/home",
+            "deeplink": "cleaningone://worker/home"
+        }
+    )
+
+    await ws_manager.broadcast_to_users({
+        "type": "account_rejected",
+        "message": reject_msg
+    }, [str(user["_id"])])
+
     return {"message": "Worker signup rejected", "worker_id": worker_id, "rejection_reason": reason_txt}
 
 
@@ -361,6 +536,10 @@ async def get_worker_detail(
     total_s = await db["shifts"].count_documents({"worker_id": wid}) + await db["shift_executions"].count_documents({"assigned_workers.worker_id": wid})
     comp_s = await db["shifts"].count_documents({"worker_id": wid, "status": "completed"}) + await db["shift_executions"].count_documents({"assigned_workers.worker_id": wid, "status": "completed"})
 
+    shifts_summary, shift_rows = await _build_worker_shifts(db, wid)
+    attendance_summary, attendance_rows = await _build_worker_attendance(db, wid)
+    document_items = _build_worker_documents(user, draft)
+
     return WorkerDetailResponse(
         id=wid,
         worker_id=wid,
@@ -384,6 +563,11 @@ async def get_worker_detail(
         completed_shifts_count=comp_s,
         rating=float(user.get("rating", 5.0)),
         hourly_rate=resolve_hourly_rate(user),
+        shifts_summary=shifts_summary,
+        shifts=shift_rows,
+        attendance_summary=attendance_summary,
+        attendance=attendance_rows,
+        documents=document_items,
         created_at=cat,
         updated_at=uat
     )

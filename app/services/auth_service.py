@@ -188,11 +188,18 @@ class AuthService:
                 from app.core.database import get_database
 
                 notif_service = NotificationService()
+                worker_uid = str(getattr(user, "id", None) or getattr(user, "_id", None) or "")
                 asyncio.create_task(notif_service.create_notification(
                     title="New Worker Signup Approval Request",
                     message=f"A new worker ({user.full_name}) has verified their email and is awaiting approval.",
                     notification_type="approval_request",
-                    recipient_type="admin"
+                    route_type="workers",
+                    recipient_type="admin",
+                    data={
+                        "worker_id": worker_uid,
+                        "route": "/manager/worker-approvals",
+                        "deeplink": f"cleaningone://manager/workers/{worker_uid}"
+                    }
                 ))
 
                 db = get_database()
@@ -221,11 +228,18 @@ class AuthService:
                 from app.core.database import get_database
 
                 notif_service = NotificationService()
+                client_uid = str(getattr(user, "id", None) or getattr(user, "_id", None) or "")
                 asyncio.create_task(notif_service.create_notification(
                     title="New Client Signup Request",
                     message=f"A new client ({user.company_name or user.full_name}) has signed up and is awaiting approval.",
                     notification_type="approval_request",
-                    recipient_type="admin"
+                    route_type="clients",
+                    recipient_type="admin",
+                    data={
+                        "client_id": client_uid,
+                        "route": "/manager/clients/pending-approvals",
+                        "deeplink": f"cleaningone://manager/clients/{client_uid}"
+                    }
                 ))
 
                 db = get_database()

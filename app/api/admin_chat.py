@@ -11,7 +11,7 @@ from app.services.chat_service import (
     get_user_id, format_conversation_list_item, format_conversation_detail,
     format_conversation, format_message, resolve_participant_profile,
     get_conversation_participants_details, add_conversation_participants,
-    remove_conversation_participant, get_or_create_worker_admin_conversation,
+    remove_conversation_participant, get_or_create_worker_admin_conversation, get_total_unread_count,
     mark_conversation_read_shared_management
 )
 from app.schemas.chat import (
@@ -111,12 +111,14 @@ async def list_admin_conversations(
     convs_res = [format_conversation_list_item(c, current_user_id=admin_id, viewer_role=viewer_role) for c in raw_convs]
 
     has_more = (skip + len(convs_res)) < total_count
+    total_unread = await get_total_unread_count(db, admin_id)
 
     return PaginatedConversationsResponse(
         total_count=total_count,
         page=page,
         limit=limit,
         has_more=has_more,
+        unread_count=total_unread,
         conversations=convs_res
     )
 
@@ -567,6 +569,11 @@ async def send_admin_message(
 
     from app.services.chat_ws_service import broadcast_new_message
     await broadcast_new_message(db, str(conv_doc["_id"]), msg_doc)
+
+    from app.services.chat_service import notify_new_chat_message
+    await notify_new_chat_message(
+        db, str(conv_doc["_id"]), admin_id, sender_name, last_text, other_uids
+    )
 
     return format_message(msg_doc)
 
