@@ -1,6 +1,6 @@
 import io
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, status
-from PIL import Image
+from PIL import Image, ImageOps
 from typing import Optional
 from app.models.user import UserInDB
 from app.dependencies.auth import get_current_user
@@ -15,13 +15,31 @@ def get_s3_service() -> S3Service:
 def get_user_repo() -> UserRepository:
     return UserRepository()
 
-def process_image(file_bytes: bytes, size: tuple = (1080, 1080)) -> bytes:
+def process_image(file_bytes: bytes, max_dim: int = 1080, size: Optional[tuple] = None, **kwargs) -> bytes:
     try:
         img = Image.open(io.BytesIO(file_bytes))
-        # Convert to RGB if it's RGBA or P to avoid JPEG errors
-        if img.mode in ("RGBA", "P"):
+        # 1. Correct mobile camera rotation (EXIF orientation)
+        img = ImageOps.exif_transpose(img)
+
+        # 2. Convert transparent/palette modes to RGB for JPEG compatibility
+        if img.mode in ("RGBA", "P", "LA"):
             img = img.convert("RGB")
-        img = img.resize(size, Image.Resampling.LANCZOS)
+
+        # 3. Preserve natural aspect ratio without stretching or distortion
+        effective_max = max_dim
+        if size and isinstance(size, (tuple, list)) and len(size) > 0:
+            effective_max = max(size)
+
+        width, height = img.size
+        if width > 0 and height > 0 and max(width, height) > effective_max:
+            if width >= height:
+                new_width = effective_max
+                new_height = max(1, int(height * (effective_max / width)))
+            else:
+                new_height = effective_max
+                new_width = max(1, int(width * (effective_max / height)))
+            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
         out_bytes = io.BytesIO()
         img.save(out_bytes, format="JPEG", quality=85)
         return out_bytes.getvalue()
