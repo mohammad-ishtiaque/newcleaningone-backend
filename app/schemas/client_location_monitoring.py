@@ -11,7 +11,7 @@ class ClientRoomShortSummaryItem(BaseModel):
     floor: Optional[int] = 1
     duration: Optional[int] = 30
     cleaning_type: Optional[str] = "standard"
-    monthly_cleaning_frequency: Optional[int] = 4
+    monthly_cleaning_frequency: Optional[int] = 0
     tasks_count: int = 0
     photos_count: int = 0
 
@@ -33,7 +33,7 @@ class ClientRoomShortSummaryItem(BaseModel):
                 "floor": 2,
                 "duration": 45,
                 "cleaning_type": "standard",
-                "monthly_cleaning_frequency": 4,
+                "monthly_cleaning_frequency": 0,
                 "tasks_count": 3,
                 "photos_count": 2
             }
@@ -113,7 +113,7 @@ class ClientRoomDetailItem(BaseModel):
     floor: Optional[int] = 1
     duration: Optional[int] = 30
     cleaning_type: Optional[str] = "standard"
-    monthly_cleaning_frequency: Optional[int] = 4
+    monthly_cleaning_frequency: Optional[int] = 0
     tasks_count: int = 0
     photos_count: int = 0
     tasks: List[CleaningTaskResponse] = Field(default_factory=list)
@@ -140,7 +140,7 @@ class ClientRoomDetailItem(BaseModel):
                 "floor": 2,
                 "duration": 45,
                 "cleaning_type": "standard",
-                "monthly_cleaning_frequency": 4,
+                "monthly_cleaning_frequency": 0,
                 "tasks_count": 2,
                 "photos_count": 2,
                 "tasks": [
@@ -233,7 +233,7 @@ class ClientRoomFullDetailResponse(BaseModel):
     floor: Optional[int] = 1
     duration: Optional[int] = 30
     cleaning_type: Optional[str] = "standard"
-    monthly_cleaning_frequency: Optional[int] = 4
+    monthly_cleaning_frequency: Optional[int] = 0
     photo_number: int = 0
     task_number: int = 0
     tasks: List[CleaningTaskResponse] = Field(default_factory=list)
@@ -262,7 +262,7 @@ class ClientRoomFullDetailResponse(BaseModel):
                 "floor": 2,
                 "duration": 45,
                 "cleaning_type": "standard",
-                "monthly_cleaning_frequency": 4,
+                "monthly_cleaning_frequency": 0,
                 "photo_number": 2,
                 "task_number": 2,
                 "tasks": [

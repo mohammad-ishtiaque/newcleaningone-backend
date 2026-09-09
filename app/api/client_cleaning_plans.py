@@ -13,7 +13,7 @@ from app.schemas.client_cleaning_plan import (
 )
 from app.schemas.client_list import (
     CleaningPlanRoomDetail, CleaningPlanWorkerDetail,
-    CleaningTaskResponse, TaskPhotoResponse
+    CleaningTaskResponse, TaskPhotoResponse, CleaningTaskCreate
 )
 from app.services.client_helper import resolve_client_id_aliases
 from app.api.worker_shift_utils import (
@@ -22,7 +22,7 @@ from app.api.worker_shift_utils import (
 )
 from app.api.admin.cleaning_plan_formatters import (
     _resolve_rooms_data, _format_tasks_list, _resolve_workers_data,
-    _calculate_end_time
+    _calculate_end_time, _format_pending_tasks_list
 )
 
 router = APIRouter(tags=["Client Live Status Management"])
@@ -360,6 +360,72 @@ async def list_client_cleaning_plans(
     )
 
 
+async def _format_client_plan_detail(plan_doc: dict, db) -> ClientCleaningPlanDetailResponse:
+    """
+    Shared formatter for a `cleaning_plans` document into the client-facing detail
+    shape. Used by both the GET detail endpoint and the additional-task-request
+    endpoint (so a client sees the same full plan, including their new pending
+    request, immediately after submitting it).
+    """
+    pid = str(plan_doc.get("id") or plan_doc.get("_id"))
+    title = plan_doc.get("title") or plan_doc.get("plan_name", "Cleaning Plan")
+    shift_notes = plan_doc.get("shift_notes") or plan_doc.get("description", "")
+    cid = plan_doc.get("client_id") or (plan_doc.get("client_ids", [""])[0] if plan_doc.get("client_ids") else "")
+    cname = plan_doc.get("company_name") or plan_doc.get("client_name") or "Client"
+
+    room_ids = plan_doc.get("room_ids", [])
+    worker_ids = plan_doc.get("worker_ids", [])
+
+    rooms_data = await _resolve_rooms_data(room_ids, db)
+    workers_meta = plan_doc.get("assigned_workers") or plan_doc.get("workers") or []
+    workers_data = await _resolve_workers_data(worker_ids, db, assigned_workers_meta=workers_meta)
+
+    raw_add_tasks = plan_doc.get("additional_tasks", []) or plan_doc.get("tasks", [])
+    add_tasks = _format_tasks_list(raw_add_tasks)
+    pending_add_tasks = _format_pending_tasks_list(plan_doc.get("pending_additional_tasks", []))
+
+    progress = calculate_cleaning_plan_progress(plan_doc)
+    dur_mins = plan_doc.get("duration_minutes") or sum(r.duration for r in rooms_data) or 60
+    st_time = plan_doc.get("start_time", "08:00 AM")
+    end_time = plan_doc.get("end_time") or _calculate_end_time(st_time, dur_mins)
+
+    return ClientCleaningPlanDetailResponse(
+        id=pid,
+        title=title,
+        service_kind="cleaning_plan",
+        shift_notes=shift_notes,
+        priority=None,
+        client_id=str(cid),
+        company_name=str(cname),
+        location_id=plan_doc.get("location_id"),
+        location_name=plan_doc.get("location_name"),
+        room_ids=room_ids,
+        rooms=rooms_data,
+        rooms_count=len(rooms_data),
+        worker_ids=worker_ids,
+        workers=workers_data,
+        workers_count=len(workers_data),
+        additional_tasks=add_tasks,
+        pending_additional_tasks=pending_add_tasks,
+        total_tasks_count=progress["total_tasks_count"],
+        completed_tasks_count=progress["completed_tasks_count"],
+        total_photos_count=progress["total_photos_count"],
+        overall_progress_percentage=progress["overall_progress_percentage"],
+        date=plan_doc.get("date"),
+        start_time=st_time,
+        end_time=end_time,
+        duration_minutes=dur_mins,
+        repeat_shift=plan_doc.get("repeat_shift", "Does not repeat"),
+        repeat_until=plan_doc.get("repeat_until"),
+        working_days=plan_doc.get("working_days", []),
+        timezone=plan_doc.get("timezone", "Europe/Amsterdam"),
+        status=plan_doc.get("status", "draft"),
+        is_active=plan_doc.get("is_active", True),
+        created_at=plan_doc.get("created_at"),
+        updated_at=plan_doc.get("updated_at")
+    )
+
+
 @router.get(
     "/client/cleaning-plan/{plan_id}",
     response_model=ClientCleaningPlanDetailResponse,
@@ -394,61 +460,7 @@ async def get_client_cleaning_plan_detail(
     })
 
     if plan_doc:
-        pid = str(plan_doc.get("id") or plan_doc.get("_id"))
-        title = plan_doc.get("title") or plan_doc.get("plan_name", "Cleaning Plan")
-        shift_notes = plan_doc.get("shift_notes") or plan_doc.get("description", "")
-        cid = plan_doc.get("client_id") or (plan_doc.get("client_ids", [""])[0] if plan_doc.get("client_ids") else "")
-        cname = plan_doc.get("company_name") or plan_doc.get("client_name") or "Client"
-
-        room_ids = plan_doc.get("room_ids", [])
-        worker_ids = plan_doc.get("worker_ids", [])
-
-        rooms_data = await _resolve_rooms_data(room_ids, db)
-        workers_meta = plan_doc.get("assigned_workers") or plan_doc.get("workers") or []
-        workers_data = await _resolve_workers_data(worker_ids, db, assigned_workers_meta=workers_meta)
-
-        raw_add_tasks = plan_doc.get("additional_tasks", []) or plan_doc.get("tasks", [])
-        add_tasks = _format_tasks_list(raw_add_tasks)
-
-        progress = calculate_cleaning_plan_progress(plan_doc)
-        dur_mins = plan_doc.get("duration_minutes") or sum(r.duration for r in rooms_data) or 60
-        st_time = plan_doc.get("start_time", "08:00 AM")
-        end_time = plan_doc.get("end_time") or _calculate_end_time(st_time, dur_mins)
-
-        return ClientCleaningPlanDetailResponse(
-            id=pid,
-            title=title,
-            service_kind="cleaning_plan",
-            shift_notes=shift_notes,
-            priority=None,
-            client_id=str(cid),
-            company_name=str(cname),
-            location_id=plan_doc.get("location_id"),
-            location_name=plan_doc.get("location_name"),
-            room_ids=room_ids,
-            rooms=rooms_data,
-            rooms_count=len(rooms_data),
-            worker_ids=worker_ids,
-            workers=workers_data,
-            workers_count=len(workers_data),
-            additional_tasks=add_tasks,
-            total_tasks_count=progress["total_tasks_count"],
-            completed_tasks_count=progress["completed_tasks_count"],
-            total_photos_count=progress["total_photos_count"],
-            overall_progress_percentage=progress["overall_progress_percentage"],
-            date=plan_doc.get("date"),
-            start_time=st_time,
-            end_time=end_time,
-            duration_minutes=dur_mins,
-            repeat_shift=plan_doc.get("repeat_shift", "Does not repeat"),
-            repeat_until=plan_doc.get("repeat_until"),
-            working_days=plan_doc.get("working_days", []),
-            timezone=plan_doc.get("timezone", "Europe/Amsterdam"),
-            status=plan_doc.get("status", "draft"),
-            is_active=plan_doc.get("is_active", True),
-            created_at=plan_doc.get("created_at"),
-            updated_at=plan_doc.get("updated_at")
-        )
+        return await _format_client_plan_detail(plan_doc, db)
 
     # 2. Look up in extra_services
     es_doc = await db["extra_services"].find_one({
@@ -539,3 +551,102 @@ async def get_client_cleaning_plan_detail(
         status_code=status.HTTP_404_NOT_FOUND,
         detail=f"Cleaning plan or extra service ID '{plan_id}' not found for this client"
     )
+
+
+@router.post(
+    "/client/cleaning-plan/{plan_id}/additional-tasks",
+    response_model=ClientCleaningPlanDetailResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Client Request Additional Task for Cleaning Plan",
+    description="""
+### Client Request Additional Task
+Submits a request to add an additional task to one of the client's own cleaning plans —
+the same task model (name, frequency, `fixed_date`/`weekly_days`/`monthly_dates`,
+`duration_minutes`, required photos) the manager uses when creating a plan.
+
+The request is added to the plan's `pending_additional_tasks` with `status: "pending"` and
+notifies managers/admins. It does **not** appear in the plan's real `additional_tasks` (and
+does not affect the plan's total duration) until a manager approves it via
+`POST /manager/cleaning-plans/{plan_id}/additional-tasks/{task_id}/approve`.
+"""
+)
+async def request_additional_task(
+    plan_id: str,
+    task_in: CleaningTaskCreate,
+    current_user: UserInDB = Depends(require_client)
+):
+    db = get_database()
+    client_aliases = await resolve_client_id_aliases(current_user, db)
+
+    plan_doc = await db["cleaning_plans"].find_one({
+        "$or": [{"_id": plan_id}, {"id": plan_id}],
+        "$and": [{
+            "$or": [
+                {"client_id": {"$in": client_aliases}},
+                {"client_ids": {"$in": client_aliases}}
+            ]
+        }]
+    })
+    if not plan_doc:
+        raise HTTPException(status_code=404, detail=f"Cleaning plan '{plan_id}' not found for this client")
+
+    now = datetime.now(timezone.utc)
+    client_name = getattr(current_user, "company_name", None) or getattr(current_user, "full_name", None) or "Client"
+    client_id_str = str(getattr(current_user, "id", None) or getattr(current_user, "_id", ""))
+
+    task_dict = task_in.model_dump()
+    task_dict["id"] = task_dict.get("id") or uuid.uuid4().hex[:8]
+
+    processed_photos = []
+    for p in (task_dict.get("photo") or []):
+        p_dict = p if isinstance(p, dict) else dict(p)
+        if not p_dict.get("id"):
+            p_dict["id"] = uuid.uuid4().hex[:8]
+        processed_photos.append(p_dict)
+    task_dict["photo"] = processed_photos
+    if processed_photos and not task_dict.get("is_photo_req"):
+        task_dict["is_photo_req"] = True
+
+    task_dict.update({
+        "status": "pending",
+        "requested_by": client_id_str,
+        "requested_by_name": client_name,
+        "requested_at": now,
+        "reviewed_by": None,
+        "reviewed_by_name": None,
+        "reviewed_at": None,
+        "rejection_reason": None,
+    })
+
+    await db["cleaning_plans"].update_one(
+        {"_id": plan_doc["_id"]},
+        {"$push": {"pending_additional_tasks": task_dict}, "$set": {"updated_at": now}}
+    )
+
+    # Notify managers/admins — same pattern as notify_escalation_created
+    try:
+        from app.services.notification_service import NotificationService
+        plan_title = plan_doc.get("title") or plan_doc.get("plan_name") or "Cleaning Plan"
+        cursor = db["users"].find(
+            {"role": {"$in": ["manager", "admin"]}, "onesignal_player_id": {"$ne": None}, "is_active": True},
+            {"onesignal_player_id": 1}
+        )
+        player_ids = [u["onesignal_player_id"] async for u in cursor if u.get("onesignal_player_id")]
+        await NotificationService().create_notification(
+            title=f"New Additional Task Request: {task_dict['name']}",
+            message=f"{client_name} requested an additional task for '{plan_title}'.",
+            notification_type="additional_task_requested",
+            route_type="cleaning_plans",
+            recipient_type="manager",
+            player_ids=player_ids if player_ids else None,
+            data={
+                "plan_id": str(plan_doc.get("id") or plan_doc.get("_id")),
+                "task_id": task_dict["id"],
+                "route": f"/manager/cleaning-plans/{plan_id}"
+            }
+        )
+    except Exception as e:
+        print(f"Error notifying managers of additional task request: {e}")
+
+    updated_doc = await db["cleaning_plans"].find_one({"_id": plan_doc["_id"]})
+    return await _format_client_plan_detail(updated_doc, db)

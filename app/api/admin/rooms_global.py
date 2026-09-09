@@ -120,7 +120,7 @@ async def get_global_rooms_grid(
         cid = str(r.get("client_id") or ldoc.get("client_id") or "")
         cname = str(r.get("company_name") or clients_map.get(cid) or ldoc.get("company_name") or "")
 
-        freq = r.get("monthly_cleaning_frequency", 4)
+        freq = r.get("monthly_cleaning_frequency", 0)
         tasks_raw = r.get("tasks", [])
         photo_cnt = 0
         if isinstance(tasks_raw, list) and tasks_raw:

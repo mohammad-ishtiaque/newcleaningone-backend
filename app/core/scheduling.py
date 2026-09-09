@@ -5,7 +5,7 @@ def filter_dynamic_tasks_and_photos(room_data: dict, visit_number: int) -> dict:
     Filters tasks and required_photos from room_data based on their frequency_type
     and the current visit_number for the month.
     """
-    monthly_frequency = room_data.get("monthly_cleaning_frequency", 4)
+    monthly_frequency = room_data.get("monthly_cleaning_frequency", 0)
     if monthly_frequency < 1:
         monthly_frequency = 1
 

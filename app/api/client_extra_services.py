@@ -318,6 +318,10 @@ async def get_client_room_dropdowns(
                 tname = t.get("name", "Task")
                 tfreq = t.get("frequency_type", "every_visit")
                 is_req = bool(t.get("is_photo_req", False))
+                t_weekly_days = t.get("weekly_days")
+                t_monthly_dates = t.get("monthly_dates")
+                t_fixed_date = t.get("fixed_date")
+                t_duration_minutes = t.get("duration_minutes")
 
                 t_photos_raw = t.get("photo") or t.get("photos") or []
                 t_photos = []
@@ -340,7 +344,11 @@ async def get_client_room_dropdowns(
                     frequency_type=tfreq,
                     is_photo_req=is_req,
                     photo=t_photos,
-                    total_photos_required=len(t_photos)
+                    total_photos_required=len(t_photos),
+                    weekly_days=t_weekly_days,
+                    monthly_dates=t_monthly_dates,
+                    fixed_date=t_fixed_date,
+                    duration_minutes=t_duration_minutes
                 ))
 
         if total_photos == 0:
@@ -358,7 +366,7 @@ async def get_client_room_dropdowns(
             floor=r.get("floor", 1),
             duration=r.get("duration", 30),
             cleaning_type=r.get("clean_type") or r.get("cleaning_type", "standard"),
-            monthly_cleaning_frequency=r.get("monthly_cleaning_frequency", 4),
+            monthly_cleaning_frequency=r.get("monthly_cleaning_frequency", 0),
             photo_number=total_photos,
             task_number=task_num,
             tasks=formatted_tasks

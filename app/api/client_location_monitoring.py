@@ -32,6 +32,10 @@ def _format_room_tasks_and_photos(raw_tasks: list):
                 tname = t.get("name", "Task")
                 tfreq = t.get("frequency_type", "every_visit")
                 is_req = bool(t.get("is_photo_req", False))
+                t_weekly_days = t.get("weekly_days")
+                t_monthly_dates = t.get("monthly_dates")
+                t_fixed_date = t.get("fixed_date")
+                t_duration_minutes = t.get("duration_minutes")
 
                 t_photos_raw = t.get("photo") or t.get("photos") or []
                 t_photos = []
@@ -54,7 +58,11 @@ def _format_room_tasks_and_photos(raw_tasks: list):
                     frequency_type=tfreq,
                     is_photo_req=is_req,
                     photo=t_photos,
-                    total_photos_required=len(t_photos)
+                    total_photos_required=len(t_photos),
+                    weekly_days=t_weekly_days,
+                    monthly_dates=t_monthly_dates,
+                    fixed_date=t_fixed_date,
+                    duration_minutes=t_duration_minutes
                 ))
     return formatted_tasks, total_photos
 
@@ -174,7 +182,7 @@ async def list_client_locations_monitoring(
                 floor=r.get("floor", 1),
                 duration=r.get("duration", 30),
                 cleaning_type=r.get("clean_type") or r.get("cleaning_type", "standard"),
-                monthly_cleaning_frequency=r.get("monthly_cleaning_frequency", 4),
+                monthly_cleaning_frequency=r.get("monthly_cleaning_frequency", 0),
                 tasks_count=len(r_tasks),
                 photos_count=t_photos_count
             ))
@@ -288,7 +296,7 @@ async def get_client_location_detail(
             floor=r.get("floor", 1),
             duration=r.get("duration", 30),
             cleaning_type=r.get("clean_type") or r.get("cleaning_type", "standard"),
-            monthly_cleaning_frequency=r.get("monthly_cleaning_frequency", 4),
+            monthly_cleaning_frequency=r.get("monthly_cleaning_frequency", 0),
             tasks_count=len(formatted_tasks),
             photos_count=total_photos,
             tasks=formatted_tasks,
@@ -403,7 +411,7 @@ async def list_client_location_rooms(
             floor=r.get("floor", 1),
             duration=r.get("duration", 30),
             cleaning_type=r.get("clean_type") or r.get("cleaning_type", "standard"),
-            monthly_cleaning_frequency=r.get("monthly_cleaning_frequency", 4),
+            monthly_cleaning_frequency=r.get("monthly_cleaning_frequency", 0),
             tasks_count=len(formatted_tasks),
             photos_count=total_photos,
             tasks=formatted_tasks,
@@ -497,7 +505,7 @@ async def get_client_room_full_detail(
         floor=room_doc.get("floor", 1),
         duration=room_doc.get("duration", 30),
         cleaning_type=room_doc.get("clean_type") or room_doc.get("cleaning_type", "standard"),
-        monthly_cleaning_frequency=room_doc.get("monthly_cleaning_frequency", 4),
+        monthly_cleaning_frequency=room_doc.get("monthly_cleaning_frequency", 0),
         photo_number=total_photos,
         task_number=len(formatted_tasks),
         tasks=formatted_tasks,

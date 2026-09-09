@@ -49,6 +49,10 @@ async def _format_room_response(doc: dict, db) -> RoomResponse:
                 t_name = t.get("name", "Task")
                 t_freq = t.get("frequency_type", "every_visit")
                 is_req = bool(t.get("is_photo_req", False))
+                t_weekly_days = t.get("weekly_days")
+                t_monthly_dates = t.get("monthly_dates")
+                t_fixed_date = t.get("fixed_date")
+                t_duration_minutes = t.get("duration_minutes")
 
                 raw_photos = t.get("photo") or t.get("photos") or []
                 task_photos = []
@@ -78,7 +82,11 @@ async def _format_room_response(doc: dict, db) -> RoomResponse:
                     frequency_type=t_freq,
                     is_photo_req=is_req,
                     photo=task_photos,
-                    total_photos_required=len(task_photos)
+                    total_photos_required=len(task_photos),
+                    weekly_days=t_weekly_days,
+                    monthly_dates=t_monthly_dates,
+                    fixed_date=t_fixed_date,
+                    duration_minutes=t_duration_minutes
                 ))
             elif isinstance(t, str):
                 tasks.append(CleaningTaskResponse(
@@ -94,6 +102,10 @@ async def _format_room_response(doc: dict, db) -> RoomResponse:
                 t_name = getattr(t, "name", "Task")
                 t_freq = getattr(t, "frequency_type", "every_visit")
                 is_req = bool(getattr(t, "is_photo_req", False))
+                t_weekly_days = getattr(t, "weekly_days", None)
+                t_monthly_dates = getattr(t, "monthly_dates", None)
+                t_fixed_date = getattr(t, "fixed_date", None)
+                t_duration_minutes = getattr(t, "duration_minutes", None)
                 raw_photos = getattr(t, "photo", []) or []
                 task_photos = []
                 for p in raw_photos:
@@ -109,7 +121,11 @@ async def _format_room_response(doc: dict, db) -> RoomResponse:
                     frequency_type=t_freq,
                     is_photo_req=is_req,
                     photo=task_photos,
-                    total_photos_required=len(task_photos)
+                    total_photos_required=len(task_photos),
+                    weekly_days=t_weekly_days,
+                    monthly_dates=t_monthly_dates,
+                    fixed_date=t_fixed_date,
+                    duration_minutes=t_duration_minutes
                 ))
 
     # Backward compatibility with legacy required_photos at room level
@@ -152,7 +168,7 @@ async def _format_room_response(doc: dict, db) -> RoomResponse:
         location_name=lname or "Location Name",
         floor=doc.get("floor", 1),
         duration=doc.get("duration") or doc.get("est_cleaning_duration_minutes", 30),
-        monthly_cleaning_frequency=doc.get("monthly_cleaning_frequency", 4),
+        monthly_cleaning_frequency=doc.get("monthly_cleaning_frequency", 0),
         required_photos=flat_required_photos,
         photo_number=total_photos_cnt,
         total_photos_required=total_photos_cnt,
@@ -207,7 +223,11 @@ async def create_room(
                     "name": t.get("name", "Task"),
                     "frequency_type": t.get("frequency_type", "every_visit"),
                     "is_photo_req": is_req,
-                    "photo": processed_photos
+                    "photo": processed_photos,
+                    "weekly_days": t.get("weekly_days"),
+                    "monthly_dates": t.get("monthly_dates"),
+                    "fixed_date": t.get("fixed_date"),
+                    "duration_minutes": t.get("duration_minutes")
                 })
         room_data["tasks"] = processed_tasks
 
@@ -334,7 +354,11 @@ async def update_room(
                     "name": t.get("name", "Task"),
                     "frequency_type": t.get("frequency_type", "every_visit"),
                     "is_photo_req": is_req,
-                    "photo": processed_photos
+                    "photo": processed_photos,
+                    "weekly_days": t.get("weekly_days"),
+                    "monthly_dates": t.get("monthly_dates"),
+                    "fixed_date": t.get("fixed_date"),
+                    "duration_minutes": t.get("duration_minutes")
                 })
         update_data["tasks"] = processed_tasks
         update_data["task_number"] = len(processed_tasks)

@@ -3,7 +3,8 @@ from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 from app.schemas.client_list import (
     CleaningPlanRoomDetail, CleaningPlanWorkerDetail,
-    CleaningTaskResponse, RequiredPhotoResponse, TaskPhotoResponse
+    CleaningTaskResponse, RequiredPhotoResponse, TaskPhotoResponse,
+    PendingAdditionalTaskResponse
 )
 
 
@@ -61,6 +62,7 @@ class ClientCleaningPlanDetailResponse(BaseModel):
     workers: List[CleaningPlanWorkerDetail] = Field(default_factory=list, description="Assigned cleaners with position, contact, and profile details")
     workers_count: int = Field(default=0, description="Total assigned cleaners count", json_schema_extra={"example": 1})
     additional_tasks: List[CleaningTaskResponse] = Field(default_factory=list, description="Additional cleaning tasks with task-level required photos")
+    pending_additional_tasks: List[PendingAdditionalTaskResponse] = Field(default_factory=list, description="Additional-task requests this client submitted, with their approve/reject status")
     total_tasks_count: int = Field(default=0, description="Total cleaning tasks across all rooms and additional items", json_schema_extra={"example": 5})
     completed_tasks_count: int = Field(default=0, description="Total completed cleaning tasks", json_schema_extra={"example": 2})
     total_photos_count: int = Field(default=0, description="Total required proof photos", json_schema_extra={"example": 11})

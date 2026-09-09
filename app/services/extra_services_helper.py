@@ -143,6 +143,10 @@ def format_extra_service_response(doc: dict) -> ExtraServiceResponse:
             t_name = t.get("name", "Task")
             t_freq = t.get("frequency_type", "every_visit")
             is_req = bool(t.get("is_photo_req", False))
+            t_weekly_days = t.get("weekly_days")
+            t_monthly_dates = t.get("monthly_dates")
+            t_fixed_date = t.get("fixed_date")
+            t_duration_minutes = t.get("duration_minutes")
 
             raw_photos = t.get("photo") or t.get("photos") or []
             task_photos = []
@@ -168,7 +172,11 @@ def format_extra_service_response(doc: dict) -> ExtraServiceResponse:
                 photo=task_photos,
                 total_photos_required=len(task_photos),
                 is_completed=bool(t.get("is_completed", False)),
-                completed_at=t.get("completed_at")
+                completed_at=t.get("completed_at"),
+                weekly_days=t_weekly_days,
+                monthly_dates=t_monthly_dates,
+                fixed_date=t_fixed_date,
+                duration_minutes=t_duration_minutes
             ))
 
     photos_res = []

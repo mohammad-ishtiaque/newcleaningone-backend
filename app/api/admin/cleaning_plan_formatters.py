@@ -7,7 +7,8 @@ from app.schemas.client_list import (
     CleaningPlanRoomDetail, CleaningPlanWorkerDetail,
     CleaningPlanClientDetail, CleaningPlanManagerDetail,
     ManagerCleaningPlanDetailResponse, ManagerCleaningPlanListItemResponse,
-    CleaningTaskResponse, RequiredPhotoResponse, TaskPhotoResponse
+    CleaningTaskResponse, RequiredPhotoResponse, TaskPhotoResponse,
+    PendingAdditionalTaskResponse
 )
 from app.models.user import UserInDB
 
@@ -24,6 +25,10 @@ def _format_tasks_list(raw_tasks: list) -> List[CleaningTaskResponse]:
             t_name = t.get("name", "Task")
             t_freq = t.get("frequency_type", "every_visit")
             is_req = bool(t.get("is_photo_req", False))
+            t_weekly_days = t.get("weekly_days")
+            t_monthly_dates = t.get("monthly_dates")
+            t_fixed_date = t.get("fixed_date")
+            t_duration_minutes = t.get("duration_minutes")
 
             raw_photos = t.get("photo") or t.get("photos") or []
             task_photos = []
@@ -47,7 +52,11 @@ def _format_tasks_list(raw_tasks: list) -> List[CleaningTaskResponse]:
                 frequency_type=t_freq,
                 is_photo_req=is_req,
                 photo=task_photos,
-                total_photos_required=len(task_photos)
+                total_photos_required=len(task_photos),
+                weekly_days=t_weekly_days,
+                monthly_dates=t_monthly_dates,
+                fixed_date=t_fixed_date,
+                duration_minutes=t_duration_minutes
             ))
         elif isinstance(t, str):
             tasks.append(CleaningTaskResponse(
@@ -63,6 +72,10 @@ def _format_tasks_list(raw_tasks: list) -> List[CleaningTaskResponse]:
             t_name = getattr(t, "name", "Task")
             t_freq = getattr(t, "frequency_type", "every_visit")
             is_req = bool(getattr(t, "is_photo_req", False))
+            t_weekly_days = getattr(t, "weekly_days", None)
+            t_monthly_dates = getattr(t, "monthly_dates", None)
+            t_fixed_date = getattr(t, "fixed_date", None)
+            t_duration_minutes = getattr(t, "duration_minutes", None)
             raw_photos = getattr(t, "photo", []) or []
             task_photos = []
             for p in raw_photos:
@@ -77,9 +90,58 @@ def _format_tasks_list(raw_tasks: list) -> List[CleaningTaskResponse]:
                 frequency_type=t_freq,
                 is_photo_req=is_req,
                 photo=task_photos,
-                total_photos_required=len(task_photos)
+                total_photos_required=len(task_photos),
+                weekly_days=t_weekly_days,
+                monthly_dates=t_monthly_dates,
+                fixed_date=t_fixed_date,
+                duration_minutes=t_duration_minutes
             ))
     return tasks
+
+
+def _format_pending_tasks_list(raw_pending: list) -> List[PendingAdditionalTaskResponse]:
+    """
+    Formats a cleaning plan's `pending_additional_tasks` (client-submitted
+    additional-task requests) into response models. Same field extraction as
+    `_format_tasks_list` plus the approval-workflow fields.
+    """
+    items = []
+    for t in (raw_pending or []):
+        if not isinstance(t, dict):
+            continue
+        t_id = str(t.get("id") or t.get("_id") or uuid.uuid4().hex[:8])
+
+        raw_photos = t.get("photo") or t.get("photos") or []
+        task_photos = []
+        if isinstance(raw_photos, list):
+            for p in raw_photos:
+                if isinstance(p, dict):
+                    p_id = str(p.get("id") or p.get("_id") or uuid.uuid4().hex[:8])
+                    task_photos.append(TaskPhotoResponse(id=p_id, name=p.get("name", "Photo")))
+                elif isinstance(p, str):
+                    task_photos.append(TaskPhotoResponse(id=uuid.uuid4().hex[:8], name=p))
+
+        items.append(PendingAdditionalTaskResponse(
+            id=t_id,
+            name=t.get("name", "Task"),
+            frequency_type=t.get("frequency_type", "every_visit"),
+            is_photo_req=bool(t.get("is_photo_req", False)),
+            photo=task_photos,
+            total_photos_required=len(task_photos),
+            weekly_days=t.get("weekly_days"),
+            monthly_dates=t.get("monthly_dates"),
+            fixed_date=t.get("fixed_date"),
+            duration_minutes=t.get("duration_minutes"),
+            status=t.get("status", "pending"),
+            requested_by=t.get("requested_by"),
+            requested_by_name=t.get("requested_by_name"),
+            requested_at=t.get("requested_at"),
+            reviewed_by=t.get("reviewed_by"),
+            reviewed_by_name=t.get("reviewed_by_name"),
+            reviewed_at=t.get("reviewed_at"),
+            rejection_reason=t.get("rejection_reason")
+        ))
+    return items
 
 
 def _format_photos_list(raw_photos: list) -> List[RequiredPhotoResponse]:
@@ -117,7 +179,7 @@ async def _resolve_rooms_data(room_ids: List[str], db) -> List[CleaningPlanRoomD
         r_type = r.get("room_type") or r.get("type", "standard")
         flr = r.get("floor", 1)
         dur = r.get("duration") or r.get("est_cleaning_duration_minutes", 30)
-        freq = r.get("monthly_cleaning_frequency", 4)
+        freq = r.get("monthly_cleaning_frequency", 0)
         c_type = r.get("clean_type") or r.get("cleaning_type", "standard")
 
         room_tasks = _format_tasks_list(r.get("tasks", []))
@@ -378,6 +440,7 @@ async def _format_manager_cleaning_plan_detail(doc: dict, db, current_user: Opti
     # Format additional tasks (with task-connected photos)
     raw_add_tasks = doc.get("additional_tasks", []) or doc.get("tasks", [])
     add_tasks = _format_tasks_list(raw_add_tasks)
+    pending_add_tasks = _format_pending_tasks_list(doc.get("pending_additional_tasks", []))
 
     # Compute accurate task & photo counts
     room_tasks_count = sum(len(r.tasks) for r in rooms_data)
@@ -404,6 +467,14 @@ async def _format_manager_cleaning_plan_detail(doc: dict, db, current_user: Opti
     primary_cid = clients_data[0].client_id if clients_data else str(doc.get("client_id") or "")
     primary_cname = clients_data[0].company_name if clients_data else str(doc.get("company_name") or "")
 
+    # Was accepted on create/update and stored on the plan doc, but never returned — fix.
+    location_id_val = doc.get("location_id") or None
+    location_name_val = doc.get("location_name") or None
+    if location_id_val and not location_name_val:
+        loc_doc = await db["locations"].find_one({"$or": [{"_id": location_id_val}, {"id": location_id_val}]})
+        if loc_doc:
+            location_name_val = loc_doc.get("name")
+
     return ManagerCleaningPlanDetailResponse(
         id=pid,
         title=title,
@@ -413,6 +484,8 @@ async def _format_manager_cleaning_plan_detail(doc: dict, db, current_user: Opti
         clients_count=len(clients_data),
         clients=clients_data,
         manager=manager_data,
+        location_id=location_id_val,
+        location_name=location_name_val,
         room_ids=room_ids,
         rooms=rooms_data,
         rooms_count=len(rooms_data),
@@ -420,6 +493,7 @@ async def _format_manager_cleaning_plan_detail(doc: dict, db, current_user: Opti
         workers=workers_data,
         workers_count=len(workers_data),
         additional_tasks=add_tasks,
+        pending_additional_tasks=pending_add_tasks,
         total_tasks_count=t_cnt,
         total_photos_count=p_cnt,
         date=date_val,
@@ -493,6 +567,8 @@ async def _format_manager_cleaning_plan_list_item(doc: dict, db) -> ManagerClean
     return ManagerCleaningPlanListItemResponse(
         id=pid,
         title=title,
+        location_id=doc.get("location_id") or None,
+        location_name=doc.get("location_name") or None,
         clients_count=len(clients_data),
         client_names=client_names,
         rooms_count=len(room_ids),
@@ -662,6 +738,8 @@ async def batch_format_manager_cleaning_plan_list_items(raw_plans: list, db) -> 
         results.append(ManagerCleaningPlanListItemResponse(
             id=pid,
             title=title,
+            location_id=doc.get("location_id") or None,
+            location_name=doc.get("location_name") or None,
             clients_count=len(plan_client_names),
             client_names=list(plan_client_names),
             rooms_count=len(p_room_ids),

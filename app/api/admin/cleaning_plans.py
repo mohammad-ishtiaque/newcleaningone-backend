@@ -14,7 +14,8 @@ from app.schemas.client_list import (
     CleaningPlanRoomDropdownItem, CleaningPlanRoomDropdownPaginatedResponse,
     CleaningPlanWorkerDropdownItem, CleaningPlanWorkerDropdownPaginatedResponse,
     AssignWorkersToCleaningPlanRequest,
-    CleaningTaskCreate, CleaningTaskResponse
+    CleaningTaskCreate, CleaningTaskResponse,
+    RejectPendingAdditionalTaskRequest
 )
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
@@ -117,15 +118,7 @@ async def create_manager_cleaning_plan(
                 if l_doc:
                     location_name = l_doc.get("name", "")
 
-    # 4. Calculate duration (sum from rooms if not supplied)
-    if plan_in.duration_minutes is not None:
-        duration_minutes = plan_in.duration_minutes
-    else:
-        duration_minutes = sum(r.duration for r in rooms_data)
-        if duration_minutes == 0:
-            duration_minutes = 60
-
-    # 5. Process additional tasks with embedded photos and IDs
+    # 4. Process additional tasks with embedded photos and IDs
     add_tasks_dicts = []
     for t in (plan_in.additional_tasks or []):
         t_dict = t.model_dump() if hasattr(t, "model_dump") else dict(t)
@@ -143,6 +136,15 @@ async def create_manager_cleaning_plan(
         if processed_photos and not t_dict.get("is_photo_req"):
             t_dict["is_photo_req"] = True
         add_tasks_dicts.append(t_dict)
+
+    # 5. Calculate duration (sum from rooms + any additional-task durations, if not supplied)
+    add_tasks_duration = sum(int(t.get("duration_minutes") or 0) for t in add_tasks_dicts)
+    if plan_in.duration_minutes is not None:
+        duration_minutes = plan_in.duration_minutes
+    else:
+        duration_minutes = sum(r.duration for r in rooms_data) + add_tasks_duration
+        if duration_minutes == 0:
+            duration_minutes = 60
 
     # 6. Calculate total tasks and photos across rooms and additional tasks
     room_tasks_count = sum(len(r.tasks) for r in rooms_data)
@@ -350,6 +352,16 @@ async def update_manager_cleaning_plan(
         else:
             update_fields.pop("description", None)
 
+    # Resolve location_name whenever location_id changes — previously stored on the
+    # doc but never actually returned by the response schema; now fixed both ways.
+    if "location_id" in update_fields:
+        new_loc_id = update_fields["location_id"]
+        if new_loc_id:
+            l_doc = await db["locations"].find_one({"$or": [{"_id": new_loc_id}, {"id": new_loc_id}]})
+            update_fields["location_name"] = l_doc.get("name", "") if l_doc else ""
+        else:
+            update_fields["location_name"] = ""
+
     # Process updated additional tasks if supplied
     if "additional_tasks" in update_fields and isinstance(update_fields["additional_tasks"], list):
         processed_add_tasks = []
@@ -414,9 +426,10 @@ async def update_manager_cleaning_plan(
     update_fields["total_tasks_count"] = room_tasks_count + add_tasks_count
     update_fields["total_photos_count"] = room_photos_count + add_photos_count
 
-    # Recalculate duration and end_time
+    # Recalculate duration and end_time (rooms + any additional-task durations)
+    add_tasks_duration = sum(int(t.get("duration_minutes") or 0) for t in merged_add_tasks)
     if "duration_minutes" not in update_fields:
-        new_dur = sum(r.duration for r in rooms_data) if rooms_data else plan_doc.get("duration_minutes", 60)
+        new_dur = (sum(r.duration for r in rooms_data) + add_tasks_duration) if rooms_data else plan_doc.get("duration_minutes", 60)
         update_fields["duration_minutes"] = new_dur
     else:
         new_dur = update_fields["duration_minutes"]
@@ -616,5 +629,194 @@ async def assign_workers_to_cleaning_plan(
         )
     except Exception as e:
         print(f"Error sending assignment notifications: {e}")
+
+    return await _format_manager_cleaning_plan_detail(updated_doc, db, current_user=current_user)
+
+
+# ============================================================================
+# Client-Requested Additional Task Approval (submitted via
+# POST /client/cleaning-plan/{plan_id}/additional-tasks)
+# ============================================================================
+
+async def _recompute_plan_totals(plan_doc: dict, additional_tasks: list, db) -> dict:
+    """
+    Shared duration/count recompute — same formula used when a plan is created or
+    updated: room durations + every additional task's duration_minutes.
+    """
+    rooms_data = await _resolve_rooms_data(plan_doc.get("room_ids", []), db)
+    add_tasks_duration = sum(int(t.get("duration_minutes") or 0) for t in additional_tasks)
+    new_duration = sum(r.duration for r in rooms_data) + add_tasks_duration
+    st_time = plan_doc.get("start_time", "08:00 AM")
+    new_end_time = _calculate_end_time(st_time, new_duration)
+
+    room_tasks_count = sum(len(r.tasks) for r in rooms_data)
+    room_photos_count = sum(sum(len(t.photo) for t in r.tasks) for r in rooms_data)
+    add_photos_count = sum(len(t.get("photo", [])) for t in additional_tasks)
+
+    return {
+        "duration_minutes": new_duration,
+        "end_time": new_end_time,
+        "total_tasks_count": room_tasks_count + len(additional_tasks),
+        "total_photos_count": room_photos_count + add_photos_count,
+    }
+
+
+async def _notify_requester(db, requester_id: Optional[str], title: str, message: str, notif_type: str, plan_id: str, task_id: str):
+    if not requester_id:
+        return
+    try:
+        from app.services.notification_service import NotificationService
+        requester_doc = await db["users"].find_one({"$or": [{"_id": requester_id}, {"id": requester_id}]})
+        player_ids = None
+        if requester_doc and requester_doc.get("onesignal_player_id"):
+            player_ids = [requester_doc["onesignal_player_id"]]
+        await NotificationService().create_notification(
+            title=title,
+            message=message,
+            notification_type=notif_type,
+            route_type="cleaning_plans",
+            recipient_type="specific",
+            user_id=requester_id,
+            player_ids=player_ids,
+            data={"plan_id": plan_id, "task_id": task_id}
+        )
+    except Exception as e:
+        print(f"Error notifying client ({notif_type}): {e}")
+
+
+@cleaning_plan_mgmt_router.post(
+    "/cleaning-plans/{plan_id}/additional-tasks/{task_id}/approve",
+    response_model=ManagerCleaningPlanDetailResponse,
+    summary="Approve Client-Requested Additional Task",
+    description="""
+### Approve a Client-Submitted Additional Task Request
+Moves a `pending` entry from the plan's `pending_additional_tasks` into its real
+`additional_tasks` — from this point it behaves exactly like a manager-created additional
+task, and its `duration_minutes` (if any) is folded into the plan's total duration/end time.
+The pending entry is kept (status flips to `approved`) as an audit trail, not deleted.
+"""
+)
+async def approve_pending_additional_task(
+    plan_id: str,
+    task_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"$or": [{"_id": plan_id}, {"id": plan_id}]}
+    plan_doc = await db["cleaning_plans"].find_one(query)
+    if not plan_doc:
+        raise HTTPException(status_code=404, detail="Cleaning plan not found")
+
+    pending_list = plan_doc.get("pending_additional_tasks", []) or []
+    target = next((t for t in pending_list if str(t.get("id")) == task_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Pending additional task not found")
+    if target.get("status") != "pending":
+        raise HTTPException(status_code=409, detail=f"This request was already reviewed (status: {target.get('status')})")
+
+    now = datetime.now(timezone.utc)
+    manager_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", ""))
+    manager_name = getattr(current_user, "full_name", None) or "Manager"
+
+    approval_only_fields = {
+        "status", "requested_by", "requested_by_name", "requested_at",
+        "reviewed_by", "reviewed_by_name", "reviewed_at", "rejection_reason"
+    }
+    merged_task = {k: v for k, v in target.items() if k not in approval_only_fields}
+
+    existing_additional_tasks = plan_doc.get("additional_tasks", []) or []
+    new_additional_tasks = existing_additional_tasks + [merged_task]
+
+    updated_pending = []
+    for t in pending_list:
+        if str(t.get("id")) == task_id:
+            t = dict(t)
+            t["status"] = "approved"
+            t["reviewed_by"] = manager_id
+            t["reviewed_by_name"] = manager_name
+            t["reviewed_at"] = now
+        updated_pending.append(t)
+
+    totals = await _recompute_plan_totals(plan_doc, new_additional_tasks, db)
+
+    update_fields = {
+        "additional_tasks": new_additional_tasks,
+        "pending_additional_tasks": updated_pending,
+        "updated_at": now,
+        **totals,
+    }
+    await db["cleaning_plans"].update_one(query, {"$set": update_fields})
+    updated_doc = await db["cleaning_plans"].find_one(query)
+
+    await _notify_requester(
+        db, target.get("requested_by"),
+        title="Additional Task Approved",
+        message=f"Your request '{target.get('name')}' was approved and added to your cleaning plan.",
+        notif_type="additional_task_approved",
+        plan_id=plan_id, task_id=task_id
+    )
+
+    return await _format_manager_cleaning_plan_detail(updated_doc, db, current_user=current_user)
+
+
+@cleaning_plan_mgmt_router.post(
+    "/cleaning-plans/{plan_id}/additional-tasks/{task_id}/reject",
+    response_model=ManagerCleaningPlanDetailResponse,
+    summary="Reject Client-Requested Additional Task",
+    description="""
+### Reject a Client-Submitted Additional Task Request
+Marks a `pending` entry in the plan's `pending_additional_tasks` as `rejected` with an
+optional reason. It is never added to the plan's real `additional_tasks` and never affects
+plan duration/end time — kept in place for the client to see why it was declined.
+"""
+)
+async def reject_pending_additional_task(
+    plan_id: str,
+    task_id: str,
+    reject_in: RejectPendingAdditionalTaskRequest,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"$or": [{"_id": plan_id}, {"id": plan_id}]}
+    plan_doc = await db["cleaning_plans"].find_one(query)
+    if not plan_doc:
+        raise HTTPException(status_code=404, detail="Cleaning plan not found")
+
+    pending_list = plan_doc.get("pending_additional_tasks", []) or []
+    target = next((t for t in pending_list if str(t.get("id")) == task_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Pending additional task not found")
+    if target.get("status") != "pending":
+        raise HTTPException(status_code=409, detail=f"This request was already reviewed (status: {target.get('status')})")
+
+    now = datetime.now(timezone.utc)
+    manager_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", ""))
+    manager_name = getattr(current_user, "full_name", None) or "Manager"
+
+    updated_pending = []
+    for t in pending_list:
+        if str(t.get("id")) == task_id:
+            t = dict(t)
+            t["status"] = "rejected"
+            t["reviewed_by"] = manager_id
+            t["reviewed_by_name"] = manager_name
+            t["reviewed_at"] = now
+            t["rejection_reason"] = reject_in.reason
+        updated_pending.append(t)
+
+    await db["cleaning_plans"].update_one(
+        query,
+        {"$set": {"pending_additional_tasks": updated_pending, "updated_at": now}}
+    )
+    updated_doc = await db["cleaning_plans"].find_one(query)
+
+    reason_suffix = f" Reason: {reject_in.reason}" if reject_in.reason else ""
+    await _notify_requester(
+        db, target.get("requested_by"),
+        title="Additional Task Rejected",
+        message=f"Your request '{target.get('name')}' was not approved.{reason_suffix}",
+        notif_type="additional_task_rejected",
+        plan_id=plan_id, task_id=task_id
+    )
 
     return await _format_manager_cleaning_plan_detail(updated_doc, db, current_user=current_user)

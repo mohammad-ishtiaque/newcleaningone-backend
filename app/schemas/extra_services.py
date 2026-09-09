@@ -16,6 +16,11 @@ class ExtraServiceTaskItem(BaseModel):
     total_photos_required: int = 0
     is_completed: bool = False
     completed_at: Optional[datetime] = None
+    # Additive — same fields as CleaningTaskResponse, kept in sync for consistency.
+    weekly_days: Optional[List[str]] = None
+    monthly_dates: Optional[List[int]] = None
+    fixed_date: Optional[str] = None
+    duration_minutes: Optional[int] = None
 
 class ExtraServicePhotoRequirement(BaseModel):
     id: str
@@ -245,7 +250,7 @@ class ClientRoomDropdownItem(BaseModel):
     floor: Optional[int] = 1
     duration: Optional[int] = 30
     cleaning_type: Optional[str] = "standard"
-    monthly_cleaning_frequency: Optional[int] = 4
+    monthly_cleaning_frequency: Optional[int] = 0
     photo_number: int = 0
     task_number: int = 0
     tasks: List[CleaningTaskResponse] = Field(default_factory=list)
@@ -270,7 +275,7 @@ class ClientRoomDropdownItem(BaseModel):
                 "floor": 2,
                 "duration": 45,
                 "cleaning_type": "standard",
-                "monthly_cleaning_frequency": 4,
+                "monthly_cleaning_frequency": 0,
                 "photo_number": 2,
                 "task_number": 3,
                 "tasks": [

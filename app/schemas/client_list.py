@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional, List, Dict, Any, Union, Literal
 from datetime import datetime, date, timezone
 from enum import Enum
@@ -100,6 +100,57 @@ class ContractResponse(BaseModel):
     updated_at: str
 
 # --- Cleaning Plans & Tasks ---
+
+# Same lowercase 3-letter weekday convention already used for plan-level `working_days`
+# elsewhere in this codebase (see resolve_plan_working_days / normalize_working_days).
+VALID_WEEKDAY_ABBREVIATIONS = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+
+
+def _validate_task_weekly_days(value: Optional[List[str]]) -> Optional[List[str]]:
+    """Only meaningful when a task's frequency_type == 'weekly'; which weekdays it recurs on."""
+    if value is None:
+        return value
+    normalized = [str(d).strip().lower() for d in value]
+    invalid = sorted({d for d in normalized if d not in VALID_WEEKDAY_ABBREVIATIONS})
+    if invalid:
+        raise ValueError(
+            f"Invalid weekday(s) in weekly_days: {invalid}. Must be one of {sorted(VALID_WEEKDAY_ABBREVIATIONS)}"
+        )
+    # De-dup while preserving first-seen order (mon..sun as picked in the UI).
+    return list(dict.fromkeys(normalized))
+
+
+def _validate_task_monthly_dates(value: Optional[List[int]]) -> Optional[List[int]]:
+    """Only meaningful when a task's frequency_type == 'monthly'; which calendar dates it recurs on."""
+    if value is None:
+        return value
+    invalid = sorted({d for d in value if not (1 <= int(d) <= 31)})
+    if invalid:
+        raise ValueError(f"Invalid date(s) of month in monthly_dates: {invalid}. Must be between 1 and 31")
+    return sorted({int(d) for d in value})
+
+
+def _validate_task_fixed_date(value: Optional[str]) -> Optional[str]:
+    """Only meaningful when a task's frequency_type == 'fixed_date'; the single calendar date it occurs on."""
+    if value is None:
+        return value
+    from datetime import date as _date
+    try:
+        _date.fromisoformat(str(value).strip())
+    except ValueError:
+        raise ValueError(f"Invalid fixed_date '{value}'. Must be an ISO date string, e.g. '2026-09-20'")
+    return str(value).strip()
+
+
+def _validate_task_duration_minutes(value: Optional[int]) -> Optional[int]:
+    """Independent of scheduling — how long this specific task takes, in minutes."""
+    if value is None:
+        return value
+    if int(value) <= 0:
+        raise ValueError(f"Invalid duration_minutes '{value}'. Must be a positive number of minutes")
+    return int(value)
+
+
 class TaskPhotoCreate(BaseModel):
     id: Optional[str] = None
     name: str = Field(..., json_schema_extra={"example": "After Deep Floor scrubbing"})
@@ -111,9 +162,23 @@ class TaskPhotoResponse(BaseModel):
 class CleaningTaskCreate(BaseModel):
     id: Optional[str] = None
     name: str = Field(..., json_schema_extra={"example": "Deep Floor Scrubbing"})
-    frequency_type: Optional[str] = Field(default="every_visit", json_schema_extra={"example": "every_visit"}) # every_visit, weekly, monthly, yearly
+    frequency_type: Optional[str] = Field(default="every_visit", json_schema_extra={"example": "every_visit"}) # every_visit, weekly, monthly, yearly, fixed_date
     is_photo_req: Optional[bool] = Field(default=False, json_schema_extra={"example": True})
     photo: Optional[List[TaskPhotoCreate]] = Field(default_factory=list)
+    # All four below are additive, optional fields — every existing field above is unchanged.
+    # weekly_days / monthly_dates: only meaningful when frequency_type == "weekly" / "monthly".
+    weekly_days: Optional[List[str]] = Field(default=None, json_schema_extra={"example": ["mon", "sat"]})
+    monthly_dates: Optional[List[int]] = Field(default=None, json_schema_extra={"example": [1, 15]})
+    # fixed_date: only meaningful when frequency_type == "fixed_date" (a one-time additional task).
+    fixed_date: Optional[str] = Field(default=None, json_schema_extra={"example": "2026-09-20"})
+    # duration_minutes: independent of scheduling — how long this specific task takes.
+    # Used for "Additional Tasks" on a cleaning plan; counts toward the plan's total duration/end time.
+    duration_minutes: Optional[int] = Field(default=None, json_schema_extra={"example": 10})
+
+    _check_weekly_days = field_validator("weekly_days")(_validate_task_weekly_days)
+    _check_monthly_dates = field_validator("monthly_dates")(_validate_task_monthly_dates)
+    _check_fixed_date = field_validator("fixed_date")(_validate_task_fixed_date)
+    _check_duration_minutes = field_validator("duration_minutes")(_validate_task_duration_minutes)
 
 class CleaningTaskUpdate(BaseModel):
     id: Optional[str] = None
@@ -121,6 +186,15 @@ class CleaningTaskUpdate(BaseModel):
     frequency_type: Optional[str] = None
     is_photo_req: Optional[bool] = None
     photo: Optional[List[TaskPhotoCreate]] = None
+    weekly_days: Optional[List[str]] = None
+    monthly_dates: Optional[List[int]] = None
+    fixed_date: Optional[str] = None
+    duration_minutes: Optional[int] = None
+
+    _check_weekly_days = field_validator("weekly_days")(_validate_task_weekly_days)
+    _check_monthly_dates = field_validator("monthly_dates")(_validate_task_monthly_dates)
+    _check_fixed_date = field_validator("fixed_date")(_validate_task_fixed_date)
+    _check_duration_minutes = field_validator("duration_minutes")(_validate_task_duration_minutes)
 
 class CleaningTaskResponse(BaseModel):
     id: str
@@ -129,6 +203,30 @@ class CleaningTaskResponse(BaseModel):
     is_photo_req: bool = False
     photo: List[TaskPhotoResponse] = Field(default_factory=list)
     total_photos_required: int = 0
+    weekly_days: Optional[List[str]] = None
+    monthly_dates: Optional[List[int]] = None
+    fixed_date: Optional[str] = None
+    duration_minutes: Optional[int] = None
+
+class PendingAdditionalTaskResponse(CleaningTaskResponse):
+    """
+    A client-submitted "additional task" request awaiting manager review.
+    Same shape as a real task (see CleaningTaskResponse) plus the approval
+    workflow fields below. Stays in this list even after being reviewed
+    (status flips to approved/rejected) so it doubles as an audit trail —
+    an approved one is ALSO copied into the plan's real `additional_tasks`.
+    """
+    status: str = Field(default="pending", json_schema_extra={"example": "pending"})  # pending | approved | rejected
+    requested_by: Optional[str] = None
+    requested_by_name: Optional[str] = None
+    requested_at: Optional[Union[str, datetime]] = None
+    reviewed_by: Optional[str] = None
+    reviewed_by_name: Optional[str] = None
+    reviewed_at: Optional[Union[str, datetime]] = None
+    rejection_reason: Optional[str] = None
+
+class RejectPendingAdditionalTaskRequest(BaseModel):
+    reason: Optional[str] = Field(default=None, json_schema_extra={"example": "Not covered under current contract scope"})
 
 class CleaningPlanCreate(BaseModel):
     plan_name: str = Field(..., json_schema_extra={"example": "Daily Office Hygiene"})
@@ -185,7 +283,10 @@ class ClientListCreate(BaseModel):
     email: EmailStr = Field(..., json_schema_extra={"example": "c3@yopmail.com"})
     phone: str = Field(..., json_schema_extra={"example": "+8801318531875"})
     license_expiration_date: Optional[str] = Field(default=None, json_schema_extra={"example": "2026-08-23"})
-    status: Optional[str] = Field(default="pending", json_schema_extra={"example": "pending"})
+    # Manager-created clients (this schema) are active immediately — their underlying
+    # user account is created already approved/active, so this must not default to
+    # "pending" (that status is reserved for self-signup clients awaiting approval).
+    status: Optional[str] = Field(default="active", json_schema_extra={"example": "active"})
 
     model_config = {
         "json_schema_extra": {
@@ -373,7 +474,7 @@ class RoomDropdownItemResponse(BaseModel):
     floor: Optional[int] = 1
     cleaning_type: Optional[str] = "standard"
     duration: Optional[int] = 30
-    monthly_cleaning_frequency: int = Field(default=4, description="Dynamic frequency: how many times a month this room is cleaned.")
+    monthly_cleaning_frequency: int = Field(default=0, description="Dynamic frequency: how many times a month this room is cleaned.")
 
     def __init__(self, **data):
         if "room_id" in data and not data.get("id"):
@@ -407,7 +508,7 @@ class RoomCreate(BaseModel):
     location_id: Optional[str] = Field(default=None, json_schema_extra={"example": "location_id_here"})
     floor: int = Field(default=1, json_schema_extra={"example": 1})
     duration: int = Field(default=90, json_schema_extra={"example": 90})  # minutes
-    monthly_cleaning_frequency: int = Field(default=4, json_schema_extra={"example": 4})
+    monthly_cleaning_frequency: int = Field(default=0, json_schema_extra={"example": 0})
     clean_type: str = Field(default="standard", json_schema_extra={"example": "standard"})  # standard, premium
     tasks: Optional[List[CleaningTaskCreate]] = Field(default_factory=list)
     required_photos: Optional[List[RequiredPhotoCreate]] = Field(default_factory=list)
@@ -417,7 +518,7 @@ class RoomCreate(BaseModel):
             "example": {
                 "clean_type": "standard",
                 "duration": 90,
-                "monthly_cleaning_frequency": 4,
+                "monthly_cleaning_frequency": 0,
                 "room_name": "Ware House",
                 "room_type": "suite",
                 "tasks": [
@@ -470,7 +571,7 @@ class RoomUpdate(BaseModel):
                 "room_type": "suite",
                 "duration": 90,
                 "floor": 1,
-                "monthly_cleaning_frequency": 4,
+                "monthly_cleaning_frequency": 0,
                 "clean_type": "standard",
                 "tasks": [
                     {
@@ -503,7 +604,7 @@ class RoomResponse(BaseModel):
     location_name: Optional[str] = ""
     floor: int = 1
     duration: int = 30
-    monthly_cleaning_frequency: int = 4
+    monthly_cleaning_frequency: int = 0
     required_photos: List[RequiredPhotoResponse] = Field(default_factory=list)
     photo_number: int = 0
     total_photos_required: int = 0
@@ -527,7 +628,7 @@ class RoomResponse(BaseModel):
                 "location_name": "Main HQ Warehouse",
                 "floor": 1,
                 "duration": 90,
-                "monthly_cleaning_frequency": 4,
+                "monthly_cleaning_frequency": 0,
                 "photo_number": 4,
                 "total_photos_required": 4,
                 "task_number": 2,
@@ -954,7 +1055,7 @@ class AdminRoomCreate(BaseModel):
     location_id: str
     floor: int = 1
     est_cleaning_duration_minutes: int = 45
-    monthly_cleaning_frequency: int = 4
+    monthly_cleaning_frequency: int = 0
     required_photos_count: int = 4
     tasks_count: int = 12
     cleaning_plan_name: Optional[str] = "Standard Clean"
@@ -967,7 +1068,7 @@ class AdminRoomGridItem(BaseModel):
     company_name: Optional[str] = ""
     location_id: Optional[str] = ""
     location_name: Optional[str] = ""
-    monthly_cleaning_frequency: int = 4
+    monthly_cleaning_frequency: int = 0
     photo_number: int = 0
     total_photos_required: int = 0
     task_number: int = 0
@@ -990,7 +1091,7 @@ class RoomDrawerDetailResponse(BaseModel):
     location_name: str
     cleaning_plan_name: str
     duration_minutes: int
-    monthly_cleaning_frequency: int = Field(default=4, description="Dynamic frequency: how many times a month this room is cleaned.")
+    monthly_cleaning_frequency: int = Field(default=0, description="Dynamic frequency: how many times a month this room is cleaned.")
     required_photos_count: int
     tasks_count: int
 
@@ -1050,7 +1151,7 @@ class CleaningPlanRoomDetail(BaseModel):
     room_type: str = "standard"
     floor: int = 1
     duration: int = 30
-    monthly_cleaning_frequency: int = 4
+    monthly_cleaning_frequency: int = 0
     clean_type: str = "standard"
     tasks: List[CleaningTaskResponse] = Field(default_factory=list)
     photo_number: int = 0
@@ -1207,6 +1308,10 @@ class ManagerCleaningPlanDetailResponse(BaseModel):
     clients_count: int = 0
     clients: List[CleaningPlanClientDetail] = Field(default_factory=list)
     manager: Optional[CleaningPlanManagerDetail] = None
+    # Additive — was accepted on create/update and stored on the plan doc, but never
+    # actually returned. Manager-side detail now surfaces it, matching the client side.
+    location_id: Optional[str] = None
+    location_name: Optional[str] = None
     room_ids: List[str] = Field(default_factory=list)
     rooms: List[CleaningPlanRoomDetail] = Field(default_factory=list)
     rooms_count: int = 0
@@ -1214,6 +1319,9 @@ class ManagerCleaningPlanDetailResponse(BaseModel):
     workers: List[CleaningPlanWorkerDetail] = Field(default_factory=list)
     workers_count: int = 0
     additional_tasks: List[CleaningTaskResponse] = Field(default_factory=list)
+    # Additive — client-submitted additional-task requests awaiting manager approve/reject.
+    # Kept even after review (status flips to approved/rejected) as an audit trail.
+    pending_additional_tasks: List[PendingAdditionalTaskResponse] = Field(default_factory=list)
     total_tasks_count: int = 0
     total_photos_count: int = 0
     date: str = "2026-08-17"
@@ -1232,6 +1340,8 @@ class ManagerCleaningPlanDetailResponse(BaseModel):
 class ManagerCleaningPlanListItemResponse(BaseModel):
     id: str
     title: str
+    location_id: Optional[str] = None
+    location_name: Optional[str] = None
     clients_count: int = 0
     client_names: List[str] = Field(default_factory=list)
     rooms_count: int = 0
