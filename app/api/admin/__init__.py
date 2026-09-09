@@ -9,7 +9,7 @@ from app.api.admin.rooms_global import rooms_global_router
 from app.api.admin.cleaning_plans import cleaning_plan_mgmt_router
 from app.api.admin.cleaning_plan_dropdowns import cleaning_plan_dropdowns_router
 from app.api.admin.workers import worker_mgmt_router
-from app.api.admin.roster import roster_mgmt_router
+from app.api.admin.roster import roster_mgmt_router, roaster_compat_router
 from app.api.admin.photo_reviews import photo_reviews_router
 from app.api.admin.escalations import escalations_router
 from app.api.admin.reports_quality_control import qc_reports_router
@@ -31,6 +31,7 @@ __all__ = [
     "worker_approvals_router",
     "worker_earnings_invoices_router",
     "roster_mgmt_router",
+    "roaster_compat_router",
     "photo_reviews_router",
     "escalations_router",
     "qc_reports_router",

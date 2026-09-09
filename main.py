@@ -31,7 +31,7 @@ if __name__ == "__main__":
     print(f"Starting Cleaning One {service_name.upper()} service on {settings.APP_HOST}:{port}...")
     uvicorn.run(
         "main:app",
-        host=settings.APP_HOST,
+        host="localhost",
         port=port,
         reload=True,
         access_log=True,

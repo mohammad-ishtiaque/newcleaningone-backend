@@ -18,7 +18,9 @@ from app.api.worker_shift_utils import is_plan_active_on_date, resolve_shift_exe
 from app.api.admin.roster_drafts_dropdowns import roster_drafts_dropdowns_router
 
 roster_mgmt_router = APIRouter(prefix="/manager/roster", tags=["Manager Roster Management"])
+roaster_compat_router = APIRouter(prefix="/manager/roaster", tags=["Manager Roster Management"])
 roster_mgmt_router.include_router(roster_drafts_dropdowns_router)
+roaster_compat_router.include_router(roster_drafts_dropdowns_router)
 
 
 def _calculate_hours(start_time: str, end_time: str) -> float:
@@ -34,24 +36,38 @@ def _calculate_hours(start_time: str, end_time: str) -> float:
         return 1.0
 
 
+def _parse_yyyy_mm_dd(date_value: Optional[str]) -> Optional[date]:
+    if not date_value:
+        return None
+    try:
+        return datetime.strptime(str(date_value).strip(), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _current_week_start() -> date:
+    today = datetime.now(timezone.utc).date()
+    return today - timedelta(days=today.weekday())
+
+
 # ================================
 # 1. Daily Roster View (Filtered: Only workers with shifts)
 # ================================
 
+@roaster_compat_router.get("/daily", response_model=AdminDailyRosterResponse, summary="Get Admin Daily Roster")
 @roster_mgmt_router.get("/daily", response_model=AdminDailyRosterResponse, summary="Get Admin Daily Roster")
 async def get_daily_roster(
     target_date: Optional[str] = None,
+    date: Optional[str] = None,
+    date_selected: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    if not target_date:
-        target_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    try:
-        dt_obj = datetime.strptime(target_date, "%Y-%m-%d")
-    except Exception:
-        target_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        dt_obj = datetime.strptime(target_date, "%Y-%m-%d")
+    parsed_date = _parse_yyyy_mm_dd(target_date or date or date_selected)
+    if not parsed_date:
+        parsed_date = datetime.now(timezone.utc).date()
+    target_date = parsed_date.strftime("%Y-%m-%d")
+    dt_obj = datetime.combine(parsed_date, datetime.min.time())
 
     date_str_formatted = dt_obj.strftime("%A, %d %B %Y")
 
@@ -204,21 +220,24 @@ async def get_daily_roster(
 # 2. Weekly Roster View
 # ================================
 
+@roaster_compat_router.get("/weekly", response_model=AdminWeeklyRosterResponse, summary="Get Admin Weekly Roster")
 @roster_mgmt_router.get("/weekly", response_model=AdminWeeklyRosterResponse, summary="Get Admin Weekly Roster")
 async def get_weekly_roster(
     start_date: Optional[str] = None,
+    target_date: Optional[str] = None,
+    date: Optional[str] = None,
+    date_selected: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
-    if not start_date:
-        today = datetime.now(timezone.utc).date()
-        start_dt = today - timedelta(days=today.weekday())
+    parsed_start_date = _parse_yyyy_mm_dd(start_date)
+    selected_date = _parse_yyyy_mm_dd(target_date or date or date_selected)
+    if parsed_start_date:
+        start_dt = parsed_start_date
+    elif selected_date:
+        start_dt = selected_date - timedelta(days=selected_date.weekday())
     else:
-        try:
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
-        except Exception:
-            today = datetime.now(timezone.utc).date()
-            start_dt = today - timedelta(days=today.weekday())
+        start_dt = _current_week_start()
 
     end_dt = start_dt + timedelta(days=6)
     start_date_str = start_dt.strftime("%Y-%m-%d")
@@ -381,16 +400,21 @@ async def get_weekly_roster(
 # 3. Monthly Roster View
 # ================================
 
+@roaster_compat_router.get("/monthly", response_model=AdminMonthlyRosterResponse, summary="Get Admin Monthly Roster")
 @roster_mgmt_router.get("/monthly", response_model=AdminMonthlyRosterResponse, summary="Get Admin Monthly Roster")
 async def get_monthly_roster(
     month: Optional[int] = None,
     year: Optional[int] = None,
+    target_date: Optional[str] = None,
+    date: Optional[str] = None,
+    date_selected: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
 ):
     db = get_database()
     now = datetime.now(timezone.utc)
-    target_m = month or now.month
-    target_y = year or now.year
+    selected_date = _parse_yyyy_mm_dd(target_date or date or date_selected)
+    target_m = month or (selected_date.month if selected_date else now.month)
+    target_y = year or (selected_date.year if selected_date else now.year)
 
     num_days = monthrange(target_y, target_m)[1]
     start_date_str = f"{target_y:04d}-{target_m:02d}-01"
@@ -542,6 +566,7 @@ async def get_monthly_roster(
 # 4. Shift Details Modal Card & Management
 # ================================
 
+@roaster_compat_router.get("/shifts/{shift_id}", response_model=RosterShiftDetailModalResponse, summary="Get Shift Details Modal Card")
 @roster_mgmt_router.get("/shifts/{shift_id}", response_model=RosterShiftDetailModalResponse, summary="Get Shift Details Modal Card")
 async def get_roster_shift_details(
     shift_id: str,
@@ -599,6 +624,7 @@ async def get_roster_shift_details(
     )
 
 
+@roaster_compat_router.post("/shifts", response_model=ShiftResponse, status_code=status.HTTP_201_CREATED, summary="Direct Create Roster Shift")
 @roster_mgmt_router.post("/shifts", response_model=ShiftResponse, status_code=status.HTTP_201_CREATED, summary="Direct Create Roster Shift")
 async def create_roster_shift(
     shift_in: RosterShiftCreateRequest,
@@ -652,6 +678,7 @@ async def create_roster_shift(
     return _format_shift_response(shift_doc)
 
 
+@roaster_compat_router.delete("/shifts/{shift_id}", status_code=status.HTTP_200_OK, summary="Delete Roster Shift")
 @roster_mgmt_router.delete("/shifts/{shift_id}", status_code=status.HTTP_200_OK, summary="Delete Roster Shift")
 async def delete_roster_shift(
     shift_id: str,
