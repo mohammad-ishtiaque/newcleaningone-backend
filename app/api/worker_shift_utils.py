@@ -62,6 +62,46 @@ def is_plan_active_on_date(plan_doc: dict, target_date_str: str) -> bool:
         return plan_date == target_date_str
 
 
+def is_plan_in_date_range(plan_doc: dict, target_date_str: str) -> bool:
+    """
+    Roster-specific plan gate: is this date inside the plan's own [date, repeat_until]
+    window? Unlike is_plan_active_on_date() above, this ignores working_days/repeat_shift
+    entirely — the plan only defines *how long* it runs (its date range); which specific
+    days within that range actually carry tasks is decided per-task, by matching each
+    room task's own frequency_type/weekly_days/monthly_dates/fixed_date against the date
+    (see _task_applies_on_date in app/api/admin/roster.py), not by the plan itself.
+
+    Used by every worker/manager roster & shift-list view so they all agree on the same
+    rule; app-wide plan-active checks elsewhere (client views, dashboards) still use
+    is_plan_active_on_date() above and are unaffected by this.
+    """
+    if not plan_doc.get("is_active", True) or plan_doc.get("status") == "cancelled":
+        return False
+
+    plan_date = str(plan_doc.get("date", "")).strip()
+    if not plan_date:
+        return False
+
+    try:
+        p_dt = datetime.strptime(plan_date, "%Y-%m-%d").date()
+        t_dt = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+    except Exception:
+        return plan_date == target_date_str
+
+    if t_dt < p_dt:
+        return False
+
+    repeat_until = plan_doc.get("repeat_until")
+    if repeat_until:
+        try:
+            u_dt = datetime.strptime(str(repeat_until).strip(), "%Y-%m-%d").date()
+            return t_dt <= u_dt
+        except Exception:
+            return t_dt == p_dt
+    # No repeat_until -> single-day plan, active only on its own date.
+    return t_dt == p_dt
+
+
 def evaluate_worker_attendance_status(
     plan_doc: dict,
     worker_record: Optional[dict] = None,

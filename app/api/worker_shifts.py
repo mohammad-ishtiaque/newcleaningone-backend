@@ -18,7 +18,7 @@ from app.schemas.shift import (
 from app.schemas.client_list import RequiredPhotoResponse
 from app.api.worker_shift_utils import (
     resolve_shift_execution, calculate_cleaning_plan_progress,
-    is_plan_active_on_date, get_or_create_shift_execution,
+    is_plan_in_date_range, get_or_create_shift_execution,
     parse_plan_start_datetime
 )
 from app.core.timezone_utils import (
@@ -461,11 +461,11 @@ async def get_my_assigned_shifts(
 
     for p in all_plans:
         if filter_date:
-            if not is_plan_active_on_date(p, filter_date):
+            if not is_plan_in_date_range(p, filter_date):
                 continue
             target_date = filter_date
         else:
-            if is_plan_active_on_date(p, today_str):
+            if is_plan_in_date_range(p, today_str):
                 target_date = today_str
             else:
                 p_date = str(p.get("date") or "")

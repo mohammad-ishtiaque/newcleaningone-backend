@@ -9,7 +9,7 @@ from app.models.user import UserInDB, RoleEnum
 from app.schemas.worker_roster import (
     DateStripItem, RosterCardItem, WorkerRosterScreenResponse, WorkerRosterDetailResponse
 )
-from app.api.worker_shift_utils import resolve_shift_execution, is_plan_active_on_date, get_or_create_shift_execution
+from app.api.worker_shift_utils import resolve_shift_execution, is_plan_in_date_range, get_or_create_shift_execution
 
 router = APIRouter(prefix="/worker/roster", tags=["Worker Roaster Management"])
 
@@ -141,7 +141,7 @@ async def get_worker_roster_screen(
     })
     plans = await cursor_p.to_list(length=100)
     for p in plans:
-        if is_plan_active_on_date(p, selected_date_str):
+        if is_plan_in_date_range(p, selected_date_str):
             exec_doc = await get_or_create_shift_execution(p, selected_date_str, db)
             raw_shifts.append(exec_doc)
 
