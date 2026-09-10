@@ -11,6 +11,7 @@ from app.schemas.user import (
 )
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
+from app.api.worker_availability import build_worker_availability_response
 
 worker_approvals_router = APIRouter(prefix="/manager", tags=["Manager Worker Management"])
 
@@ -539,6 +540,7 @@ async def get_worker_detail(
     shifts_summary, shift_rows = await _build_worker_shifts(db, wid)
     attendance_summary, attendance_rows = await _build_worker_attendance(db, wid)
     document_items = _build_worker_documents(user, draft)
+    availability = await build_worker_availability_response(wid, db)
 
     return WorkerDetailResponse(
         id=wid,
@@ -568,6 +570,7 @@ async def get_worker_detail(
         attendance_summary=attendance_summary,
         attendance=attendance_rows,
         documents=document_items,
+        availability=availability,
         created_at=cat,
         updated_at=uat
     )

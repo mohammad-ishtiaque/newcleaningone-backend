@@ -682,11 +682,17 @@ async def delete_worker_notification(
     return {"message": "Notification deleted successfully"}
 
 async def _build_worker_response(user: UserInDB) -> WorkerProfileResponse:
+    from app.core.database import get_database
+    from app.api.worker_availability import build_worker_availability_response
+
     user_data = user.model_dump()
     raw_days = user_data.get("working_days") or getattr(user, "working_days", None) or ["mon", "tue", "wed", "thu", "fri", "sat"]
     working_days, off_days = normalize_working_days(raw_days)
     user_data["working_days"] = working_days
     user_data["off_days"] = off_days
+
+    worker_id = str(getattr(user, "id", None) or getattr(user, "_id", None) or getattr(user, "mongo_id", None) or "")
+    user_data["availability"] = await build_worker_availability_response(worker_id, get_database())
     user_data["id_uploaded"] = bool(user.id_card_front and user.id_card_back)
     user_data["id_card_front_link"] = user.id_card_front
     user_data["id_card_back_link"] = user.id_card_back

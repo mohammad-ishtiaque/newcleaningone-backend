@@ -21,6 +21,7 @@ class ExtraServiceTaskItem(BaseModel):
     monthly_dates: Optional[List[int]] = None
     fixed_date: Optional[str] = None
     duration_minutes: Optional[int] = None
+    description: Optional[str] = None
 
 class ExtraServicePhotoRequirement(BaseModel):
     id: str

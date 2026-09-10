@@ -174,6 +174,9 @@ class CleaningTaskCreate(BaseModel):
     # duration_minutes: independent of scheduling — how long this specific task takes.
     # Used for "Additional Tasks" on a cleaning plan; counts toward the plan's total duration/end time.
     duration_minutes: Optional[int] = Field(default=None, json_schema_extra={"example": 10})
+    # description: free-text detail about what the task involves — e.g. a client explaining
+    # exactly what an additional task/extra service they're requesting needs.
+    description: Optional[str] = Field(default=None, json_schema_extra={"example": "Windows on the east side have visible streaks after rain, please deep clean."})
 
     _check_weekly_days = field_validator("weekly_days")(_validate_task_weekly_days)
     _check_monthly_dates = field_validator("monthly_dates")(_validate_task_monthly_dates)
@@ -190,6 +193,7 @@ class CleaningTaskUpdate(BaseModel):
     monthly_dates: Optional[List[int]] = None
     fixed_date: Optional[str] = None
     duration_minutes: Optional[int] = None
+    description: Optional[str] = None
 
     _check_weekly_days = field_validator("weekly_days")(_validate_task_weekly_days)
     _check_monthly_dates = field_validator("monthly_dates")(_validate_task_monthly_dates)
@@ -207,6 +211,7 @@ class CleaningTaskResponse(BaseModel):
     monthly_dates: Optional[List[int]] = None
     fixed_date: Optional[str] = None
     duration_minutes: Optional[int] = None
+    description: Optional[str] = None
 
 class PendingAdditionalTaskResponse(CleaningTaskResponse):
     """
@@ -1226,6 +1231,7 @@ class ManagerCleaningPlanCreate(BaseModel):
                     {
                         "name": "Deep Floor Scrubbing",
                         "frequency_type": "every_visit",
+                        "duration_minutes": 15,
                         "is_photo_req": True,
                         "photo": [
                             {
@@ -1239,6 +1245,8 @@ class ManagerCleaningPlanCreate(BaseModel):
                     {
                         "name": "Clean the ceiling",
                         "frequency_type": "weekly",
+                        "weekly_days": ["mon", "thu"],
+                        "duration_minutes": 20,
                         "is_photo_req": True,
                         "photo": [
                             {
@@ -1246,6 +1254,18 @@ class ManagerCleaningPlanCreate(BaseModel):
                             },
                             {
                                 "name": "Before Clean the ceiling"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "Task 1",
+                        "frequency_type": "fixed_date",
+                        "fixed_date": "2026-10-09",
+                        "duration_minutes": 10,
+                        "is_photo_req": True,
+                        "photo": [
+                            {
+                                "name": "proof photo"
                             }
                         ]
                     }
@@ -1287,10 +1307,23 @@ class ManagerCleaningPlanUpdate(BaseModel):
                     {
                         "name": "Deep Floor Scrubbing",
                         "frequency_type": "every_visit",
+                        "duration_minutes": 15,
                         "is_photo_req": True,
                         "photo": [
                             {
                                 "name": "After Deep Floor scrubbing"
+                            }
+                        ]
+                    },
+                    {
+                        "name": "Task 1",
+                        "frequency_type": "fixed_date",
+                        "fixed_date": "2026-10-09",
+                        "duration_minutes": 10,
+                        "is_photo_req": True,
+                        "photo": [
+                            {
+                                "name": "proof photo"
                             }
                         ]
                     }

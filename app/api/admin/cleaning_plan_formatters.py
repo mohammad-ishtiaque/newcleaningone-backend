@@ -29,6 +29,7 @@ def _format_tasks_list(raw_tasks: list) -> List[CleaningTaskResponse]:
             t_monthly_dates = t.get("monthly_dates")
             t_fixed_date = t.get("fixed_date")
             t_duration_minutes = t.get("duration_minutes")
+            t_description = t.get("description")
 
             raw_photos = t.get("photo") or t.get("photos") or []
             task_photos = []
@@ -56,7 +57,8 @@ def _format_tasks_list(raw_tasks: list) -> List[CleaningTaskResponse]:
                 weekly_days=t_weekly_days,
                 monthly_dates=t_monthly_dates,
                 fixed_date=t_fixed_date,
-                duration_minutes=t_duration_minutes
+                duration_minutes=t_duration_minutes,
+                description=t_description
             ))
         elif isinstance(t, str):
             tasks.append(CleaningTaskResponse(
@@ -76,6 +78,7 @@ def _format_tasks_list(raw_tasks: list) -> List[CleaningTaskResponse]:
             t_monthly_dates = getattr(t, "monthly_dates", None)
             t_fixed_date = getattr(t, "fixed_date", None)
             t_duration_minutes = getattr(t, "duration_minutes", None)
+            t_description = getattr(t, "description", None)
             raw_photos = getattr(t, "photo", []) or []
             task_photos = []
             for p in raw_photos:
@@ -94,7 +97,8 @@ def _format_tasks_list(raw_tasks: list) -> List[CleaningTaskResponse]:
                 weekly_days=t_weekly_days,
                 monthly_dates=t_monthly_dates,
                 fixed_date=t_fixed_date,
-                duration_minutes=t_duration_minutes
+                duration_minutes=t_duration_minutes,
+                description=t_description
             ))
     return tasks
 
@@ -132,6 +136,7 @@ def _format_pending_tasks_list(raw_pending: list) -> List[PendingAdditionalTaskR
             monthly_dates=t.get("monthly_dates"),
             fixed_date=t.get("fixed_date"),
             duration_minutes=t.get("duration_minutes"),
+            description=t.get("description"),
             status=t.get("status", "pending"),
             requested_by=t.get("requested_by"),
             requested_by_name=t.get("requested_by_name"),

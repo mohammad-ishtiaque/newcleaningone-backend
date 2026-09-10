@@ -193,6 +193,7 @@ def format_extra_service_response(doc: dict) -> ExtraServiceResponse:
             t_monthly_dates = t.get("monthly_dates")
             t_fixed_date = t.get("fixed_date")
             t_duration_minutes = t.get("duration_minutes")
+            t_description = t.get("description")
 
             raw_photos = t.get("photo") or t.get("photos") or []
             task_photos = []
@@ -222,7 +223,8 @@ def format_extra_service_response(doc: dict) -> ExtraServiceResponse:
                 weekly_days=t_weekly_days,
                 monthly_dates=t_monthly_dates,
                 fixed_date=t_fixed_date,
-                duration_minutes=t_duration_minutes
+                duration_minutes=t_duration_minutes,
+                description=t_description
             ))
 
     photos_res = []

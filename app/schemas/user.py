@@ -3,7 +3,7 @@ from typing import Optional, List, Literal
 from datetime import datetime, date
 from app.models.user import RoleEnum, WorkerTypeEnum
 from app.schemas.common import BasePaginatedResponse
-from app.schemas.worker_modules import DayAvailability
+from app.schemas.worker_modules import DayAvailability, WorkerAvailabilityResponse
 from app.services.worker_salary import (
     DEFAULT_HOURLY_RATE,
     RATE_FIELD_DESCRIPTION,
@@ -92,6 +92,9 @@ class WorkerProfileResponse(UserResponse):
     location: Optional[str] = None
     working_days: List[str] = Field(default_factory=lambda: ["mon", "tue", "wed", "thu", "fri", "sat"])
     off_days: List[str] = Field(default_factory=lambda: ["sun"])
+    # Weekly schedule with actual times — same data GET /worker/availability returns and
+    # (for employees) GET /manager/workers/{worker_id}/availability shows the manager.
+    availability: Optional[WorkerAvailabilityResponse] = None
 
 class WorkerWorkingDaysResponse(BaseModel):
     worker_id: str = Field(..., json_schema_extra={"example": "6a8d6190b230abb1f64db3c2"})
@@ -412,6 +415,9 @@ class WorkerDetailResponse(BaseModel):
     attendance_summary: WorkerAttendanceSummary = Field(default_factory=WorkerAttendanceSummary)
     attendance: List[WorkerAttendanceRow] = Field(default_factory=list)
     documents: List[WorkerDocumentItem] = Field(default_factory=list)
+    # Weekly schedule — employee schedules are manager-set (PUT /manager/workers/{worker_id}/availability),
+    # freelancer schedules are self-set (PUT /worker/availability). Always present here for either type.
+    availability: Optional[WorkerAvailabilityResponse] = None
     created_at: datetime
     updated_at: datetime
 
