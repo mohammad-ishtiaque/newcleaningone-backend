@@ -112,6 +112,17 @@ async def create_client_extra_service(
             if target_loc:
                 location_name = target_loc.get("name")
 
+    plan_name = None
+    if service_in.plan_id:
+        client_aliases = await resolve_client_id_aliases(current_user, db)
+        p_doc = await db["cleaning_plans"].find_one({
+            "$or": [{"_id": service_in.plan_id}, {"id": service_in.plan_id}],
+            "$and": [{"$or": [{"client_id": {"$in": client_aliases}}, {"client_ids": {"$in": client_aliases}}]}]
+        })
+        if not p_doc:
+            raise HTTPException(status_code=404, detail=f"Cleaning plan '{service_in.plan_id}' not found for this client")
+        plan_name = p_doc.get("title") or p_doc.get("plan_name")
+
     # Process hierarchical tasks and task photos
     task_items = []
     for t in (service_in.tasks or []):
@@ -186,6 +197,8 @@ async def create_client_extra_service(
         "location_name": location_name,
         "room_id": service_in.room_id,
         "room_name": room_name,
+        "plan_id": service_in.plan_id,
+        "plan_name": plan_name,
         "date_submitted": now.strftime("%b %d, %Y"),
         "rejection_reason": None,
         "assigned_workers": [],
@@ -609,6 +622,16 @@ async def update_client_extra_service(
         update_fields["location_id"] = service_in.location_id
     if service_in.room_id is not None:
         update_fields["room_id"] = service_in.room_id
+    if service_in.plan_id is not None:
+        client_aliases = await resolve_client_id_aliases(current_user, db)
+        p_doc = await db["cleaning_plans"].find_one({
+            "$or": [{"_id": service_in.plan_id}, {"id": service_in.plan_id}],
+            "$and": [{"$or": [{"client_id": {"$in": client_aliases}}, {"client_ids": {"$in": client_aliases}}]}]
+        })
+        if not p_doc:
+            raise HTTPException(status_code=404, detail=f"Cleaning plan '{service_in.plan_id}' not found for this client")
+        update_fields["plan_id"] = service_in.plan_id
+        update_fields["plan_name"] = p_doc.get("title") or p_doc.get("plan_name")
 
     if service_in.start_time is not None:
         update_fields["start_time"] = service_in.start_time

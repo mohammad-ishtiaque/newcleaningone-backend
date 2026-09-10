@@ -33,11 +33,12 @@ router = APIRouter(prefix="/manager/extra-services", tags=["Manager Extra Servic
     summary="Admin List Extra Service Requests",
     description="""
 ### Admin / Manager List Extra Service Requests (Paginated)
-Returns a paginated list of extra service requests across all clients for Manager review, with status and search filters.
+Returns a paginated list of extra service requests across all clients for Manager review, with status, client, and search filters.
 """
 )
 async def list_admin_extra_services(
     status_val: Optional[str] = None,
+    client_id: Optional[str] = None,
     search: Optional[str] = None,
     page: int = 1,
     limit: int = 10,
@@ -51,6 +52,9 @@ async def list_admin_extra_services(
 
     if status_val and status_val.lower() != "all":
         query["status"] = status_val.lower()
+
+    if client_id:
+        query["client_id"] = client_id
 
     if search:
         search_regex = {"$regex": search, "$options": "i"}

@@ -43,6 +43,10 @@ class ExtraServiceCreate(BaseModel):
     notes: Optional[str] = None
     location_id: Optional[str] = None
     room_id: Optional[str] = None
+    # Optional — links this extra service request to one of the client's existing
+    # cleaning plans (e.g. "extra work on top of my Betopia HQ plan"). Not required;
+    # a request with no plan_id is a fully standalone extra service.
+    plan_id: Optional[str] = Field(None, json_schema_extra={"example": "plan_642767a75a"})
     tasks: Optional[List[CleaningTaskCreate]] = Field(default_factory=list)
     task_list: Optional[List[str]] = None
 
@@ -79,11 +83,14 @@ class ExtraServiceCreate(BaseModel):
                 "description": "All exterior windows on floors 2-4 need cleaning before client visit.",
                 "location_id": "loc_db28f5a3f6",
                 "room_id": "room_a366ecf17c",
+                "plan_id": "plan_642767a75a",
                 "tasks": [
                     {
                         "name": "Clean exterior glass",
                         "frequency_type": "every_visit",
+                        "duration_minutes": 15,
                         "is_photo_req": True,
+                        "description": "Focus on streaks near the frame edges.",
                         "photo": [
                             {"name": "After exterior glass cleaning"},
                             {"name": "Before exterior glass cleaning"}
@@ -91,9 +98,21 @@ class ExtraServiceCreate(BaseModel):
                     },
                     {
                         "name": "Wipe window sills",
-                        "frequency_type": "every_visit",
+                        "frequency_type": "weekly",
+                        "weekly_days": ["mon", "thu"],
+                        "duration_minutes": 10,
                         "is_photo_req": False,
                         "photo": []
+                    },
+                    {
+                        "name": "Task 1",
+                        "frequency_type": "fixed_date",
+                        "fixed_date": "2026-10-09",
+                        "duration_minutes": 10,
+                        "is_photo_req": True,
+                        "photo": [
+                            {"name": "proof photo"}
+                        ]
                     }
                 ]
             }
@@ -111,6 +130,7 @@ class ExtraServiceUpdate(BaseModel):
     description: Optional[str] = None
     location_id: Optional[str] = None
     room_id: Optional[str] = None
+    plan_id: Optional[str] = Field(None, json_schema_extra={"example": "plan_642767a75a"})
     tasks: Optional[List[CleaningTaskCreate]] = None
     task_list: Optional[List[str]] = None
 
@@ -134,13 +154,25 @@ class ExtraServiceUpdate(BaseModel):
                 "preferred_date": "2026-07-15",
                 "priority": "High Priority",
                 "description": "Updated window cleaning scope",
+                "plan_id": "plan_642767a75a",
                 "tasks": [
                     {
                         "name": "Clean exterior glass",
                         "frequency_type": "every_visit",
+                        "duration_minutes": 15,
                         "is_photo_req": True,
                         "photo": [
                             {"name": "After exterior glass cleaning"}
+                        ]
+                    },
+                    {
+                        "name": "Task 1",
+                        "frequency_type": "fixed_date",
+                        "fixed_date": "2026-10-09",
+                        "duration_minutes": 10,
+                        "is_photo_req": True,
+                        "photo": [
+                            {"name": "proof photo"}
                         ]
                     }
                 ]
@@ -179,6 +211,17 @@ class ExtraServiceWorkerDetail(BaseModel):
     phone: Optional[str] = None
     profile_photo: Optional[str] = None
     profile_picture: Optional[str] = None
+    # Attendance/pay data — written by the shared worker check-in/check-out flow
+    # (POST /worker/shifts/{id}/check-in|check-out also resolves against extra_services),
+    # but was previously stored and never surfaced in this response.
+    checkin_time: Optional[datetime] = None
+    checkout_time: Optional[datetime] = None
+    attendance_status: Optional[str] = None  # "ontime" | "late"
+    hours_worked: Optional[float] = None
+    regular_hours: Optional[float] = None
+    overtime_hours: Optional[float] = None
+    hourly_rate: Optional[float] = None
+    shift_earnings: Optional[float] = None
 
 class ClientInfo(BaseModel):
     id: str
@@ -205,6 +248,9 @@ class ExtraServiceListItem(BaseModel):
     location_name: Optional[str] = None
     room_id: Optional[str] = None
     room_name: Optional[str] = None
+    # Optional link to an existing cleaning plan this extra service is requested against.
+    plan_id: Optional[str] = None
+    plan_name: Optional[str] = None
     client: Optional[ClientInfo] = None
     location: Optional[LocationInfo] = None
     room: Optional[RoomInfo] = None

@@ -108,10 +108,18 @@ def _format_pending_tasks_list(raw_pending: list) -> List[PendingAdditionalTaskR
     Formats a cleaning plan's `pending_additional_tasks` (client-submitted
     additional-task requests) into response models. Same field extraction as
     `_format_tasks_list` plus the approval-workflow fields.
+
+    Approved entries are excluded here — once approved, a task graduates into
+    the plan's real `additional_tasks[]`, so leaving it in this list too would
+    show it duplicated under "pending" even though it's no longer awaiting any
+    action. Rejected entries are kept (this is the only place their
+    `rejection_reason` is visible).
     """
     items = []
     for t in (raw_pending or []):
         if not isinstance(t, dict):
+            continue
+        if t.get("status") == "approved":
             continue
         t_id = str(t.get("id") or t.get("_id") or uuid.uuid4().hex[:8])
 

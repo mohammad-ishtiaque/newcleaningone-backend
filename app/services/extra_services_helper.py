@@ -95,7 +95,15 @@ def _extract_extra_service_base(doc: dict):
                 position=w_pos,
                 phone=w.get("phone"),
                 profile_photo=w_pic,
-                profile_picture=w_pic
+                profile_picture=w_pic,
+                checkin_time=w.get("checkin_time"),
+                checkout_time=w.get("checkout_time"),
+                attendance_status=w.get("status"),
+                hours_worked=w.get("hours_worked"),
+                regular_hours=w.get("regular_hours"),
+                overtime_hours=w.get("overtime_hours"),
+                hourly_rate=w.get("hourly_rate"),
+                shift_earnings=w.get("shift_earnings")
             ))
 
     c_id = doc.get("client_id") or "client_default"
@@ -135,6 +143,8 @@ def _extract_extra_service_base(doc: dict):
         "location_name": str(loc_name),
         "room_id": str(r_id),
         "room_name": str(r_name),
+        "plan_id": doc.get("plan_id"),
+        "plan_name": doc.get("plan_name"),
         "client": client_info,
         "location": loc_info,
         "room": room_info,
