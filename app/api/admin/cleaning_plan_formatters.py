@@ -470,9 +470,9 @@ async def _format_manager_cleaning_plan_detail(doc: dict, db, current_user: Opti
         working_days_val = [working_days_val]
     date_val = doc.get("date") or "2026-08-17"
     start_time_val = doc.get("start_time") or "08:00 AM"
-    end_time_val = doc.get("end_time") or _calculate_end_time(start_time_val, dur_mins)
     repeat_shift_val = doc.get("repeat_shift")
     repeat_until_val = doc.get("repeat_until")
+    end_date_val = repeat_until_val or date_val
 
     c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
     u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)
@@ -511,7 +511,7 @@ async def _format_manager_cleaning_plan_detail(doc: dict, db, current_user: Opti
         total_photos_count=p_cnt,
         date=date_val,
         start_time=start_time_val,
-        end_time=end_time_val,
+        end_date=end_date_val,
         duration_minutes=dur_mins,
         repeat_shift=repeat_shift_val,
         repeat_until=repeat_until_val,
@@ -570,9 +570,9 @@ async def _format_manager_cleaning_plan_list_item(doc: dict, db) -> ManagerClean
         working_days_val = [working_days_val]
     date_val = doc.get("date") or "2026-08-17"
     start_time_val = doc.get("start_time") or "08:00 AM"
-    end_time_val = doc.get("end_time") or _calculate_end_time(start_time_val, dur_mins)
     repeat_shift_val = doc.get("repeat_shift")
     repeat_until_val = doc.get("repeat_until")
+    end_date_val = repeat_until_val or date_val
 
     c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
     u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)
@@ -592,7 +592,7 @@ async def _format_manager_cleaning_plan_list_item(doc: dict, db) -> ManagerClean
         total_photos_count=p_cnt,
         date=date_val,
         start_time=start_time_val,
-        end_time=end_time_val,
+        end_date=end_date_val,
         duration_minutes=dur_mins,
         repeat_shift=repeat_shift_val,
         repeat_until=repeat_until_val,
@@ -741,9 +741,9 @@ async def batch_format_manager_cleaning_plan_list_items(raw_plans: list, db) -> 
             working_days_val = [working_days_val]
         date_val = doc.get("date") or "2026-08-17"
         start_time_val = doc.get("start_time") or "08:00 AM"
-        end_time_val = doc.get("end_time") or _calculate_end_time(start_time_val, dur_mins)
         repeat_shift_val = doc.get("repeat_shift")
         repeat_until_val = doc.get("repeat_until")
+        end_date_val = repeat_until_val or date_val
 
         c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
         u_at = doc.get("updated_at") if isinstance(doc.get("updated_at"), datetime) else datetime.now(timezone.utc)
@@ -763,7 +763,7 @@ async def batch_format_manager_cleaning_plan_list_items(raw_plans: list, db) -> 
             total_photos_count=p_cnt,
             date=date_val,
             start_time=start_time_val,
-            end_time=end_time_val,
+            end_date=end_date_val,
             duration_minutes=dur_mins,
             repeat_shift=repeat_shift_val,
             repeat_until=repeat_until_val,

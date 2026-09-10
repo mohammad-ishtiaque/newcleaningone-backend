@@ -29,7 +29,7 @@ class WorkerAssignmentItem(BaseModel):
     location_name: str = Field(..., json_schema_extra={"example": "Main Tower"})
     location_address: Optional[str] = None
     start_time: str = Field(..., json_schema_extra={"example": "08:00 AM"})
-    end_time: str = Field(..., json_schema_extra={"example": "04:00 PM"})
+    end_date: Optional[str] = Field(default=None, description="Last active date (YYYY-MM-DD) — a recurring plan's repeat_until, or a one-time plan/extra service's own date.", json_schema_extra={"example": "2026-09-30"})
     timezone: str = "Europe/Amsterdam"
     repeat_shift: Optional[str] = None
     working_days: List[str] = Field(default_factory=list, json_schema_extra={"example": ["mon", "wed", "fri"]})

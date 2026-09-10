@@ -118,7 +118,18 @@ def _calculate_hours(start_time: str, end_time: str) -> float:
 # 1. Daily Roster View (Filtered: Only workers with shifts)
 # ================================
 
-@roster_mgmt_router.get("/daily", response_model=AdminDailyRosterResponse, summary="Get Admin Daily Roster")
+@roster_mgmt_router.get(
+    "/daily",
+    response_model=AdminDailyRosterResponse,
+    summary="Get Admin Daily Roster",
+    description="""
+### Get Admin Daily Roster
+A cleaning plan shows up on this date whenever it falls inside the plan's own `date` → `repeat_until`
+window — `working_days`/`repeat_shift` play no part in that decision here. Each room task attached to
+the plan is then filtered independently, per its own `frequency_type` (`every_visit` always included,
+`weekly`/`monthly`/`fixed_date` matched against this exact date), and returned in `tasks[]` on the shift.
+"""
+)
 async def get_daily_roster(
     target_date: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
@@ -284,7 +295,18 @@ async def get_daily_roster(
 # 2. Weekly Roster View
 # ================================
 
-@roster_mgmt_router.get("/weekly", response_model=AdminWeeklyRosterResponse, summary="Get Admin Weekly Roster")
+@roster_mgmt_router.get(
+    "/weekly",
+    response_model=AdminWeeklyRosterResponse,
+    summary="Get Admin Weekly Roster",
+    description="""
+### Get Admin Weekly Roster
+Same rule as the daily roster, applied to each of the 7 days: a plan shows up on a given date whenever
+that date falls inside the plan's own `date` → `repeat_until` window (`working_days`/`repeat_shift` are
+not used for this). Each active day's room tasks are then filtered independently by their own
+`frequency_type` and returned in `tasks[]` on that day's shift entry.
+"""
+)
 async def get_weekly_roster(
     start_date: Optional[str] = None,
     current_user: UserInDB = Depends(require_manager)
@@ -466,7 +488,17 @@ async def get_weekly_roster(
 # 3. Monthly Roster View
 # ================================
 
-@roster_mgmt_router.get("/monthly", response_model=AdminMonthlyRosterResponse, summary="Get Admin Monthly Roster")
+@roster_mgmt_router.get(
+    "/monthly",
+    response_model=AdminMonthlyRosterResponse,
+    summary="Get Admin Monthly Roster",
+    description="""
+### Get Admin Monthly Roster
+Same rule as the daily/weekly roster, applied to every day in the month: a plan shows up on a given date
+whenever that date falls inside the plan's own `date` → `repeat_until` window (`working_days`/`repeat_shift`
+are not used for this).
+"""
+)
 async def get_monthly_roster(
     month: Optional[int] = None,
     year: Optional[int] = None,

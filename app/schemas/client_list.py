@@ -1363,7 +1363,7 @@ class ManagerCleaningPlanDetailResponse(BaseModel):
     total_photos_count: int = 0
     date: str = "2026-08-17"
     start_time: str = "08:00 AM"
-    end_time: str = "01:30 PM"
+    end_date: Optional[str] = None
     duration_minutes: int = 60
     repeat_shift: Optional[str] = None
     repeat_until: Optional[str] = None
@@ -1389,7 +1389,7 @@ class ManagerCleaningPlanListItemResponse(BaseModel):
     total_photos_count: int = 0
     date: str = "2026-08-17"
     start_time: str = "08:00 AM"
-    end_time: str = "01:30 PM"
+    end_date: Optional[str] = None
     duration_minutes: int = 60
     repeat_shift: Optional[str] = None
     repeat_until: Optional[str] = None

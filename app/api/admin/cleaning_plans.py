@@ -50,8 +50,9 @@ cleaning_plan_mgmt_router = APIRouter(prefix="/manager", tags=["Manager Cleaning
 Creates a cleaning plan / shift draft with automated duration calculation, single-client enforcement, and unified task & photo hierarchy.
 
 #### Supported Field Values & Options:
-- **`working_days`**: `["mon", "tue", "wed", "thu", "fri", "sat", "sun"]` (e.g. `["sun"]` for Monthly Sunday deep cleaning). This is what drives recurrence — omit it (or send an empty list) for a one-time plan active only on `date`.
-- **`repeat_shift`**: display-only free text (e.g. `"Does not repeat"`, `"Weekly"`) — stored as sent but never used to determine recurrence; `working_days` is the only field that does that.
+- **`date`** / **`repeat_until`**: define the plan's active date window (`date` through `repeat_until`, inclusive). On the manager roster (`GET /manager/roster/daily|weekly|monthly`), this window alone decides which days the plan/shift shows up on — a plan with no `repeat_until` is active only on `date`.
+- **`working_days`**: `["mon", "tue", "wed", "thu", "fri", "sat", "sun"]` (e.g. `["sun"]` for Monthly Sunday deep cleaning). Still used by the general plan-active check (client cleaning-plan views, dashboards, worker home) — but the **manager roster ignores it entirely**; on the roster, which specific tasks show up on which day is instead decided per-task by each room task's own `frequency_type`/`weekly_days`/`monthly_dates`/`fixed_date`.
+- **`repeat_shift`**: display-only free text (e.g. `"Does not repeat"`, `"Weekly"`) — stored as sent but never used to determine recurrence anywhere; `working_days` and `date`/`repeat_until` are the only fields that do that.
 - **`additional_tasks[].frequency_type`**: `"every_visit"`, `"weekly"`, `"monthly"`, `"yearly"`
 - **`additional_tasks[].is_photo_req`**: `true` | `false` (automatically set to `true` when `photo` list is provided)
 - **`additional_tasks[].photo`**: List of required photo requirements attached directly to this specific task, e.g.:
@@ -61,7 +62,7 @@ Creates a cleaning plan / shift draft with automated duration calculation, singl
     {"name": "Before Deep Floor scrubbing"}
   ]
   ```
-- **`start_time`**: e.g. `"08:00 AM"` (automatically computes `end_time` using aggregated room durations)
+- **`start_time`**: e.g. `"08:00 AM"` (used with room durations to compute the plan's total `duration_minutes` internally; the response's `end_date` field is a calendar date, not a time — see `date`/`repeat_until` above)
 - **`room_ids`**: List of valid room IDs belonging to a single client (e.g. `["room_a366ecf17c", "room_848a13ff0c"]`)
 """
 )
