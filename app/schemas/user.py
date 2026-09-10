@@ -3,6 +3,7 @@ from typing import Optional, List, Literal
 from datetime import datetime, date
 from app.models.user import RoleEnum, WorkerTypeEnum
 from app.schemas.common import BasePaginatedResponse
+from app.schemas.worker_modules import DayAvailability
 from app.services.worker_salary import (
     DEFAULT_HOURLY_RATE,
     RATE_FIELD_DESCRIPTION,
@@ -214,6 +215,13 @@ class AdminWorkerCreate(BaseModel):
     national_id_front: Optional[str] = None
     national_id_back: Optional[str] = None
     employee_contract_pdf: Optional[str] = None
+    # Employee-only, set at creation time by the manager (worker_type: "employee").
+    # Freelancers manage their own availability afterward via PUT /worker/availability —
+    # providing these for a "freelancer" worker_type is rejected (400).
+    weekly_availability: Optional[List[DayAvailability]] = Field(default=None, json_schema_extra={"example": [
+        {"day": "monday", "is_available": True, "start_time": "08:00 AM", "end_time": "05:00 PM"}
+    ]})
+    preferred_hours_per_week: Optional[int] = Field(default=None, json_schema_extra={"example": 40})
 
     def __init__(self, **data):
         if "full_name" not in data and "name" in data:

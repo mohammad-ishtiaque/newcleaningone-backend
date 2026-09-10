@@ -191,6 +191,14 @@ async def create_new_worker(
     if existing:
         raise HTTPException(status_code=400, detail="Worker with this email already exists")
 
+    worker_type_clean = worker_in.worker_type.lower()
+    availability_provided = worker_in.weekly_availability is not None or worker_in.preferred_hours_per_week is not None
+    if availability_provided and worker_type_clean != "employee":
+        raise HTTPException(
+            status_code=400,
+            detail="Only employee workers' availability can be set by a manager. Freelancers manage their own availability after account creation via PUT /worker/availability."
+        )
+
     now = datetime.now(timezone.utc)
     temp_pwd = generate_temporary_password()
     hashed_pwd = get_password_hash(temp_pwd)
@@ -229,6 +237,16 @@ async def create_new_worker(
 
     res = await db["users"].insert_one(doc)
     wid = str(res.inserted_id)
+
+    if availability_provided:
+        await apply_worker_availability_update(
+            wid,
+            WorkerAvailabilityUpdateRequest(
+                weekly_availability=worker_in.weekly_availability,
+                preferred_hours_per_week=worker_in.preferred_hours_per_week
+            ),
+            db
+        )
 
     # Sync pre-creation entry in admin_workers collection
     await db["admin_workers"].update_one(
