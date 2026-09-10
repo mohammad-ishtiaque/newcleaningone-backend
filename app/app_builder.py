@@ -130,7 +130,7 @@ def create_app(service_name: str = "all") -> FastAPI:
     @app.get("/", include_in_schema=False)
     async def root():
         return {
-            "message": f"Welcome to Cleaning One {service_name.capitalize()} API",
+            "message": "healthy amar sonar bangla",
             "service": service_name
         }
 
