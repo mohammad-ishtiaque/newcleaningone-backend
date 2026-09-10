@@ -16,9 +16,54 @@ from app.api.admin.profile_company import require_manager
 from app.api.admin.shifts import _format_shift_response
 from app.api.worker_shift_utils import is_plan_active_on_date, resolve_shift_execution
 from app.api.admin.roster_drafts_dropdowns import roster_drafts_dropdowns_router
+from app.api.admin.cleaning_plan_formatters import _resolve_rooms_data
+from app.schemas.client_list import CleaningTaskResponse
 
 roster_mgmt_router = APIRouter(prefix="/manager/roster", tags=["Manager Roster Management"])
 roster_mgmt_router.include_router(roster_drafts_dropdowns_router)
+
+
+def _task_applies_on_date(task: CleaningTaskResponse, target_date_str: str) -> bool:
+    """
+    Matches a room task's frequency_type against one specific roster date:
+    - every_visit (or unset): always applies
+    - weekly: task.weekly_days must contain this date's weekday (abbr or full name)
+    - monthly: task.monthly_dates must contain this date's day-of-month
+    - fixed_date: task.fixed_date must equal this exact date
+    """
+    freq = (task.frequency_type or "every_visit").strip().lower()
+    try:
+        t_dt = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+    except Exception:
+        return freq == "every_visit"
+
+    if freq == "every_visit":
+        return True
+    elif freq == "weekly":
+        day_name = t_dt.strftime("%A").lower()
+        day_abbr = t_dt.strftime("%a").lower()
+        days = [str(d).strip().lower() for d in (task.weekly_days or [])]
+        return any(d in [day_name, day_abbr] or d.startswith(day_abbr) or day_name.startswith(d) for d in days)
+    elif freq == "monthly":
+        dates = [int(d) for d in (task.monthly_dates or []) if str(d).strip().lstrip("-").isdigit()]
+        return t_dt.day in dates
+    elif freq == "fixed_date":
+        return str(task.fixed_date or "").strip() == target_date_str
+    return False
+
+
+async def _get_room_tasks_for_plan_date(plan_doc: dict, target_date_str: str, db) -> List[CleaningTaskResponse]:
+    """Plan -> rooms -> tasks, filtered to only those applicable on target_date_str."""
+    room_ids = plan_doc.get("room_ids", []) or []
+    if not room_ids:
+        return []
+    rooms_data = await _resolve_rooms_data(room_ids, db)
+    matched: List[CleaningTaskResponse] = []
+    for room in rooms_data:
+        for task in room.tasks:
+            if _task_applies_on_date(task, target_date_str):
+                matched.append(task)
+    return matched
 
 
 def _calculate_hours(start_time: str, end_time: str) -> float:
@@ -300,6 +345,10 @@ async def get_weekly_roster(
                 dur_mins = p.get("duration_minutes", 60)
                 dur_hrs = round(dur_mins / 60.0, 1)
 
+                # Plan -> rooms -> tasks, filtered to this specific date by each
+                # task's frequency_type (every_visit/weekly/monthly/fixed_date).
+                day_tasks = await _get_room_tasks_for_plan_date(p, d_str, db)
+
                 plan_item = WeeklyRosterDayShiftItem(
                     shift_id=p_id,
                     client_id=str(p.get("client_id", "")),
@@ -309,7 +358,8 @@ async def get_weekly_roster(
                     start_time=st,
                     end_time=p.get("end_time", "04:00 PM"),
                     duration_hours=dur_hrs,
-                    status=p.get("status", "scheduled")
+                    status=p.get("status", "scheduled"),
+                    tasks=day_tasks
                 )
 
                 w_ids = set([str(w) for w in p.get("worker_ids", [])])

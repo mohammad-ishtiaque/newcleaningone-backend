@@ -615,6 +615,11 @@ class WeeklyRosterDayShiftItem(BaseModel):
     end_time: str
     duration_hours: float
     status: str = "scheduled"
+    # Additive — room tasks (from the plan's rooms) applicable on this specific
+    # date, filtered by each task's frequency_type: every_visit always included,
+    # weekly matched against this date's weekday, monthly against day-of-month,
+    # fixed_date against this exact date. Empty for direct one-off shifts.
+    tasks: List[CleaningTaskResponse] = Field(default_factory=list)
 
 class WeeklyRosterDayCell(BaseModel):
     day_name: str
