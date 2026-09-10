@@ -189,6 +189,10 @@ class ShiftWorkerDetail(BaseModel):
     checkout_time: Optional[Any] = None
     status: Optional[str] = None
     hours_worked: Optional[float] = None
+    # Snapshotted at checkout (see worker_salary.rate_for_shift_record) — a later
+    # change to the worker's live rate never rewrites what this shift actually paid.
+    hourly_rate: Optional[float] = None
+    shift_earnings: Optional[float] = None
 
     def __init__(self, **data):
         if "id" in data and not data.get("worker_id"):

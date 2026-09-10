@@ -7,6 +7,52 @@ from app.schemas.extra_services import (
 )
 from app.schemas.client_list import TaskPhotoResponse
 
+
+async def finalize_extra_service_completion(doc: dict, db, finish_time: Optional[datetime] = None) -> dict:
+    """
+    Marks an extra service as completed and credits worked hours to assigned workers,
+    the same way a normal/additional cleaning-plan task auto-approves on submission
+    (no separate manual manager "complete-approve" click required).
+    Idempotent: if already completed, returns the document unchanged so hours are never
+    double-credited (e.g. if a manager also calls the manual complete-approve endpoint).
+    """
+    if doc.get("status") == "completed":
+        return doc
+
+    now = datetime.now(timezone.utc)
+    finish_dt = doc.get("actual_finish_time") or finish_time or now
+    start_dt = doc.get("actual_start_time")
+    est_hours = float(doc.get("estimated_hours", 2.0) or 2.0)
+
+    if start_dt and isinstance(start_dt, datetime):
+        if finish_dt.tzinfo is None:
+            finish_dt = finish_dt.replace(tzinfo=timezone.utc)
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        hours_worked = max(0.5, round((finish_dt - start_dt).total_seconds() / 3600.0, 2))
+    else:
+        hours_worked = est_hours if est_hours > 0 else 2.0
+
+    from bson import ObjectId
+    for w in doc.get("assigned_workers", []):
+        w_id = str(w.get("worker_id"))
+        w_query = {"_id": ObjectId(w_id)} if ObjectId.is_valid(w_id) else {"_id": w_id}
+        await db["users"].update_one(w_query, {"$inc": {"total_working_hours": hours_worked}})
+
+    request_id = str(doc.get("_id") or doc.get("id"))
+    await db["extra_services"].update_one(
+        {"$or": [{"_id": request_id}, {"id": request_id}]},
+        {"$set": {
+            "status": "completed",
+            "actual_finish_time": finish_dt,
+            "hours_credited": hours_worked,
+            "updated_at": now
+        }}
+    )
+
+    updated_doc = await db["extra_services"].find_one({"$or": [{"_id": request_id}, {"id": request_id}]})
+    return updated_doc or doc
+
 def _extract_extra_service_base(doc: dict):
     doc_id = str(doc.get("_id") or doc.get("id"))
     

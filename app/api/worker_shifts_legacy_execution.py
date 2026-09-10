@@ -14,6 +14,7 @@ from app.schemas.shift import (
 from app.api.worker_shift_utils import (
     resolve_shift_execution, calculate_cleaning_plan_progress
 )
+from app.api.admin.photo_reviews import _sync_shift_room_approval
 
 legacy_execution_router = APIRouter()
 
@@ -224,7 +225,7 @@ async def upload_worker_room_photo(
         "ai_score": ai_score,
         "ai_confidence": ai_conf,
         "ai_feature_breakdown": breakdown,
-        "status": "pending_review",
+        "status": "approved",
         "date_submitted": now,
         "updated_at": now
     }
@@ -249,7 +250,7 @@ async def upload_worker_room_photo(
                 "photo_name": clean_photo_name,
                 "submitted_at": now,
                 "review_id": review_doc["review_id"],
-                "status": "pending_review"
+                "status": "approved"
             }
             target_room["submitted_photos"].append(p_entry)
             
@@ -275,6 +276,10 @@ async def upload_worker_room_photo(
                 }}
             )
 
+            # Photo is already auto-approved above — ripple that into task/room/shift
+            # is_completed flags the same way a manual manager approval would.
+            await _sync_shift_room_approval(db, review_doc, is_approved=True)
+
     try:
         from app.services.shift_ws_service import broadcast_photo_submitted_event
         await broadcast_photo_submitted_event(
@@ -294,8 +299,8 @@ async def upload_worker_room_photo(
         shift_id=shift_id,
         room_id=room_id,
         photo_url=photo_url,
-        status="pending_review",
-        message=f"{photo_type.capitalize()} photo submitted successfully. Custom PyTorch AI Score: {ai_score}% ({ai_conf.capitalize()} confidence)"
+        status="approved",
+        message=f"{photo_type.capitalize()} photo submitted and approved. Custom PyTorch AI Score: {ai_score}% ({ai_conf.capitalize()} confidence)"
     )
 
 
@@ -375,7 +380,7 @@ async def complete_room_and_upload_proof(
         "after_photo_url": after_url,
         "before_photo_url": before_url,
         "notes": notes,
-        "status": "pending_review",
+        "status": "approved",
         "date_submitted": now
     }
 
@@ -388,7 +393,7 @@ async def complete_room_and_upload_proof(
         "submitted_at": now,
         "review_id": review_id,
         "notes": notes,
-        "status": "pending_review"
+        "status": "approved"
     }
 
     if "submitted_photos" not in target_room or not isinstance(target_room["submitted_photos"], list):
@@ -397,7 +402,7 @@ async def complete_room_and_upload_proof(
 
     target_room["status"] = "completed"
     target_room["is_completed"] = True
-    target_room["approval_status"] = "pending_review"
+    target_room["approval_status"] = "verified"
     target_room["completed_at"] = now.isoformat()
     target_room["notes"] = notes
 
@@ -437,9 +442,9 @@ async def complete_room_and_upload_proof(
         "room_name": room_name_str,
         "status": "completed",
         "is_completed": True,
-        "approval_status": "pending_review",
+        "approval_status": "verified",
         "photo_url": after_url,
-        "message": "Room clean proof uploaded successfully and room marked as completed (pending manager review)."
+        "message": "Room clean proof uploaded successfully and room marked as completed and approved."
     }
 
 

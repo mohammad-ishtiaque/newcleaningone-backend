@@ -15,6 +15,7 @@ from app.api.worker_shift_utils import (
 )
 from app.api.worker_shift_checklist_utils import build_shift_checklist_response
 from app.api.worker_shifts_legacy_execution import legacy_execution_router
+from app.api.admin.photo_reviews import _sync_shift_room_approval
 
 execution_router = APIRouter()
 execution_router.include_router(legacy_execution_router)
@@ -290,7 +291,7 @@ async def submit_photo_for_review(
         "photo_url": target_photo_url,
         "after_photo_url": target_photo_url,
         "notes": target_comment,
-        "status": "pending_review",
+        "status": "approved",
         "date_submitted": now,
         "updated_at": now
     }
@@ -299,7 +300,7 @@ async def submit_photo_for_review(
         "photo_id": target_photo_id,
         "photo_name": target_photo_name,
         "photo_url": target_photo_url,
-        "status": "pending_review",
+        "status": "approved",
         "review_id": review_id,
         "submitted_at": now,
         "notes": target_comment,
@@ -339,6 +340,12 @@ async def submit_photo_for_review(
         db["photo_reviews"].insert_one(review_doc),
         db[coll_name].update_one({"_id": doc_id}, {"$set": update_data})
     )
+
+    # Photo is already auto-approved above — ripple that into task/room/shift
+    # is_completed flags the same way a manual manager approval would, so
+    # checkout's "all tasks must be completed" check passes without requiring
+    # any manager click.
+    await _sync_shift_room_approval(db, review_doc, is_approved=True)
 
     # Trigger Push Notification to Managers & Broadcast WebSocket asynchronously
     async def _notify_photo_review():
@@ -380,7 +387,7 @@ async def submit_photo_for_review(
     return SubmitTaskPhotoResponse(
         review_id=review_id,
         photo_id=target_photo_id,
-        status="pending_review",
+        status="approved",
         message="Photo submitted successfully for manager review",
         photo_url=target_photo_url,
         photo_name=target_photo_name,

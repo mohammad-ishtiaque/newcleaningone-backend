@@ -22,18 +22,13 @@ def require_worker(current_user: UserInDB = Depends(get_current_user)) -> UserIn
 DEFAULT_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 
 
-@router.get(
-    "",
-    response_model=WorkerAvailabilityResponse,
-    summary="Get Worker Weekly Availability & Leave Requests",
-    description="Returns worker's recurring 7-day availability schedule, preferred weekly working hours, and submitted leave requests."
-)
-async def get_worker_availability(
-    current_user: UserInDB = Depends(require_worker)
-):
-    db = get_database()
-    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "")
+def get_worker_type_str(raw_worker_type) -> str:
+    """Normalizes a worker_type value (enum member, plain string, or None) to a lowercase string."""
+    return (raw_worker_type.value if hasattr(raw_worker_type, "value") else str(raw_worker_type or "")).lower()
 
+
+async def build_worker_availability_response(worker_id: str, db) -> WorkerAvailabilityResponse:
+    """Shared read path — used by both the worker's own GET and the manager's GET for any worker."""
     doc = await db["worker_availability"].find_one({"worker_id": worker_id})
     if not doc:
         weekly = [
@@ -64,19 +59,8 @@ async def get_worker_availability(
     )
 
 
-@router.put(
-    "",
-    response_model=WorkerAvailabilityResponse,
-    summary="Update Worker Weekly Availability",
-    description="Updates worker's weekly day-by-day availability slots and preferred weekly hours."
-)
-async def update_worker_availability(
-    update_in: WorkerAvailabilityUpdateRequest,
-    current_user: UserInDB = Depends(require_worker)
-):
-    db = get_database()
-    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "")
-
+async def apply_worker_availability_update(worker_id: str, update_in: WorkerAvailabilityUpdateRequest, db) -> WorkerAvailabilityResponse:
+    """Shared write path — used by both the freelancer's own PUT and the manager's PUT for an employee."""
     update_fields = {"updated_at": datetime.now(timezone.utc)}
     if update_in.weekly_availability is not None:
         update_fields["weekly_availability"] = [d.model_dump() for d in update_in.weekly_availability]
@@ -89,7 +73,46 @@ async def update_worker_availability(
         upsert=True
     )
 
-    return await get_worker_availability(current_user=current_user)
+    return await build_worker_availability_response(worker_id, db)
+
+
+@router.get(
+    "",
+    response_model=WorkerAvailabilityResponse,
+    summary="Get Worker Weekly Availability & Leave Requests",
+    description="Returns worker's recurring 7-day availability schedule, preferred weekly working hours, and submitted leave requests."
+)
+async def get_worker_availability(
+    current_user: UserInDB = Depends(require_worker)
+):
+    db = get_database()
+    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "")
+    return await build_worker_availability_response(worker_id, db)
+
+
+@router.put(
+    "",
+    response_model=WorkerAvailabilityResponse,
+    summary="Update Worker Weekly Availability",
+    description="Updates the freelance worker's own weekly day-by-day availability slots and preferred weekly hours. Employees cannot self-update — their schedule is set by a manager via PUT /manager/workers/{worker_id}/availability."
+)
+async def update_worker_availability(
+    update_in: WorkerAvailabilityUpdateRequest,
+    current_user: UserInDB = Depends(require_worker)
+):
+    # Only freelance workers set their own available time — a manager-assigned
+    # employee's schedule is fixed by the manager, not self-service. Viewing
+    # (GET, above) stays open to everyone; this check is on the write path only.
+    worker_type = get_worker_type_str(getattr(current_user, "worker_type", None))
+    if worker_type != "freelancer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only freelance workers can update their availability. Contact your manager to change your schedule."
+        )
+
+    db = get_database()
+    worker_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", None) or getattr(current_user, "mongo_id", None) or "")
+    return await apply_worker_availability_update(worker_id, update_in, db)
 
 
 @router.post(

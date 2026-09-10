@@ -20,6 +20,7 @@ from app.schemas.chat import (
     AttachmentUploadResponse, PaginatedConversationsResponse,
     ConversationParticipantsResponse, DeleteConversationResponse
 )
+from app.schemas.suggested_questions import SuggestedQuestionResponse
 
 router = APIRouter(prefix="/client/chat", tags=["Client Chat Management"])
 
@@ -28,6 +29,40 @@ def require_client(current_user: UserInDB = Depends(get_current_user)) -> UserIn
     if current_user.role != RoleEnum.client and current_user.role != "client":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Client role required")
     return current_user
+
+
+@router.get(
+    "/suggested-questions",
+    response_model=List[SuggestedQuestionResponse],
+    summary="Client Get Suggested Questions",
+    description="""
+### Client Get Suggested Questions (Chat Pre-Screen)
+Same mechanism as the worker version: manager-curated question/answer pairs shown before a
+real chat starts. If none help, the client taps "Direct chat to manager" —
+`POST /client/chat/start` (already existing).
+"""
+)
+async def get_client_suggested_questions(current_user: UserInDB = Depends(require_client)):
+    db = get_database()
+    cursor = db["suggested_questions"].find({
+        "is_active": True,
+        "target_role": {"$in": ["client", "all"]}
+    }).sort("created_at", -1)
+    raw = await cursor.to_list(length=200)
+
+    return [
+        SuggestedQuestionResponse(
+            id=str(d.get("_id") or d.get("id")),
+            question=d.get("question", ""),
+            answer=d.get("answer", ""),
+            target_role=d.get("target_role", "all"),
+            is_active=d.get("is_active", True),
+            created_by_manager_id=d.get("created_by_manager_id"),
+            created_at=d.get("created_at") if isinstance(d.get("created_at"), datetime) else datetime.now(timezone.utc),
+            updated_at=d.get("updated_at") if isinstance(d.get("updated_at"), datetime) else datetime.now(timezone.utc)
+        )
+        for d in raw
+    ]
 
 
 @router.get(

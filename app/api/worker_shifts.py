@@ -617,7 +617,10 @@ async def get_worker_shift_detail(
                 name=w_name,
                 position=str(w.get("position", "normal")),
                 worker_type=w_type,
-                profile_photo=w_pic
+                profile_photo=w_pic,
+                hours_worked=w.get("hours_worked"),
+                hourly_rate=w.get("hourly_rate"),
+                shift_earnings=w.get("shift_earnings")
             ))
 
     shift_doc["workers"] = resolved_workers

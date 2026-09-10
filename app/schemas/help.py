@@ -7,6 +7,7 @@ from app.schemas.common import BasePaginatedResponse
 class FAQListItem(BaseModel):
     id: int = Field(alias="serial_no")
     question: str
+    answer: str = ""
 
     class Config:
         populate_by_name = True

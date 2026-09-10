@@ -78,7 +78,8 @@ class FAQService:
             "faqs": [
                 {
                     "serial_no": item.get("serial_no") or (idx + 1),
-                    "question": item.get("question", "")
+                    "question": item.get("question", ""),
+                    "answer": item.get("answer", "")
                 }
                 for idx, item in enumerate(paginated)
             ]

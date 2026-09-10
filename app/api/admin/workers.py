@@ -24,6 +24,8 @@ from app.api.admin.profile_company import require_manager
 from app.api.admin.worker_csv_utils import generate_csv_template, parse_and_validate_worker_csv, export_workers_to_csv
 from app.api.admin.worker_approvals import _build_worker_documents
 from app.services.s3_service import S3Service
+from app.schemas.worker_modules import WorkerAvailabilityResponse, WorkerAvailabilityUpdateRequest
+from app.api.worker_availability import build_worker_availability_response, apply_worker_availability_update
 
 worker_mgmt_router = APIRouter(prefix="/manager", tags=["Manager Worker Management"])
 
@@ -646,6 +648,64 @@ async def restore_worker(
         )
 
     return {"message": "Worker restored successfully"}
+
+
+# ============================================================================
+# Worker Availability (Manager-managed for employees)
+# ============================================================================
+
+@worker_mgmt_router.get(
+    "/workers/{worker_id}/availability",
+    response_model=WorkerAvailabilityResponse,
+    summary="Manager Get Worker Weekly Availability",
+    description="Returns any worker's (employee or freelancer) recurring 7-day availability schedule, preferred weekly hours, and leave requests."
+)
+async def get_worker_availability_admin(
+    worker_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"$or": [{"_id": worker_id}, {"id": worker_id}]}
+    wdoc = await db["users"].find_one({"$and": [query, {"role": "worker"}]})
+    if not wdoc:
+        raise HTTPException(status_code=404, detail="Worker not found")
+
+    resolved_id = str(wdoc.get("_id") or wdoc.get("id"))
+    return await build_worker_availability_response(resolved_id, db)
+
+
+@worker_mgmt_router.put(
+    "/workers/{worker_id}/availability",
+    response_model=WorkerAvailabilityResponse,
+    summary="Manager Set Employee Worker Availability",
+    description="""
+### Manager Set Employee Worker Availability
+Sets an **employee** worker's weekly day-by-day availability and preferred weekly hours on their behalf.
+Employees do not self-manage their schedule — that is fixed by the manager here. Freelancers manage their
+own availability via `PUT /worker/availability` and are rejected by this endpoint (`400`); use this only for
+`worker_type: "employee"` workers.
+"""
+)
+async def update_worker_availability_admin(
+    worker_id: str,
+    update_in: WorkerAvailabilityUpdateRequest,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"_id": ObjectId(worker_id)} if ObjectId.is_valid(worker_id) else {"$or": [{"_id": worker_id}, {"id": worker_id}]}
+    wdoc = await db["users"].find_one({"$and": [query, {"role": "worker"}]})
+    if not wdoc:
+        raise HTTPException(status_code=404, detail="Worker not found")
+
+    worker_type = str(wdoc.get("worker_type") or "employee").lower()
+    if worker_type != "employee":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only employee workers' availability can be set by a manager. Freelancers manage their own availability."
+        )
+
+    resolved_id = str(wdoc.get("_id") or wdoc.get("id"))
+    return await apply_worker_availability_update(resolved_id, update_in, db)
 
 
 @worker_mgmt_router.get("/workers/export", summary="Export Workers CSV")

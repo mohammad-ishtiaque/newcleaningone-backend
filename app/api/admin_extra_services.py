@@ -6,7 +6,9 @@ from bson import ObjectId
 from app.core.database import get_database
 from app.dependencies.auth import get_current_user
 from app.models.user import UserInDB, RoleEnum
-from app.services.extra_services_helper import format_extra_service_response, format_extra_service_list_item
+from app.services.extra_services_helper import (
+    format_extra_service_response, format_extra_service_list_item, finalize_extra_service_completion
+)
 from app.schemas.extra_services import (
     ExtraServiceApproveRequest, ExtraServiceRejectRequest,
     ExtraServiceResponse, ExtraServicePaginatedResponse,
@@ -619,10 +621,12 @@ async def send_extra_service_assignment_notifications(
 @router.post(
     "/{request_id}/complete-approve",
     response_model=ExtraServiceResponse,
-    summary="Admin Final Approve & Credit Working Hours",
+    summary="Admin Final Approve & Credit Working Hours (Manual Override)",
     description="""
-### Admin Final Approve & Credit Working Hours
-Finalizes and approves extra service completion. Calculates worked hours and credits them directly to assigned workers' `total_working_hours` in the users collection.
+### Admin Final Approve & Credit Working Hours (Manual Override)
+Extra services are now auto-completed (worked hours auto-credited) the moment the worker submits — this endpoint
+is only a manual fallback (e.g. to force-close a request the worker never submitted). It is idempotent: calling it
+on an already-completed request just returns the existing result and never credits hours twice.
 """
 )
 async def final_approve_extra_service_completion(
@@ -637,37 +641,5 @@ async def final_approve_extra_service_completion(
     if not doc:
         raise HTTPException(status_code=404, detail="Extra service request not found")
 
-    now = datetime.now(timezone.utc)
-
-    start_dt = doc.get("actual_start_time")
-    finish_dt = doc.get("actual_finish_time") or now
-    est_hours = float(doc.get("estimated_hours", 2.0))
-
-    if start_dt and isinstance(start_dt, datetime):
-        if finish_dt.tzinfo is None:
-            finish_dt = finish_dt.replace(tzinfo=timezone.utc)
-        if start_dt.tzinfo is None:
-            start_dt = start_dt.replace(tzinfo=timezone.utc)
-        hours_worked = max(0.5, round((finish_dt - start_dt).total_seconds() / 3600.0, 2))
-    else:
-        hours_worked = est_hours if est_hours > 0 else 2.0
-
-    # Credit working hours to assigned workers in users collection
-    workers = doc.get("assigned_workers", [])
-    for w in workers:
-        w_id = str(w.get("worker_id"))
-        w_query = {"_id": ObjectId(w_id)} if ObjectId.is_valid(w_id) else {"_id": w_id}
-        await db["users"].update_one(w_query, {"$inc": {"total_working_hours": hours_worked}})
-
-    await db["extra_services"].update_one(
-        {"$or": [{"_id": request_id}, {"id": request_id}]},
-        {"$set": {
-            "status": "completed",
-            "actual_finish_time": finish_dt,
-            "hours_credited": hours_worked,
-            "updated_at": now
-        }}
-    )
-
-    updated_doc = await db["extra_services"].find_one({"$or": [{"_id": request_id}, {"id": request_id}]})
+    updated_doc = await finalize_extra_service_completion(doc, db)
     return format_extra_service_response(updated_doc)

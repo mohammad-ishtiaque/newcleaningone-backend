@@ -21,6 +21,7 @@ from app.schemas.chat import (
     AttachmentUploadResponse, PaginatedConversationsResponse,
     ConversationParticipantsResponse
 )
+from app.schemas.suggested_questions import SuggestedQuestionResponse
 
 router = APIRouter(prefix="/worker/chat", tags=["Worker Chat Management"])
 
@@ -29,6 +30,42 @@ def require_worker(current_user: UserInDB = Depends(get_current_user)) -> UserIn
     if current_user.role not in [RoleEnum.worker, "worker"]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Worker role required")
     return current_user
+
+
+@router.get(
+    "/suggested-questions",
+    response_model=List[SuggestedQuestionResponse],
+    summary="Worker Get Suggested Questions",
+    description="""
+### Worker Get Suggested Questions (Chat Pre-Screen)
+Returns the manager-curated list of common questions with their answers, shown to a worker
+before they start a real chat. Both question and answer are included, so the frontend can
+show the answer immediately on tap without a second request — it should render like a
+message the worker just received. If none of these help, the worker taps "Direct chat to
+manager", which is `POST /worker/chat/conversations` (already existing, no body needed).
+"""
+)
+async def get_worker_suggested_questions(current_user: UserInDB = Depends(require_worker)):
+    db = get_database()
+    cursor = db["suggested_questions"].find({
+        "is_active": True,
+        "target_role": {"$in": ["worker", "all"]}
+    }).sort("created_at", -1)
+    raw = await cursor.to_list(length=200)
+
+    return [
+        SuggestedQuestionResponse(
+            id=str(d.get("_id") or d.get("id")),
+            question=d.get("question", ""),
+            answer=d.get("answer", ""),
+            target_role=d.get("target_role", "all"),
+            is_active=d.get("is_active", True),
+            created_by_manager_id=d.get("created_by_manager_id"),
+            created_at=d.get("created_at") if isinstance(d.get("created_at"), datetime) else datetime.now(timezone.utc),
+            updated_at=d.get("updated_at") if isinstance(d.get("updated_at"), datetime) else datetime.now(timezone.utc)
+        )
+        for d in raw
+    ]
 
 
 @router.get(

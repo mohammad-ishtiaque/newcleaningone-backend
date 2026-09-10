@@ -7,7 +7,9 @@ from app.core.database import get_database
 from app.dependencies.auth import get_current_user
 from app.models.user import UserInDB, RoleEnum
 from app.services.s3_service import S3Service
-from app.services.extra_services_helper import format_extra_service_response, format_extra_service_list_item
+from app.services.extra_services_helper import (
+    format_extra_service_response, format_extra_service_list_item, finalize_extra_service_completion
+)
 from app.schemas.extra_services import ExtraServiceResponse, ExtraServicePaginatedResponse
 
 router = APIRouter(prefix="/worker/extra-services", tags=["Worker Extra Service Management"])
@@ -237,7 +239,7 @@ async def upload_extra_service_photo(
         "photo_name": file.filename or "Required Extra Service Photo",
         "ai_score": 95.0,
         "ai_confidence": "high",
-        "status": "pending_review",
+        "status": "approved",
         "rejection_reason": None,
         "date_submitted": now
     })
@@ -255,7 +257,7 @@ async def upload_extra_service_photo(
     "/{request_id}/submit",
     response_model=ExtraServiceResponse,
     summary="Worker Submit Extra Service for Completion",
-    description="Submits extra service for Admin final approval after completing all tasks and photo requirements."
+    description="Submits extra service after completing all tasks and photo requirements. Automatically approved as 'completed' and worked hours are credited immediately — no separate manager approval step is required."
 )
 async def submit_worker_extra_service(
     request_id: str,
@@ -287,14 +289,5 @@ async def submit_worker_extra_service(
         )
 
     now = datetime.now(timezone.utc)
-    await db["extra_services"].update_one(
-        {"$or": [{"_id": request_id}, {"id": request_id}]},
-        {"$set": {
-            "status": "submitted_for_completion",
-            "actual_finish_time": now,
-            "updated_at": now
-        }}
-    )
-
-    updated_doc = await db["extra_services"].find_one({"$or": [{"_id": request_id}, {"id": request_id}]})
+    updated_doc = await finalize_extra_service_completion(doc, db, finish_time=now)
     return format_extra_service_response(updated_doc)

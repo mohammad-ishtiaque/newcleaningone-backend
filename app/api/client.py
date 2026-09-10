@@ -508,7 +508,8 @@ async def get_client_faqs():
     for idx, f in enumerate(raw, start=1):
         items.append(FAQListItem(
             serial_no=f.get("serial_no", idx),
-            question=f.get("question", "")
+            question=f.get("question", ""),
+            answer=f.get("answer", "")
         ))
     if not items:
         # Default helpful client FAQs
@@ -520,7 +521,7 @@ async def get_client_faqs():
             {"serial_no": 5, "question": "What happens if a cleaner is late or misses a shift?", "answer": "Our live operations team automatically detects delays and dispatches standby replacements."}
         ]
         for f in default_faqs:
-            items.append(FAQListItem(serial_no=f["serial_no"], question=f["question"]))
+            items.append(FAQListItem(serial_no=f["serial_no"], question=f["question"], answer=f["answer"]))
     return FAQListResponse(faqs=items, total_count=len(items), page=1, limit=50, has_more=False)
 
 

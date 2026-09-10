@@ -57,11 +57,16 @@ class WorkerInvoiceItem(BaseModel):
     period_start: str = Field(..., json_schema_extra={"example": "2026-08-01"})
     period_end: str = Field(..., json_schema_extra={"example": "2026-08-15"})
     hours_worked: float = Field(..., json_schema_extra={"example": 72.5})
+    regular_hours: Optional[float] = Field(default=None, json_schema_extra={"example": 67.0})
+    overtime_hours: Optional[float] = Field(default=None, json_schema_extra={"example": 5.5})
     hourly_rate: float = Field(..., json_schema_extra={"example": 18.50})
     gross_amount: float = Field(..., json_schema_extra={"example": 1341.25})
     bonus_amount: float = Field(default=0.0, json_schema_extra={"example": 50.0})
     deductions: float = Field(default=0.0, json_schema_extra={"example": 0.0})
     net_payout: float = Field(..., json_schema_extra={"example": 1391.25})
+    # How much of gross_amount is still owed on THIS invoice specifically
+    # (gross_amount minus net_payout, taken from the real stored record).
+    balance_due: float = Field(default=0.0, json_schema_extra={"example": 0.0})
     currency: str = "EUR"
     status: Literal["paid", "pending", "processing", "partial"] = "paid"
     payment_method: Optional[str] = "Bank Transfer"
@@ -73,8 +78,17 @@ class WorkerInvoicesPaginatedResponse(BasePaginatedResponse):
     page: int
     limit: int
     has_more: bool = False
+    # Gross value of all real invoices on record (sum of gross_amount) — distinct
+    # from total_paid below. "Earned" is what the work is worth; "paid" is what
+    # has actually been disbursed so far.
     total_earned: float = 0.0
+    total_paid: float = 0.0
     pending_payout: float = 0.0
+    # The worker's current live hourly rate — for a header like "25 EUR/h".
+    # Not tied to any one invoice; read fresh from the worker's own profile.
+    current_hourly_rate: float = 0.0
+    total_hours_worked: float = 0.0
+    total_overtime_hours: float = 0.0
     invoices: List[WorkerInvoiceItem] = Field(default_factory=list)
 
 

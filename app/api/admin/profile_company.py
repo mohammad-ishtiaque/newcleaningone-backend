@@ -10,6 +10,10 @@ from app.schemas.help import (
     SupportMessageResponse, SupportReplyRequest, AdminSupportListResponse,
     FAQCreate, FAQUpdate, FAQResponse
 )
+from app.schemas.suggested_questions import (
+    SuggestedQuestionCreate, SuggestedQuestionUpdate, SuggestedQuestionResponse,
+    SuggestedQuestionPaginatedResponse
+)
 from app.models.user import RoleEnum, UserInDB
 from app.repositories.user_repo import UserRepository
 from app.dependencies.auth import get_current_user
@@ -368,3 +372,110 @@ async def delete_faq(
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="FAQ not found")
     return {"message": "FAQ deleted successfully"}
+
+
+# ================================
+# Suggested Questions (Chat pre-screen: worker/client pick a question,
+# see the stored answer, and escalate to a real chat if not satisfied)
+# ================================
+
+def _format_suggested_question(doc: dict) -> SuggestedQuestionResponse:
+    c_at = doc.get("created_at")
+    if not isinstance(c_at, datetime):
+        c_at = datetime.now(timezone.utc)
+    u_at = doc.get("updated_at")
+    if not isinstance(u_at, datetime):
+        u_at = c_at
+    return SuggestedQuestionResponse(
+        id=str(doc.get("_id") or doc.get("id")),
+        question=doc.get("question", ""),
+        answer=doc.get("answer", ""),
+        target_role=doc.get("target_role", "all"),
+        is_active=doc.get("is_active", True),
+        created_by_manager_id=doc.get("created_by_manager_id"),
+        created_at=c_at,
+        updated_at=u_at
+    )
+
+
+@router.get("/suggested-questions", response_model=SuggestedQuestionPaginatedResponse, summary="List Suggested Questions (Chat)")
+async def list_suggested_questions(
+    target_role: Optional[str] = None,
+    page: int = 1,
+    limit: int = 50,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {}
+    if target_role and target_role.lower() != "all":
+        query["target_role"] = {"$in": [target_role.lower(), "all"]}
+
+    total_count = await db["suggested_questions"].count_documents(query)
+    cursor = db["suggested_questions"].find(query).sort("created_at", -1).skip((page - 1) * limit).limit(limit)
+    raw = await cursor.to_list(length=limit)
+
+    return SuggestedQuestionPaginatedResponse(
+        total_count=total_count,
+        page=page,
+        limit=limit,
+        has_more=(page * limit) < total_count,
+        questions=[_format_suggested_question(d) for d in raw]
+    )
+
+
+@router.post("/suggested-questions", response_model=SuggestedQuestionResponse, status_code=status.HTTP_201_CREATED, summary="Create Suggested Question (Chat)")
+async def create_suggested_question(
+    q_in: SuggestedQuestionCreate,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    now = datetime.now(timezone.utc)
+    q_id = f"sq_{uuid.uuid4().hex[:8]}"
+    manager_id = str(getattr(current_user, "id", None) or getattr(current_user, "_id", ""))
+
+    doc = {
+        "_id": q_id,
+        "id": q_id,
+        "question": q_in.question,
+        "answer": q_in.answer,
+        "target_role": q_in.target_role,
+        "is_active": q_in.is_active,
+        "created_by_manager_id": manager_id,
+        "created_at": now,
+        "updated_at": now
+    }
+    await db["suggested_questions"].insert_one(doc)
+    return _format_suggested_question(doc)
+
+
+@router.patch("/suggested-questions/{question_id}", response_model=SuggestedQuestionResponse, summary="Update Suggested Question (Chat)")
+async def update_suggested_question(
+    question_id: str,
+    q_in: SuggestedQuestionUpdate,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"$or": [{"_id": question_id}, {"id": question_id}]}
+    doc = await db["suggested_questions"].find_one(query)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Suggested question not found")
+
+    fields = q_in.model_dump(exclude_unset=True)
+    fields["updated_at"] = datetime.now(timezone.utc)
+    await db["suggested_questions"].update_one(query, {"$set": fields})
+
+    updated = await db["suggested_questions"].find_one(query)
+    return _format_suggested_question(updated)
+
+
+@router.delete("/suggested-questions/{question_id}", status_code=status.HTTP_200_OK, summary="Delete Suggested Question (Chat)")
+async def delete_suggested_question(
+    question_id: str,
+    current_user: UserInDB = Depends(require_manager)
+):
+    db = get_database()
+    query = {"$or": [{"_id": question_id}, {"id": question_id}]}
+    res = await db["suggested_questions"].delete_one(query)
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Suggested question not found")
+    return {"message": "Suggested question deleted successfully"}
