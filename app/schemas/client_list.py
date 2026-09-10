@@ -1223,6 +1223,7 @@ class ManagerCleaningPlanCreate(BaseModel):
                 ],
                 "date": "2026-08-17",
                 "start_time": "08:00 AM",
+                "repeat_shift": None,
                 "repeat_until": "2026-12-31",
                 "working_days": [
                     "sun"
@@ -1305,6 +1306,7 @@ class ManagerCleaningPlanUpdate(BaseModel):
             "example": {
                 "title": "Kafa Automation Cleaning plan & Betopia Group",
                 "shift_notes": "Updated monthly deep cleaning instructions",
+                "repeat_shift": None,
                 "additional_tasks": [
                     {
                         "name": "Deep Floor Scrubbing",

@@ -22,7 +22,7 @@ from app.api.worker_shift_utils import (
 )
 from app.api.admin.cleaning_plan_formatters import (
     _resolve_rooms_data, _format_tasks_list, _resolve_workers_data,
-    _calculate_end_time, _format_pending_tasks_list
+    _format_pending_tasks_list
 )
 
 router = APIRouter(tags=["Client Live Status Management"])
@@ -113,8 +113,8 @@ async def _format_plan_list_item(
 
     dur_mins = active_doc.get("duration_minutes") or plan_doc.get("duration_minutes", 60)
     st_time = active_doc.get("start_time") or plan_doc.get("start_time", "08:00 AM")
-    end_time = active_doc.get("end_time") or plan_doc.get("end_time") or _calculate_end_time(st_time, dur_mins)
     date_val = target_date or active_doc.get("date") or plan_doc.get("date")
+    end_date_val = plan_doc.get("repeat_until") or date_val
 
     return ClientCleaningPlanListItem(
         id=pid,
@@ -123,7 +123,7 @@ async def _format_plan_list_item(
         priority=None,
         date=date_val,
         start_time=st_time,
-        end_time=end_time,
+        end_date=end_date_val,
         duration_minutes=dur_mins,
         status=status_str,
         location_id=loc_id,
@@ -188,7 +188,6 @@ async def _format_extra_service_list_item(
 
     dur_mins = int((es_doc.get("estimated_hours") or 1) * 60)
     st_time = es_doc.get("start_time", "08:00 AM")
-    end_time = es_doc.get("end_time") or _calculate_end_time(st_time, dur_mins)
 
     return ClientCleaningPlanListItem(
         id=es_id,
@@ -197,7 +196,7 @@ async def _format_extra_service_list_item(
         priority=es_doc.get("priority", "Medium Priority"),
         date=pref_date,
         start_time=st_time,
-        end_time=end_time,
+        end_date=pref_date,
         duration_minutes=dur_mins,
         status=es_doc.get("status", "under_review"),
         location_id=loc_id,
@@ -387,7 +386,7 @@ async def _format_client_plan_detail(plan_doc: dict, db) -> ClientCleaningPlanDe
     progress = calculate_cleaning_plan_progress(plan_doc)
     dur_mins = plan_doc.get("duration_minutes") or sum(r.duration for r in rooms_data) or 60
     st_time = plan_doc.get("start_time", "08:00 AM")
-    end_time = plan_doc.get("end_time") or _calculate_end_time(st_time, dur_mins)
+    end_date_val = plan_doc.get("repeat_until") or plan_doc.get("date")
 
     return ClientCleaningPlanDetailResponse(
         id=pid,
@@ -413,7 +412,7 @@ async def _format_client_plan_detail(plan_doc: dict, db) -> ClientCleaningPlanDe
         overall_progress_percentage=progress["overall_progress_percentage"],
         date=plan_doc.get("date"),
         start_time=st_time,
-        end_time=end_time,
+        end_date=end_date_val,
         duration_minutes=dur_mins,
         repeat_shift=plan_doc.get("repeat_shift"),
         repeat_until=plan_doc.get("repeat_until"),
@@ -494,7 +493,6 @@ async def get_client_cleaning_plan_detail(
         progress = calculate_cleaning_plan_progress(es_doc)
         dur_mins = int((es_doc.get("estimated_hours") or 1) * 60)
         st_time = es_doc.get("start_time", "08:00 AM")
-        end_time = es_doc.get("end_time") or _calculate_end_time(st_time, dur_mins)
 
         return ClientCleaningPlanDetailResponse(
             id=es_id,
@@ -519,7 +517,7 @@ async def get_client_cleaning_plan_detail(
             overall_progress_percentage=progress["overall_progress_percentage"],
             date=es_doc.get("preferred_date") or es_doc.get("date"),
             start_time=st_time,
-            end_time=end_time,
+            end_date=es_doc.get("preferred_date") or es_doc.get("date"),
             duration_minutes=dur_mins,
             repeat_shift=None,
             repeat_until=None,

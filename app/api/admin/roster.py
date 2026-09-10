@@ -14,13 +14,48 @@ from app.schemas.shift import (
 from app.models.user import UserInDB
 from app.api.admin.profile_company import require_manager
 from app.api.admin.shifts import _format_shift_response
-from app.api.worker_shift_utils import is_plan_active_on_date, resolve_shift_execution
+from app.api.worker_shift_utils import resolve_shift_execution
 from app.api.admin.roster_drafts_dropdowns import roster_drafts_dropdowns_router
 from app.api.admin.cleaning_plan_formatters import _resolve_rooms_data
 from app.schemas.client_list import CleaningTaskResponse
 
 roster_mgmt_router = APIRouter(prefix="/manager/roster", tags=["Manager Roster Management"])
 roster_mgmt_router.include_router(roster_drafts_dropdowns_router)
+
+
+def _is_plan_in_roster_date_range(plan_doc: dict, target_date_str: str) -> bool:
+    """
+    Roster-specific plan gate: is this date inside the plan's own [date, repeat_until]
+    window? Unlike the general is_plan_active_on_date(), this ignores working_days/
+    repeat_shift entirely — the plan only defines *how long* it runs (its date range);
+    which specific days within that range actually get tasks is decided per-task by
+    _task_applies_on_date()/_get_room_tasks_for_plan_date() below, not by the plan.
+    """
+    if not plan_doc.get("is_active", True) or plan_doc.get("status") == "cancelled":
+        return False
+
+    plan_date = str(plan_doc.get("date", "")).strip()
+    if not plan_date:
+        return False
+
+    try:
+        p_dt = datetime.strptime(plan_date, "%Y-%m-%d").date()
+        t_dt = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+    except Exception:
+        return plan_date == target_date_str
+
+    if t_dt < p_dt:
+        return False
+
+    repeat_until = plan_doc.get("repeat_until")
+    if repeat_until:
+        try:
+            u_dt = datetime.strptime(str(repeat_until).strip(), "%Y-%m-%d").date()
+            return t_dt <= u_dt
+        except Exception:
+            return t_dt == p_dt
+    # No repeat_until -> single-day plan, active only on its own date.
+    return t_dt == p_dt
 
 
 def _task_applies_on_date(task: CleaningTaskResponse, target_date_str: str) -> bool:
@@ -163,7 +198,7 @@ async def get_daily_roster(
 
     # Add active cleaning plan shifts
     for p in all_plans:
-        if is_plan_active_on_date(p, target_date):
+        if _is_plan_in_roster_date_range(p, target_date):
             p_id = str(p.get("_id") or p.get("id"))
             if p_id in seen_shift_ids:
                 continue
@@ -339,7 +374,7 @@ async def get_weekly_roster(
     # Check active cleaning plans across the week
     for p in plans_raw:
         for d_str in day_date_strs:
-            if is_plan_active_on_date(p, d_str):
+            if _is_plan_in_roster_date_range(p, d_str):
                 p_id = str(p.get("_id") or p.get("id"))
                 st = p.get("start_time", "08:00")
                 dur_mins = p.get("duration_minutes", 60)
@@ -506,7 +541,7 @@ async def get_monthly_roster(
     for p in plans_raw:
         for day_num in range(1, num_days + 1):
             d_str = f"{target_y:04d}-{target_m:02d}-{day_num:02d}"
-            if is_plan_active_on_date(p, d_str):
+            if _is_plan_in_roster_date_range(p, d_str):
                 dur_hrs = round(p.get("duration_minutes", 60) / 60.0, 1)
                 loc = p.get("location_name", "Location")
                 p_id = str(p.get("_id") or p.get("id"))
