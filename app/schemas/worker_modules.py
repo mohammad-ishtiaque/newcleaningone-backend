@@ -31,7 +31,7 @@ class WorkerAssignmentItem(BaseModel):
     start_time: str = Field(..., json_schema_extra={"example": "08:00 AM"})
     end_time: str = Field(..., json_schema_extra={"example": "04:00 PM"})
     timezone: str = "Europe/Amsterdam"
-    repeat_shift: str = "Every week"
+    repeat_shift: Optional[str] = None
     working_days: List[str] = Field(default_factory=list, json_schema_extra={"example": ["mon", "wed", "fri"]})
     position: str = Field(default="normal", json_schema_extra={"example": "normal"})
     total_rooms_count: int = 1

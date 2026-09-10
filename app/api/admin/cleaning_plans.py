@@ -50,8 +50,8 @@ cleaning_plan_mgmt_router = APIRouter(prefix="/manager", tags=["Manager Cleaning
 Creates a cleaning plan / shift draft with automated duration calculation, single-client enforcement, and unified task & photo hierarchy.
 
 #### Supported Field Values & Options:
-- **`repeat_shift`**: `"Does not repeat"`, `"Every day"`, `"Standard working week"`, `"Weekly"`, `"Monthly"`
-- **`working_days`**: `["mon", "tue", "wed", "thu", "fri", "sat", "sun"]` (e.g. `["sun"]` for Monthly Sunday deep cleaning)
+- **`working_days`**: `["mon", "tue", "wed", "thu", "fri", "sat", "sun"]` (e.g. `["sun"]` for Monthly Sunday deep cleaning). This is what drives recurrence — omit it (or send an empty list) for a one-time plan active only on `date`.
+- **`repeat_shift`**: display-only free text (e.g. `"Does not repeat"`, `"Weekly"`) — stored as sent but never used to determine recurrence; `working_days` is the only field that does that.
 - **`additional_tasks[].frequency_type`**: `"every_visit"`, `"weekly"`, `"monthly"`, `"yearly"`
 - **`additional_tasks[].is_photo_req`**: `true` | `false` (automatically set to `true` when `photo` list is provided)
 - **`additional_tasks[].photo`**: List of required photo requirements attached directly to this specific task, e.g.:
@@ -155,11 +155,10 @@ async def create_manager_cleaning_plan(
     total_tasks_count = room_tasks_count + add_tasks_count
     total_photos_count = room_photos_count + add_photos_count
 
-    # 7. Frequency days & Repeat shift
+    # 7. Frequency days — driven entirely by working_days now; repeat_shift is
+    # stored as given (may be null) purely for display, never used to derive this.
     date_val = plan_in.date or "2026-08-17"
-    repeat_shift_val = plan_in.repeat_shift or "Standard working week"
     working_days = resolve_plan_working_days(
-        repeat_shift=repeat_shift_val,
         working_days=plan_in.working_days,
         frequency=None,
         date_str=date_val
@@ -193,7 +192,7 @@ async def create_manager_cleaning_plan(
         "date": date_val,
         "start_time": start_time_val,
         "end_time": end_time_val,
-        "repeat_shift": repeat_shift_val,
+        "repeat_shift": plan_in.repeat_shift,
         "repeat_until": repeat_until_val,
         "working_days": working_days,
         "duration_minutes": duration_minutes,
@@ -338,14 +337,8 @@ async def update_manager_cleaning_plan(
         update_fields["plan_name"] = update_fields["title"]
     if "working_days" in update_fields and isinstance(update_fields["working_days"], list):
         update_fields["working_days"] = [str(d).strip().lower() for d in update_fields["working_days"] if str(d).strip()]
-    elif "repeat_shift" in update_fields:
-        r_days = resolve_plan_working_days(
-            repeat_shift=update_fields["repeat_shift"],
-            working_days=None,
-            frequency=None,
-            date_str=update_fields.get("date", plan_doc.get("date"))
-        )
-        update_fields["working_days"] = r_days
+    # repeat_shift, if sent, is stored as-is (see update_fields above via model_dump)
+    # purely for display — it no longer derives working_days or affects recurrence.
     if "description" in update_fields:
         if "shift_notes" not in update_fields:
             update_fields["shift_notes"] = update_fields.pop("description")

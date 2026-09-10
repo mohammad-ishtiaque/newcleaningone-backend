@@ -14,6 +14,12 @@ def is_plan_active_on_date(plan_doc: dict, target_date_str: str) -> bool:
     Checks if a cleaning plan is active on target_date_str.
     Supports one-time plans (date == target_date_str) and recurring plans
     (date <= target_date_str <= repeat_until and target day of week in working_days).
+
+    Recurrence is driven entirely by `working_days` — a plan with no working_days
+    set is treated as one-time (active only on its own `date`); a plan with
+    working_days set recurs on those weekdays through `repeat_until`. The
+    `repeat_shift` field is NOT used here (kept on the document only for display;
+    it never determines aggregation/recurrence).
     """
     if not plan_doc.get("is_active", True) or plan_doc.get("status") == "cancelled":
         return False
@@ -22,9 +28,9 @@ def is_plan_active_on_date(plan_doc: dict, target_date_str: str) -> bool:
     if not plan_date:
         return False
 
-    repeat_type = str(plan_doc.get("repeat_shift") or "does_not_repeat").strip().lower()
+    working_days = [str(d).strip().lower() for d in (plan_doc.get("working_days") or [])]
 
-    if repeat_type in ["does_not_repeat", "none", "once", ""]:
+    if not working_days:
         return plan_date == target_date_str
 
     # Recurring plan check
@@ -41,13 +47,12 @@ def is_plan_active_on_date(plan_doc: dict, target_date_str: str) -> bool:
             if t_dt > u_dt:
                 return False
 
+        if plan_date == target_date_str:
+            return True
+
         # Check working days
         day_name = t_dt.strftime("%A").lower()  # e.g. "sunday"
         day_abbr = t_dt.strftime("%a").lower()  # e.g. "sun"
-        working_days = [str(d).strip().lower() for d in plan_doc.get("working_days", [])]
-
-        if not working_days or repeat_type in ["everyday", "daily"] or plan_date == target_date_str:
-            return True
 
         return any(
             d in [day_name, day_abbr] or d.startswith(day_abbr) or day_name.startswith(d)

@@ -136,9 +136,7 @@ async def get_cleaning_plan_worker_dropdown(
     plan_date_str = plan_doc.get("date", "")
     start_time_str = plan_doc.get("start_time", "08:00 AM")
     duration_minutes = plan_doc.get("duration_minutes", 60)
-    repeat_shift = plan_doc.get("repeat_shift", "Does not repeat")
     repeat_days = resolve_plan_working_days(
-        repeat_shift=repeat_shift,
         working_days=plan_doc.get("working_days"),
         frequency=plan_doc.get("frequency"),
         date_str=plan_date_str

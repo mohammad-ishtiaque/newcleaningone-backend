@@ -1194,7 +1194,10 @@ class ManagerCleaningPlanCreate(BaseModel):
     room_ids: List[str] = Field(default_factory=list, json_schema_extra={"example": ["room_a366ecf17c", "room_848a13ff0c"]})
     date: Optional[str] = Field(default="2026-08-17", json_schema_extra={"example": "2026-08-17"})
     start_time: Optional[str] = Field(default="08:00 AM", json_schema_extra={"example": "08:00 AM"})
-    repeat_shift: Optional[str] = Field(default="Standard working week", json_schema_extra={"example": "Monthly"})
+    # Display-only free text — no longer used to derive working_days or recurrence
+    # in any way (see is_plan_active_on_date / resolve_plan_working_days). Send
+    # `working_days` directly to control recurrence.
+    repeat_shift: Optional[str] = Field(default=None, json_schema_extra={"example": None})
     repeat_until: Optional[str] = Field(default="2026-12-31", json_schema_extra={"example": "2026-12-31"})
     working_days: Optional[List[str]] = Field(default=None, json_schema_extra={"example": ["sun"]})
     shift_notes: Optional[str] = Field(default="", json_schema_extra={"example": "Monthly Sunday deep cleaning"})
@@ -1220,7 +1223,6 @@ class ManagerCleaningPlanCreate(BaseModel):
                 ],
                 "date": "2026-08-17",
                 "start_time": "08:00 AM",
-                "repeat_shift": "Monthly",
                 "repeat_until": "2026-12-31",
                 "working_days": [
                     "sun"
@@ -1361,7 +1363,7 @@ class ManagerCleaningPlanDetailResponse(BaseModel):
     start_time: str = "08:00 AM"
     end_time: str = "01:30 PM"
     duration_minutes: int = 60
-    repeat_shift: str = "Does not repeat"
+    repeat_shift: Optional[str] = None
     repeat_until: Optional[str] = None
     working_days: List[str] = Field(default_factory=list)
     timezone: Optional[str] = "Europe/Amsterdam"
@@ -1387,7 +1389,7 @@ class ManagerCleaningPlanListItemResponse(BaseModel):
     start_time: str = "08:00 AM"
     end_time: str = "01:30 PM"
     duration_minutes: int = 60
-    repeat_shift: str = "Does not repeat"
+    repeat_shift: Optional[str] = None
     repeat_until: Optional[str] = None
     working_days: List[str] = Field(default_factory=list)
     timezone: Optional[str] = "Europe/Amsterdam"

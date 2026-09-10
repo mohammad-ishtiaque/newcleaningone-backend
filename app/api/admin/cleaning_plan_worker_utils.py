@@ -24,44 +24,25 @@ def resolve_plan_working_days(
     frequency: Optional[List[str]] = None,
     date_str: Optional[str] = None
 ) -> List[str]:
-    """Resolves correct working days based on repeat_shift or explicit days."""
-    # 1. If explicit working_days or frequency provided, prioritize it
-    if working_days:
-        cleaned = [str(d).strip().lower() for d in working_days if str(d).strip()]
-        if cleaned:
-            return cleaned
+    """
+    Resolves working days from explicit input only.
+
+    `repeat_shift` is accepted for backward compatibility with existing callers
+    but is intentionally ignored — it no longer drives working-day derivation or
+    any other aggregation. `working_days=[]` (explicitly empty) is respected as
+    a deliberate one-time plan and passed through unchanged (see
+    is_plan_active_on_date); only `working_days=None` (omitted entirely) falls
+    back to a sensible default (standard weekdays) for a recurring plan whose
+    days weren't specified.
+    """
+    if working_days is not None:
+        return [str(d).strip().lower() for d in working_days if str(d).strip()]
     if frequency:
         cleaned = [str(d).strip().lower() for d in frequency if str(d).strip()]
         if cleaned:
             return cleaned
 
-    # 2. Normalize repeat_shift string
-    norm_shift = str(repeat_shift or "standard working week").strip().lower().replace("-", "_").replace(" ", "_")
-
-    if norm_shift in ["everyday", "every_day", "daily", "all_days", "all_day"]:
-        return ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
-    elif norm_shift in ["standard_working_week", "standard_working_days", "weekday", "weekdays"]:
-        return ["mon", "tue", "wed", "thu", "fri"]
-    elif norm_shift in ["does_not_repeat", "once", "single", "none"]:
-        if date_str:
-            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
-                try:
-                    dt = datetime.strptime(date_str.strip(), fmt)
-                    return [dt.strftime("%a").lower()]
-                except Exception:
-                    pass
-        return ["mon"]
-    elif norm_shift in ["weekly", "monthly"]:
-        if date_str:
-            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
-                try:
-                    dt = datetime.strptime(date_str.strip(), fmt)
-                    return [dt.strftime("%a").lower()]
-                except Exception:
-                    pass
-        return ["sun"]
-    else:
-        return ["mon", "tue", "wed", "thu", "fri"]
+    return ["mon", "tue", "wed", "thu", "fri"]
 
 
 def parse_time_to_minutes(time_str: Optional[str]) -> int:

@@ -471,7 +471,7 @@ async def _format_manager_cleaning_plan_detail(doc: dict, db, current_user: Opti
     date_val = doc.get("date") or "2026-08-17"
     start_time_val = doc.get("start_time") or "08:00 AM"
     end_time_val = doc.get("end_time") or _calculate_end_time(start_time_val, dur_mins)
-    repeat_shift_val = doc.get("repeat_shift") or "Standard working week"
+    repeat_shift_val = doc.get("repeat_shift")
     repeat_until_val = doc.get("repeat_until")
 
     c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
@@ -571,7 +571,7 @@ async def _format_manager_cleaning_plan_list_item(doc: dict, db) -> ManagerClean
     date_val = doc.get("date") or "2026-08-17"
     start_time_val = doc.get("start_time") or "08:00 AM"
     end_time_val = doc.get("end_time") or _calculate_end_time(start_time_val, dur_mins)
-    repeat_shift_val = doc.get("repeat_shift") or "Standard working week"
+    repeat_shift_val = doc.get("repeat_shift")
     repeat_until_val = doc.get("repeat_until")
 
     c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
@@ -742,7 +742,7 @@ async def batch_format_manager_cleaning_plan_list_items(raw_plans: list, db) -> 
         date_val = doc.get("date") or "2026-08-17"
         start_time_val = doc.get("start_time") or "08:00 AM"
         end_time_val = doc.get("end_time") or _calculate_end_time(start_time_val, dur_mins)
-        repeat_shift_val = doc.get("repeat_shift") or "Standard working week"
+        repeat_shift_val = doc.get("repeat_shift")
         repeat_until_val = doc.get("repeat_until")
 
         c_at = doc.get("created_at") if isinstance(doc.get("created_at"), datetime) else datetime.now(timezone.utc)
