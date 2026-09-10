@@ -323,30 +323,39 @@ def calculate_cleaning_plan_progress(plan_doc: dict, approved_photos_count: Opti
     }
 
 
-def is_task_due_on_date(task: dict, target_date_str: str, past_completed_dates: set) -> bool:
-    """Checks whether a periodic task (weekly, biweekly, monthly) is due on the target date."""
-    freq = str(task.get("frequency_type", "every_visit")).lower()
+def is_task_due_on_date(task: dict, target_date_str: str) -> bool:
+    """
+    Checks whether a task is due on the target date, using the same rule as the
+    manager web roster (app/api/admin/roster.py's _task_applies_on_date): matched
+    against the task's own weekly_days/monthly_dates/fixed_date fields, not a
+    generic days-since-last-completion guess. Kept in this shared module so both
+    the manager roster and every worker-facing endpoint that materializes a shift
+    execution (roster, shifts list, checklist) apply the identical rule.
+
+    - every_visit (or unset): always due
+    - weekly: target date's weekday must be in task.weekly_days
+    - monthly: target date's day-of-month must be in task.monthly_dates
+    - fixed_date: target date must equal task.fixed_date exactly
+    """
+    freq = str(task.get("frequency_type") or "every_visit").strip().lower()
+    try:
+        t_dt = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+    except Exception:
+        return freq in ["every_visit", "daily", "always", ""]
+
     if freq in ["every_visit", "daily", "always", ""]:
         return True
-
-    try:
-        y, m, d = map(int, target_date_str.split("-"))
-        target_dt = datetime(y, m, d)
-    except Exception:
-        return True
-
-    interval_days = 7 if freq == "weekly" else (14 if freq == "biweekly" else (30 if freq == "monthly" else 90))
-
-    for p_date_str in past_completed_dates:
-        try:
-            py, pm, pd = map(int, p_date_str.split("-"))
-            p_dt = datetime(py, pm, pd)
-            diff = (target_dt - p_dt).days
-            if 0 <= diff < interval_days and p_dt < target_dt:
-                return False  # Already satisfied within frequency interval
-        except Exception:
-            pass
-    return True
+    elif freq == "weekly":
+        day_name = t_dt.strftime("%A").lower()
+        day_abbr = t_dt.strftime("%a").lower()
+        days = [str(d).strip().lower() for d in (task.get("weekly_days") or [])]
+        return any(d in [day_name, day_abbr] or d.startswith(day_abbr) or day_name.startswith(d) for d in days)
+    elif freq == "monthly":
+        dates = [int(d) for d in (task.get("monthly_dates") or []) if str(d).strip().lstrip("-").isdigit()]
+        return t_dt.day in dates
+    elif freq == "fixed_date":
+        return str(task.get("fixed_date") or "").strip() == target_date_str
+    return False
 
 
 async def get_or_create_shift_execution(plan_doc: dict, target_date_str: str, db) -> dict:
@@ -429,28 +438,6 @@ async def get_or_create_shift_execution(plan_doc: dict, target_date_str: str, db
             )
         return exec_doc
 
-    # Query past executions to track when periodic tasks were last completed
-    past_completed_task_history = {}
-    try:
-        past_cursor = db["shift_executions"].find({
-            "$or": [{"plan_id": plan_id}, {"cleaning_plan_id": plan_id}],
-            "date": {"$lt": target_date_str}
-        }).sort("date", -1)
-        past_execs = await past_cursor.to_list(length=40)
-        for pe in past_execs:
-            p_date = pe.get("date")
-            if not p_date:
-                continue
-            for pr in pe.get("rooms", []):
-                pr_id = str(pr.get("room_id") or pr.get("id") or "")
-                for pt in pr.get("tasks", []):
-                    pt_id = str(pt.get("id") or "")
-                    if pt.get("is_completed"):
-                        key = f"{pr_id}:{pt_id}"
-                        past_completed_task_history.setdefault(key, set()).add(p_date)
-    except Exception:
-        pass
-
     # Resolve rooms checklist from rooms collection
     embedded_rooms = plan_doc.get("rooms", [])
     room_ids = plan_doc.get("room_ids", [])
@@ -493,10 +480,8 @@ async def get_or_create_shift_execution(plan_doc: dict, target_date_str: str, db
 
         for t_idx, t in enumerate(raw_tasks):
             t_id = str(t.get("id") or f"task_{t_idx+1}")
-            hist_key = f"{rid}:{t_id}"
-            past_dates = past_completed_task_history.get(hist_key, set())
 
-            if not is_task_due_on_date(t, target_date_str, past_dates):
+            if not is_task_due_on_date(t, target_date_str):
                 continue  # Task is not due today based on frequency
 
             task_photos = t.get("photo") or []

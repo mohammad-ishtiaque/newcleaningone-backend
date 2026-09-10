@@ -26,7 +26,7 @@ roster_mgmt_router.include_router(roster_drafts_dropdowns_router)
 def _task_applies_on_date(task: CleaningTaskResponse, target_date_str: str) -> bool:
     """
     Matches a room task's frequency_type against one specific roster date:
-    - every_visit (or unset): always applies
+    - every_visit / daily / always / unset: always applies
     - weekly: task.weekly_days must contain this date's weekday (abbr or full name)
     - monthly: task.monthly_dates must contain this date's day-of-month
     - fixed_date: task.fixed_date must equal this exact date
@@ -35,9 +35,9 @@ def _task_applies_on_date(task: CleaningTaskResponse, target_date_str: str) -> b
     try:
         t_dt = datetime.strptime(target_date_str, "%Y-%m-%d").date()
     except Exception:
-        return freq == "every_visit"
+        return freq in ["every_visit", "daily", "always", ""]
 
-    if freq == "every_visit":
+    if freq in ["every_visit", "daily", "always", ""]:
         return True
     elif freq == "weekly":
         day_name = t_dt.strftime("%A").lower()
